@@ -31,6 +31,36 @@ func (s *Store) WorktreeForWorkItem(ctx context.Context, projectID, workItemID s
 	return record, err
 }
 
+// WorktreesForCleanup returns ACTIVE worktrees whose work item reached a
+// terminal status, i.e. safe garbage-collection candidates.
+func (s *Store) WorktreesForCleanup(ctx context.Context, projectID string) ([]WorktreeRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT w.project_id,w.work_item_id,w.path,w.branch,w.base_commit,w.status FROM worktrees w JOIN work_items i ON i.id=w.work_item_id WHERE w.project_id=? AND w.status='ACTIVE' AND i.status IN ('DONE','DISCARDED') ORDER BY w.work_item_id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []WorktreeRecord
+	for rows.Next() {
+		var record WorktreeRecord
+		if err = rows.Scan(&record.ProjectID, &record.WorkItemID, &record.Path, &record.Branch, &record.BaseCommit, &record.Status); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) MarkWorktreeRemoved(ctx context.Context, projectID, workItemID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE worktrees SET status='REMOVED',updated_at=? WHERE project_id=? AND work_item_id=? AND status='ACTIVE'`, time.Now().UTC().Format(time.RFC3339Nano), projectID, workItemID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) LatestRunFileChangesForWork(ctx context.Context, projectID, workItemID string) ([]gitops.FileChange, error) {
 	var runID string
 	err := s.db.QueryRowContext(ctx, `SELECT id FROM runs WHERE project_id=? AND work_item_id=? ORDER BY started_at DESC,id DESC LIMIT 1`, projectID, workItemID).Scan(&runID)

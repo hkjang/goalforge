@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/goalforge/goalforge/internal/audit"
+	"github.com/goalforge/goalforge/internal/notify"
 )
 
 type Checkpoint struct {
@@ -328,6 +329,7 @@ func (s *Store) EnterQuotaWait(ctx context.Context, q QuotaWindow, c Checkpoint,
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	_ = notify.Post(ctx, notify.Event{Project: c.ProjectID, State: "WAITING_QUOTA", Reason: "quota exhausted; resume scheduled at " + j.RunAt.UTC().Format(time.RFC3339)})
 	return s.writeContinuity(c)
 }
 
@@ -366,7 +368,11 @@ func (s *Store) BlockBeforeRun(ctx context.Context, projectID, workItemID string
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project cannot be blocked before run from current state")
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	_ = notify.Post(ctx, notify.Event{Project: projectID, State: "BLOCKED", Reason: reason})
+	return nil
 }
 
 func (s *Store) DeferWorkForQuotaWarning(ctx context.Context, projectID, workItemID string, q QuotaWindow) error {

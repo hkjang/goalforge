@@ -83,6 +83,12 @@ Additional release blockers from the numbered requirements:
   provider session (`InvalidateSession`) and block only at twice the
   threshold; `RecoverFailedProject` returns FAILED projects and stuck work
   items to a runnable state so deliberate retries actually run.
+- Worktree GC: `goalforge worktree gc [--force]` removes worktrees of
+  DONE/DISCARDED work items (branches kept, dirty trees skipped unless
+  forced) and marks them REMOVED in the store.
+- Notifications: when `GOALFORGE_WEBHOOK_URL` is set, WAITING_QUOTA,
+  BLOCKED (loop or pre-run), and COMPLETED transitions post a best-effort,
+  secret-redacted, Slack-compatible JSON payload.
 
 The active goal must remain open until every required row is `PASS` or the
 scope is explicitly revised by the user.

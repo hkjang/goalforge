@@ -8,6 +8,7 @@ import (
 
 	"github.com/goalforge/goalforge/internal/audit"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/notify"
 )
 
 type VerificationRecord struct {
@@ -118,5 +119,11 @@ func (s *Store) FinalizeCheckpoint(ctx context.Context, projectID, goalID string
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project is not checkpointing")
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if complete {
+		_ = notify.Post(ctx, notify.Event{Project: projectID, State: "COMPLETED", Reason: "all completion criteria satisfied"})
+	}
+	return nil
 }

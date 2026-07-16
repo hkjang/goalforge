@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/notify"
 )
 
 func (s *Store) CreateScoredIdea(ctx context.Context, w model.WorkItem, score model.IdeaScore) (model.WorkItem, error) {
@@ -76,6 +77,7 @@ func (s *Store) BlockProjectForLoop(ctx context.Context, projectID string) error
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 1 {
+		_ = notify.Post(ctx, notify.Event{Project: projectID, State: "BLOCKED", Reason: "repeated loop signals require user review"})
 		return nil
 	}
 	var state string

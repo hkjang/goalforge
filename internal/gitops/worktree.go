@@ -45,6 +45,53 @@ func EnsureWorktree(ctx context.Context, repository, projectID, workItemID strin
 	return Worktree{Path: path, Branch: branch, BaseCommit: base}, nil
 }
 
+// ErrWorktreeDirty means a worktree still holds uncommitted changes and was
+// left in place; pass force to discard them.
+var ErrWorktreeDirty = errors.New("worktree has uncommitted changes")
+
+// RemoveWorktree detaches worktree from repository and prunes its metadata.
+// The branch is kept so committed work stays reachable. Without force a
+// dirty tree is refused with ErrWorktreeDirty.
+func RemoveWorktree(ctx context.Context, repository string, worktree Worktree, force bool) error {
+	if repository == "" || worktree.Path == "" || worktree.Branch == "" {
+		return errors.New("repository, worktree path, and branch are required")
+	}
+	if _, statErr := os.Stat(worktree.Path); statErr == nil {
+		branch, err := gitOutput(ctx, worktree.Path, "branch", "--show-current")
+		if err != nil {
+			return err
+		}
+		if branch != worktree.Branch {
+			return fmt.Errorf("worktree branch changed: expected %s current %s", worktree.Branch, branch)
+		}
+		if !force {
+			status, err := gitOutput(ctx, worktree.Path, "status", "--porcelain")
+			if err != nil {
+				return err
+			}
+			if status != "" {
+				return fmt.Errorf("%w: %s", ErrWorktreeDirty, worktree.Path)
+			}
+		}
+		args := []string{"worktree", "remove"}
+		if force {
+			args = append(args, "--force")
+		}
+		args = append(args, worktree.Path)
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repository}, args...)...)
+		if output, removeErr := cmd.CombinedOutput(); removeErr != nil {
+			return fmt.Errorf("remove worktree: %w: %s", removeErr, strings.TrimSpace(string(output)))
+		}
+	} else if !os.IsNotExist(statErr) {
+		return statErr
+	}
+	prune := exec.CommandContext(ctx, "git", "-C", repository, "worktree", "prune")
+	if output, pruneErr := prune.CombinedOutput(); pruneErr != nil {
+		return fmt.Errorf("prune worktrees: %w: %s", pruneErr, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 func gitOutput(ctx context.Context, repository string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repository}, args...)...)
 	output, err := cmd.Output()

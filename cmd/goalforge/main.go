@@ -138,6 +138,10 @@ func run(ctx context.Context, args []string) error {
 		return pauseExecution(ctx, s)
 	case "resume":
 		return resumePaused(ctx, s)
+	case "worktree":
+		if len(args) > 1 && args[1] == "gc" {
+			return worktreeGC(ctx, s, args[2:])
+		}
 	case "rollback":
 		return rollbackWork(ctx, s, args[1:])
 	case "approval":
@@ -175,7 +179,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|cancel|approval request|approval approve ID|worker [--once]|serve")
+	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|cancel|approval request|approval approve ID|worker [--once]|serve")
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -232,6 +236,44 @@ func projectRuntime(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	fmt.Printf("runtime policy set: turn_timeout=%s run_timeout=%s\n", policy.TurnTimeout, policy.RunTimeout)
+	return nil
+}
+
+func worktreeGC(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("worktree gc", flag.ContinueOnError)
+	force := f.Bool("force", false, "also remove worktrees with uncommitted changes")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	project, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	candidates, err := s.WorktreesForCleanup(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		fmt.Println("no completed or discarded worktrees to clean up")
+		return nil
+	}
+	removed := 0
+	for _, record := range candidates {
+		worktree := gitops.Worktree{Path: record.Path, Branch: record.Branch, BaseCommit: record.BaseCommit}
+		if removeErr := gitops.RemoveWorktree(ctx, project.RepositoryPath, worktree, *force); removeErr != nil {
+			if errors.Is(removeErr, gitops.ErrWorktreeDirty) {
+				fmt.Printf("skipped\t%s\t%s (uncommitted changes; rerun with --force to discard)\n", record.WorkItemID, record.Path)
+				continue
+			}
+			return removeErr
+		}
+		if markErr := s.MarkWorktreeRemoved(ctx, project.ID, record.WorkItemID); markErr != nil {
+			return markErr
+		}
+		fmt.Printf("removed\t%s\t%s (branch %s kept)\n", record.WorkItemID, record.Path, record.Branch)
+		removed++
+	}
+	fmt.Printf("worktree gc: removed %d of %d candidates\n", removed, len(candidates))
 	return nil
 }
 
