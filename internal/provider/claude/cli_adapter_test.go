@@ -2,21 +2,18 @@ package claude
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/goalforge/goalforge/internal/provider"
+	"github.com/goalforge/goalforge/internal/testscript"
 )
 
 func TestAdapterResumeInvocation(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
-	body := "#!/bin/sh\nprintf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\"}\\n' \"$*\"\ncat >/dev/null\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	script := testscript.Write(t, dir, "claude",
+		"printf '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%s\"}\\n' \"$*\"\ncat >/dev/null",
+		"set args=%*\nset args=%args:\\=/%\necho {\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"%args%\"}\nmore > nul")
 	a := New(script)
 	events, err := a.Resume(context.Background(), "ses_old", provider.RunRequest{RunID: "run-1", Prompt: "continue", WorkDir: dir, Model: "sonnet-test"})
 	if err != nil {
@@ -36,9 +33,9 @@ func TestAdapterResumeInvocation(t *testing.T) {
 
 func TestAdapterCapturesStopFailureAndExposesQuota(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "claude")
-	body := strings.Join([]string{
-		"#!/bin/sh",
+	stopFailure := `{"session_id":"s1","hook_event_name":"StopFailure","error":"rate_limit","error_details":"retry in 2 hours","last_assistant_message":"API Error: Rate limit reached"}`
+	result := `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"s1","errors":["rate limit"]}`
+	posix := strings.Join([]string{
 		"settings=\"\"",
 		"previous=\"\"",
 		"for arg in \"$@\"; do",
@@ -46,13 +43,22 @@ func TestAdapterCapturesStopFailureAndExposesQuota(t *testing.T) {
 		"  previous=\"$arg\"",
 		"done",
 		"capture=\"$(dirname \"$settings\")/stop-failure.jsonl\"",
-		"printf '%s\\n' '{\"session_id\":\"s1\",\"hook_event_name\":\"StopFailure\",\"error\":\"rate_limit\",\"error_details\":\"retry in 2 hours\",\"last_assistant_message\":\"API Error: Rate limit reached\"}' > \"$capture\"",
-		"printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"session_id\":\"s1\",\"errors\":[\"rate limit\"]}'",
-		"",
+		"printf '%s\\n' '" + stopFailure + "' > \"$capture\"",
+		"printf '%s\\n' '" + result + "'",
 	}, "\n")
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	windows := strings.Join([]string{
+		"setlocal enabledelayedexpansion",
+		"set prev=",
+		"set settings=",
+		"for %%a in (%*) do (",
+		"  if \"!prev!\"==\"--settings\" set \"settings=%%~a\"",
+		"  set \"prev=%%~a\"",
+		")",
+		"for %%f in (\"!settings!\") do set \"capdir=%%~dpf\"",
+		">\"!capdir!stop-failure.jsonl\" echo " + stopFailure,
+		"echo " + result,
+	}, "\n")
+	script := testscript.Write(t, dir, "claude", posix, windows)
 	a := New(script)
 	events, err := a.Start(context.Background(), provider.RunRequest{RunID: "run-1", Prompt: "work", WorkDir: dir})
 	if err != nil {

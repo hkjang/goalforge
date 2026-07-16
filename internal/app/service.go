@@ -75,7 +75,7 @@ func (s *Service) Ideas(ctx context.Context, project model.Project) (result Idea
 	}
 	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{
 		RunID: runID, Prompt: prompt.Ideas(goal, existing), OutputSchema: prompt.IdeasSchema(),
-		PromptTemplate: "idea_discovery", Project: project, ReadOnlyTask: true, Isolated: true,
+		PromptTemplate: "idea_discovery", TaskType: model.TaskDiscoverIdeas, Project: project, ReadOnlyTask: true, Isolated: true,
 	})
 	if err != nil {
 		return result, err
@@ -152,7 +152,7 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 	if err != nil {
 		return result, err
 	}
-	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.Checkpoint.WorkItemID, Prompt: orchestrator.BuildResumePrompt(result.Checkpoint), PromptTemplate: "checkpoint_resume", Project: project, WorkspaceWrite: true})
+	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.Checkpoint.WorkItemID, Prompt: orchestrator.BuildResumePrompt(result.Checkpoint), PromptTemplate: "checkpoint_resume", TaskType: model.TaskContinueGoal, Project: project, WorkspaceWrite: true})
 	auditErr := s.recordWorkspaceChanges(ctx, project.RepositoryPath, runID, workspaceBefore)
 	if err != nil || auditErr != nil {
 		return result, errors.Join(err, auditErr)
@@ -162,7 +162,18 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 	}
 	result.Verification, err = s.verification.Verify(ctx, result.Run.RunID, project, verificationGates)
 	if err == nil {
-		err = s.recordVerificationLoop(ctx, project.ID, result.Checkpoint.WorkItemID, result.Run.RunID, result.Verification)
+		resumeChanges, changesErr := s.store.ListRunFileChanges(ctx, result.Run.RunID)
+		if changesErr != nil {
+			return result, changesErr
+		}
+		err = s.recordVerificationLoop(ctx, project.ID, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
+	}
+	if err == nil && result.Verification.Passed && project.AutoCommitEnabled && result.Checkpoint.WorkItemID != "" {
+		goal, goalErr := s.store.CurrentGoal(ctx, project.ID)
+		if goalErr != nil {
+			return result, goalErr
+		}
+		err = s.commitVerifiedRun(ctx, project, project.RepositoryPath, goal.ID, result.Checkpoint.WorkItemID, "", result.Run.RunID)
 	}
 	return result, err
 }
@@ -182,7 +193,18 @@ func requiredGates(gates []store.GateConfig) ([]verification.Gate, error) {
 	}
 	return result, nil
 }
-func (s *Service) Continue(ctx context.Context, project model.Project) (result ContinueResult, err error) {
+
+// Continue performs the highest-priority executable work item (CONTINUE_GOAL).
+func (s *Service) Continue(ctx context.Context, project model.Project) (ContinueResult, error) {
+	return s.executeNext(ctx, project, model.TaskContinueGoal)
+}
+
+// Develop implements the approved or highest-scored idea (IMPLEMENT_SELECTED).
+func (s *Service) Develop(ctx context.Context, project model.Project) (ContinueResult, error) {
+	return s.executeNext(ctx, project, model.TaskImplementSelected)
+}
+
+func (s *Service) executeNext(ctx context.Context, project model.Project, taskType string) (result ContinueResult, err error) {
 	runID := s.newRunID()
 	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
 		return result, err
@@ -258,7 +280,7 @@ func (s *Service) Continue(ctx context.Context, project model.Project) (result C
 		return result, fmt.Errorf("capture workspace audit snapshot: %w", err)
 	}
 	rendered := prompt.Execution(goal, result.WorkItem, prompt.Budget{TokenLimit: budget.TokenLimit, TokensUsed: budget.TokensUsed, CostLimitUSD: budget.CostLimitUSD, CostUsedUSD: budget.CostUsedUSD})
-	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.WorkItem.ID, Prompt: rendered, PromptTemplate: "work_item_execution", Project: executionProject, WorkspaceWrite: true, EstimatedTokens: result.WorkItem.EstimatedTokens})
+	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.WorkItem.ID, Prompt: rendered, PromptTemplate: "work_item_execution", TaskType: taskType, Project: executionProject, WorkspaceWrite: true, EstimatedTokens: result.WorkItem.EstimatedTokens})
 	auditErr := s.recordWorkspaceChanges(ctx, executionProject.RepositoryPath, runID, workspaceBefore)
 	if err != nil || auditErr != nil {
 		return result, errors.Join(err, auditErr)
@@ -283,9 +305,26 @@ func (s *Service) Continue(ctx context.Context, project model.Project) (result C
 	}
 	result.Verification, err = s.verification.Verify(ctx, result.Run.RunID, executionProject, verificationGates)
 	if err == nil {
-		err = s.recordVerificationLoop(ctx, project.ID, result.WorkItem.ID, result.Run.RunID, result.Verification)
+		err = s.recordVerificationLoop(ctx, project.ID, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
+	}
+	if err == nil && result.Verification.Passed && project.AutoCommitEnabled {
+		err = s.commitVerifiedRun(ctx, project, executionProject.RepositoryPath, goal.ID, result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID)
 	}
 	return result, err
+}
+
+// commitVerifiedRun commits a verified run's changes with Goal/Work/Run
+// trailers (GIT-009). It only runs after verification passes (GIT-008) and
+// records the resulting commit for audit.
+func (s *Service) commitVerifiedRun(ctx context.Context, project model.Project, repository, goalID, workItemID, title, runID string) error {
+	commit, err := gitops.CommitVerified(ctx, repository, project.DefaultBranch, goalID, workItemID, runID, title)
+	if err != nil {
+		return fmt.Errorf("commit verified run: %w", err)
+	}
+	if commit.CommitSHA == "" {
+		return nil
+	}
+	return s.store.RecordRunCommit(ctx, store.RunCommit{RunID: runID, ProjectID: project.ID, GoalID: goalID, WorkItemID: workItemID, CommitSHA: commit.CommitSHA, Branch: commit.Branch, FilesCommitted: commit.FilesCommitted})
 }
 
 func (s *Service) recordWorkspaceChanges(ctx context.Context, repository, runID string, before gitops.WorkspaceSnapshot) error {
@@ -299,7 +338,12 @@ func (s *Service) recordWorkspaceChanges(ctx context.Context, repository, runID 
 	return nil
 }
 
-func (s *Service) recordVerificationLoop(ctx context.Context, projectID, workItemID, runID string, report verification.Report) error {
+// recordVerificationLoop feeds the loop guard after a failed verification:
+// same_error fingerprints identical gate output (LOOP-004), same_work counts
+// repeated failing runs on one item (LOOP-002), no_change catches completion
+// claims without any file change (LOOP-005), and same_change catches runs
+// that keep producing an identical change set (LOOP-003).
+func (s *Service) recordVerificationLoop(ctx context.Context, projectID, workItemID, runID string, changes []gitops.FileChange, report verification.Report) error {
 	if report.Passed {
 		return nil
 	}
@@ -313,7 +357,24 @@ func (s *Service) recordVerificationLoop(ctx context.Context, projectID, workIte
 		return nil
 	}
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(failed, "\x00"))))
-	_, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "same_error", fingerprint, runID)
+	if _, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "same_error", fingerprint, runID); err != nil {
+		return err
+	}
+	if workItemID != "" {
+		if _, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "same_work", workItemID, runID); err != nil {
+			return err
+		}
+	}
+	if len(changes) == 0 {
+		_, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "no_change", "no-change:"+workItemID, runID)
+		return err
+	}
+	var parts []string
+	for _, change := range changes {
+		parts = append(parts, change.Path+"\x00"+change.ChangeType+"\x00"+change.AfterHash)
+	}
+	changeFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
+	_, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "same_change", changeFingerprint, runID)
 	return err
 }
 

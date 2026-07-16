@@ -2,21 +2,18 @@ package codex
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/goalforge/goalforge/internal/provider"
+	"github.com/goalforge/goalforge/internal/testscript"
 )
 
 func TestAdapterResumeInvocation(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "codex")
-	body := "#!/bin/sh\nprintf '{\"type\":\"thread.started\",\"thread_id\":\"%s\"}\\n' \"$*\"\ncat >/dev/null\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	script := testscript.Write(t, dir, "codex",
+		"printf '{\"type\":\"thread.started\",\"thread_id\":\"%s\"}\\n' \"$*\"\ncat >/dev/null",
+		"set args=%*\nset args=%args:\\=/%\necho {\"type\":\"thread.started\",\"thread_id\":\"%args%\"}\nmore > nul")
 	a := New(script)
 	events, err := a.Resume(context.Background(), "thr_old", provider.RunRequest{RunID: "run-1", Prompt: "continue", WorkDir: dir, Model: "gpt-test"})
 	if err != nil {

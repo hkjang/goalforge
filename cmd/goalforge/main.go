@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -113,8 +114,10 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 2 && args[1] == "gate" && args[2] == "add" {
 			return gateAdd(ctx, s, args[3:])
 		}
-	case "continue", "develop":
-		return continueGoal(ctx, s)
+	case "continue":
+		return continueGoal(ctx, s, false)
+	case "develop":
+		return continueGoal(ctx, s, true)
 	case "ideas":
 		return ideasGoal(ctx, s)
 	case "usage":
@@ -302,6 +305,7 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	defer cleanup()
+	failures := 0
 	for index := 0; index < *maxRuns; index++ {
 		project, err = s.ProjectByID(ctx, project.ID)
 		if err != nil {
@@ -317,8 +321,23 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 			return nil
 		}
 		if runErr != nil {
-			return runErr
+			failures++
+			kind := policy.ClassifyFailure(runErr, "")
+			decision := policy.DecideRetry(kind, failures, 3, nil, rand.Float64)
+			if decision.Action == policy.WaitQuotaReset {
+				fmt.Printf("quota exhausted (%s); stopping until reset\n", kind)
+				return runErr
+			}
+			if decision.Action != policy.RetryAfterDelay {
+				return fmt.Errorf("%s: %w", decision.Reason, runErr)
+			}
+			fmt.Printf("retryable failure (%s): %v; retrying in %s\n", kind, runErr, decision.Delay.Round(time.Second))
+			if waitErr := policy.WaitForRetry(ctx, decision); waitErr != nil {
+				return errors.Join(runErr, waitErr)
+			}
+			continue
 		}
+		failures = 0
 		fmt.Printf("run %d: work=%s state=%s verified=%t progress=%.1f%%\n", index+1, result.WorkItem.ID, result.Run.State, result.Verification.Passed, result.Verification.Progress)
 		if result.Verification.GoalCompleted {
 			return nil
@@ -636,7 +655,7 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	return nil
 }
 
-func continueGoal(ctx context.Context, s *store.Store) error {
+func continueGoal(ctx context.Context, s *store.Store, developSelected bool) error {
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return err
@@ -646,7 +665,11 @@ func continueGoal(ctx context.Context, s *store.Store) error {
 		return err
 	}
 	defer cleanup()
-	result, err := service.Continue(ctx, p)
+	execute := service.Continue
+	if developSelected {
+		execute = service.Develop
+	}
+	result, err := execute(ctx, p)
 	if err != nil {
 		return err
 	}
@@ -843,6 +866,7 @@ func projectInit(ctx context.Context, s *store.Store, args []string) error {
 	provider := f.String("provider", "codex", "provider")
 	modelName := f.String("model", "", "model")
 	worktreeEnabled := f.Bool("worktrees", false, "run each work item in a dedicated Git worktree")
+	autoCommit := f.Bool("auto-commit", false, "commit verified changes with Goal/Work-Item trailers after gates pass")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -866,7 +890,7 @@ func projectInit(ctx context.Context, s *store.Store, args []string) error {
 			*branch = "main"
 		}
 	}
-	p := model.Project{Name: *name, RepositoryPath: abs, DefaultBranch: *branch, Provider: *provider, Model: *modelName, WorktreeEnabled: *worktreeEnabled}
+	p := model.Project{Name: *name, RepositoryPath: abs, DefaultBranch: *branch, Provider: *provider, Model: *modelName, WorktreeEnabled: *worktreeEnabled, AutoCommitEnabled: *autoCommit}
 	if err = s.CreateProject(ctx, p); err != nil {
 		return err
 	}

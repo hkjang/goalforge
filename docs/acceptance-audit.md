@@ -46,6 +46,22 @@ Additional release blockers from the numbered requirements:
   implemented. PostgreSQL now has versioned scheduler/lease migrations,
   `SKIP LOCKED` job claims, lease recovery, and a migration command; moving all
   authoritative project tables off SQLite remains operational work.
+- GIT-009: projects can opt into `--auto-commit`; verified runs are committed
+  with `Goal-ID`/`Work-Item-ID`/`Run-ID` trailers under a distinct GoalForge
+  author, never on the protected default branch, and recorded in `run_commits`.
+- Section 6.7: a per-error-type retry matrix (`policy.ClassifyFailure` /
+  `DecideRetry`) with the 30s→1m→2m→5m→10m jittered backoff ladder drives
+  `run --until-quota`; account-quota exhaustion never backs off, auth/git
+  conflicts block for the user.
+- Section 5.2: runs now persist a named task type (`DISCOVER_IDEAS`,
+  `IMPLEMENT_SELECTED`, `CONTINUE_GOAL`, ...) in `runs.task_type`; `develop`
+  and `continue` map to distinct types.
+- LOOP-002/003/005: `same_work`, `same_change`, and `no_change` loop signals
+  are wired from the verification path alongside `same_error`.
+- The test suite and providers run on both Unix and Windows: process-group
+  control is platform-split in `internal/procctl`, fake CLI fixtures come from
+  `internal/testscript`, and the Claude StopFailure hook uses `sh`-portable
+  paths.
 
 The active goal must remain open until every required row is `PASS` or the
 scope is explicitly revised by the user.

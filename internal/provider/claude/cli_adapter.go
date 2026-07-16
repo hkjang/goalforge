@@ -90,12 +90,17 @@ func (a *Adapter) runWithStopFailure(ctx context.Context, request provider.RunRe
 	capture := filepath.Join(directory, "stop-failure.jsonl")
 	script := filepath.Join(directory, "capture-stop-failure.sh")
 	settings := filepath.Join(directory, "settings.json")
-	scriptBody := "#!/bin/sh\numask 077\ncat >> " + shellQuote(capture) + "\nprintf '\\n' >> " + shellQuote(capture) + "\n"
+	// The script runs under sh even on Windows (Claude Code ships with Git
+	// Bash there), so paths are normalized to forward slashes and the hook
+	// command uses double quotes, which cmd and sh both accept.
+	capturePath := shellQuote(filepath.ToSlash(capture))
+	scriptBody := "#!/bin/sh\numask 077\ncat >> " + capturePath + "\nprintf '\\n' >> " + capturePath + "\n"
 	if err = os.WriteFile(script, []byte(scriptBody), 0o700); err != nil {
 		cleanup()
 		return nil, err
 	}
-	configuration := map[string]any{"hooks": map[string]any{"StopFailure": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": shellQuote(script), "timeout": 5}}}}}}
+	hookCommand := "sh \"" + filepath.ToSlash(script) + "\""
+	configuration := map[string]any{"hooks": map[string]any{"StopFailure": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hookCommand, "timeout": 5}}}}}}
 	rawSettings, _ := json.Marshal(configuration)
 	if err = os.WriteFile(settings, rawSettings, 0o600); err != nil {
 		cleanup()

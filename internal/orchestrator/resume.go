@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/goalforge/goalforge/internal/gitops"
+	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/provider"
 	"github.com/goalforge/goalforge/internal/scheduler"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
@@ -133,7 +134,7 @@ func (o *Orchestrator) ResumeHandler(config ResumeConfig) scheduler.Handler {
 			return out, err
 		}
 		prompt := BuildResumePrompt(checkpoint)
-		_, err = o.Run(ctx, Request{RunID: config.NewRunID(), WorkItemID: checkpoint.WorkItemID, Prompt: prompt, PromptTemplate: "quota_resume", Project: project, WorkspaceWrite: true})
+		_, err = o.Run(ctx, Request{RunID: config.NewRunID(), WorkItemID: checkpoint.WorkItemID, Prompt: prompt, PromptTemplate: "quota_resume", TaskType: model.TaskContinueGoal, Project: project, WorkspaceWrite: true})
 		return out, err
 	}
 }

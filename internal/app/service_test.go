@@ -18,6 +18,7 @@ import (
 	"github.com/goalforge/goalforge/internal/planner"
 	"github.com/goalforge/goalforge/internal/provider"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
+	"github.com/goalforge/goalforge/internal/testscript"
 	"github.com/goalforge/goalforge/internal/verification"
 )
 
@@ -111,11 +112,8 @@ func TestContinueSelectsRunsAndVerifiesOneWorkItem(t *testing.T) {
 	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature", Priority: 10, ChangeScope: "generated.go"}); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(root, "verify")
-	if err = os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "goalforge@example.invalid"}, {"config", "user.name", "GoalForge Test"}, {"add", "verify"}, {"commit", "-m", "verification fixture"}} {
+	script := testscript.Write(t, root, "verify", "exit 0", "exit /b 0")
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "goalforge@example.invalid"}, {"config", "user.name", "GoalForge Test"}, {"add", filepath.Base(script)}, {"commit", "-m", "verification fixture"}} {
 		if output, gitErr := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); gitErr != nil {
 			t.Fatalf("git %v: %v: %s", args, gitErr, output)
 		}
@@ -160,6 +158,73 @@ func TestContinueSelectsRunsAndVerifiesOneWorkItem(t *testing.T) {
 	}
 }
 
+func TestContinueAutoCommitsVerifiedWorkWithTrailers(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := model.Project{ID: "P1", Name: "demo", RepositoryPath: root, DefaultBranch: "main", Provider: "fake", AutoCommitEnabled: true}
+	if err = db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := db.SetGoal(ctx, project.ID, "ship", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature", Priority: 10, ChangeScope: "generated.go"}); err != nil {
+		t.Fatal(err)
+	}
+	script := testscript.Write(t, root, "verify", "exit 0", "exit /b 0")
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "goalforge@example.invalid"}, {"config", "user.name", "GoalForge Test"}, {"add", filepath.Base(script)}, {"commit", "-m", "verification fixture"}} {
+		if output, gitErr := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); gitErr != nil {
+			t.Fatalf("git %v: %v: %s", args, gitErr, output)
+		}
+	}
+	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed", Command: []string{script}, Timeout: time.Second, Required: true}); err != nil {
+		t.Fatal(err)
+	}
+	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
+	fake := &fakeProvider{onStart: func(request provider.RunRequest) {
+		if writeErr := os.WriteFile(filepath.Join(request.WorkDir, "generated.go"), []byte("package generated\n"), 0o600); writeErr != nil {
+			t.Fatalf("provider write: %v", writeErr)
+		}
+	}}
+	runner, _ := orchestrator.New(db, fake)
+	verify, _ := verification.New(db, 1024)
+	service, _ := New(db, plannerService, runner, verify, func() string { return "RUN-AC" })
+	result, err := service.Continue(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Verification.Passed {
+		t.Fatalf("result=%+v", result)
+	}
+	recorded, err := db.RunCommitByRun(ctx, "RUN-AC")
+	if err != nil || recorded.CommitSHA == "" || recorded.GoalID != goal.ID || recorded.WorkItemID != "W1" || recorded.FilesCommitted != 1 {
+		t.Fatalf("recorded=%+v err=%v", recorded, err)
+	}
+	worktree, err := db.WorktreeForWorkItem(ctx, project.ID, "W1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := exec.Command("git", "-C", worktree.Path, "log", "-1", "--format=%B").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"feature", "Goal-ID: " + goal.ID, "Work-Item-ID: W1", "Run-ID: RUN-AC"} {
+		if !strings.Contains(string(message), expected) {
+			t.Fatalf("missing %q in commit message %q", expected, message)
+		}
+	}
+	status, err := exec.Command("git", "-C", worktree.Path, "status", "--porcelain").Output()
+	if err != nil || strings.TrimSpace(string(status)) != "" {
+		t.Fatalf("worktree not clean after auto-commit: %q err=%v", status, err)
+	}
+}
+
 func TestContinueBlocksAfterRepeatedIdenticalVerificationFailure(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -176,18 +241,22 @@ func TestContinueBlocksAfterRepeatedIdenticalVerificationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-LOOP", GoalID: goal.ID, Type: "IMPLEMENT", Title: "repair", Priority: 10}); err != nil {
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-LOOP", GoalID: goal.ID, Type: "IMPLEMENT", Title: "repair", Priority: 10, ChangeScope: "attempt.txt"}); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(root, "verify")
-	if err = os.WriteFile(script, []byte("#!/bin/sh\necho stable-failure\nexit 1\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	script := testscript.Write(t, root, "verify", "echo stable-failure\nexit 1", "echo stable-failure\nexit /b 1")
 	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed", Command: []string{script}, Timeout: time.Second, Required: true}); err != nil {
 		t.Fatal(err)
 	}
 	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
-	runner, _ := orchestrator.New(db, &fakeProvider{})
+	// Distinct file content per run keeps no_change and same_change quiet so
+	// this test isolates the same_error fingerprint path.
+	attempt := 0
+	fake := &fakeProvider{onStart: func(request provider.RunRequest) {
+		attempt++
+		_ = os.WriteFile(filepath.Join(request.WorkDir, "attempt.txt"), []byte(fmt.Sprintf("attempt %d", attempt)), 0o600)
+	}}
+	runner, _ := orchestrator.New(db, fake)
 	verify, _ := verification.New(db, 1024)
 	run := 0
 	service, _ := New(db, plannerService, runner, verify, func() string {
@@ -212,6 +281,60 @@ func TestContinueBlocksAfterRepeatedIdenticalVerificationFailure(t *testing.T) {
 	}
 }
 
+func TestContinueBlocksAfterRepeatedNoChangeFailures(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := model.Project{ID: "P-NOCHANGE", Name: "nochange", RepositoryPath: root, DefaultBranch: "main", Provider: "fake"}
+	if err = db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := db.SetGoal(ctx, project.ID, "ship", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-NC", GoalID: goal.ID, Type: "IMPLEMENT", Title: "repair", Priority: 10}); err != nil {
+		t.Fatal(err)
+	}
+	script := testscript.Write(t, root, "verify", "echo broken\nexit 1", "echo broken\nexit /b 1")
+	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed", Command: []string{script}, Timeout: time.Second, Required: true}); err != nil {
+		t.Fatal(err)
+	}
+	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
+	runner, _ := orchestrator.New(db, &fakeProvider{})
+	verify, _ := verification.New(db, 1024)
+	run := 0
+	service, _ := New(db, plannerService, runner, verify, func() string {
+		run++
+		return fmt.Sprintf("RUN-NC-%d", run)
+	})
+	// LOOP-005: two failing runs without any file change block the project
+	// before the same_error threshold of three is reached.
+	for i := 0; i < 2; i++ {
+		result, continueErr := service.Continue(ctx, project)
+		if continueErr != nil {
+			t.Fatalf("run %d: %v", i+1, continueErr)
+		}
+		if result.Verification.Passed {
+			t.Fatalf("run %d unexpectedly passed", i+1)
+		}
+	}
+	got, err := db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != "BLOCKED" {
+		t.Fatalf("state=%s", got.State)
+	}
+	if _, err = service.Continue(ctx, project); err == nil {
+		t.Fatal("expected blocked project to refuse another run")
+	}
+}
+
 func TestContinueBlocksEvidenceBasedGoalDriftBeforeVerification(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -232,10 +355,7 @@ func TestContinueBlocksEvidenceBasedGoalDriftBeforeVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 	verifyMarker := filepath.Join(root, "verification-ran")
-	script := filepath.Join(root, "verify")
-	if err = os.WriteFile(script, []byte("#!/bin/sh\ntouch "+verifyMarker+"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	script := testscript.Write(t, root, "verify", "touch "+verifyMarker, "type nul > \""+verifyMarker+"\"")
 	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed", Command: []string{script}, Timeout: time.Second, Required: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -296,10 +416,7 @@ func TestResumePausedValidatesCheckpointAndVerifies(t *testing.T) {
 	if err = db.TransitionProjectState(ctx, project.ID, "READY", "BLOCKED"); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(repository, "verify")
-	if err = os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	script := testscript.Write(t, repository, "verify", "exit 0", "exit /b 0")
 	// The checkpoint must include the verification script created above.
 	snapshot, err = (gitops.GitInspector{}).Snapshot(ctx, repository)
 	if err != nil {
@@ -348,10 +465,7 @@ func TestContinueBlocksUnapprovedProtectedFileChange(t *testing.T) {
 	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature", Priority: 10}); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(repository, "verify")
-	if err = os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	script := testscript.Write(t, repository, "verify", "exit 0", "exit /b 0")
 	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed", Command: []string{script}, Timeout: time.Second, Required: true}); err != nil {
 		t.Fatal(err)
 	}

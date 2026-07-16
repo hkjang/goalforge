@@ -2,10 +2,23 @@ package model
 
 import "time"
 
+// Task types map short user commands onto structured internal work so runs
+// stay auditable by intent.
+const (
+	TaskDiscoverIdeas     = "DISCOVER_IDEAS"
+	TaskImplementSelected = "IMPLEMENT_SELECTED"
+	TaskContinueGoal      = "CONTINUE_GOAL"
+	TaskAuditAndImprove   = "AUDIT_AND_IMPROVE"
+	TaskVerifyAndRepair   = "VERIFY_AND_REPAIR"
+	TaskReplanGoal        = "REPLAN_GOAL"
+	TaskCreateCheckpoint  = "CREATE_CHECKPOINT"
+)
+
 type Project struct {
 	ID, Name, RepositoryPath, DefaultBranch, Provider, Model string
 	State                                                    string
 	WorktreeEnabled                                          bool
+	AutoCommitEnabled                                        bool
 	CreatedAt                                                time.Time
 }
 

@@ -2,22 +2,18 @@ package verification
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/model"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
+	"github.com/goalforge/goalforge/internal/testscript"
 )
 
-func executable(t *testing.T, dir, name, body string) string {
+func executable(t *testing.T, dir, name, posix, windows string) string {
 	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return testscript.Write(t, dir, name, posix, windows)
 }
 
 func verificationFixture(t *testing.T) (context.Context, *store.Store, model.Project, string) {
@@ -55,7 +51,7 @@ func verificationFixture(t *testing.T) (context.Context, *store.Store, model.Pro
 func TestVerificationCompletesGoalOnlyWithEvidence(t *testing.T) {
 	ctx, s, project, runID := verificationFixture(t)
 	defer s.Close()
-	command := executable(t, project.RepositoryPath, "pass", "echo build-ok")
+	command := executable(t, project.RepositoryPath, "pass", "echo build-ok", "echo build-ok")
 	engine, _ := New(s, 1024)
 	report, err := engine.Verify(ctx, runID, project, []Gate{{Type: "build_passed", Command: []string{command}, Timeout: time.Second, Required: true}})
 	if err != nil {
@@ -76,7 +72,7 @@ func TestVerificationCompletesGoalOnlyWithEvidence(t *testing.T) {
 func TestVerificationFailureRequiresRepair(t *testing.T) {
 	ctx, s, project, runID := verificationFixture(t)
 	defer s.Close()
-	command := executable(t, project.RepositoryPath, "fail", "echo broken\nexit 2")
+	command := executable(t, project.RepositoryPath, "fail", "echo broken\nexit 2", "echo broken\nexit /b 2")
 	engine, _ := New(s, 1024)
 	report, err := engine.Verify(ctx, runID, project, []Gate{{Type: "build_passed", Command: []string{command}, Timeout: time.Second, Required: true}})
 	if err != nil {
@@ -97,7 +93,7 @@ func TestVerificationFailureRequiresRepair(t *testing.T) {
 func TestVerificationTimeoutAndOutputLimit(t *testing.T) {
 	ctx, s, project, runID := verificationFixture(t)
 	defer s.Close()
-	command := executable(t, project.RepositoryPath, "slow", "printf '1234567890'\nsleep 2")
+	command := executable(t, project.RepositoryPath, "slow", "printf '1234567890'\nsleep 2", "echo 1234567890\nping -n 3 127.0.0.1 > nul")
 	engine, _ := New(s, 5)
 	report, err := engine.Verify(ctx, runID, project, []Gate{{Type: "build_passed", Command: []string{command}, Timeout: 20 * time.Millisecond, Required: true}})
 	if err != nil {

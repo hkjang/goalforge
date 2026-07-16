@@ -106,6 +106,11 @@ CREATE TABLE IF NOT EXISTS rollback_records (
  target_commit TEXT NOT NULL, path TEXT NOT NULL, branch TEXT NOT NULL, reason TEXT NOT NULL,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS run_commits (
+ run_id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), goal_id TEXT NOT NULL,
+ work_item_id TEXT NOT NULL, commit_sha TEXT NOT NULL, branch TEXT NOT NULL,
+ files_committed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_session_active
  ON provider_session_history(project_id,provider) WHERE status='ACTIVE';
 CREATE TABLE IF NOT EXISTS runs (
@@ -227,6 +232,12 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "projects", "worktree_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "projects", "auto_commit_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "runs", "task_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	for _, column := range []struct{ name, definition string }{{"daily_run_limit", "INTEGER NOT NULL DEFAULT 0"}, {"daily_token_limit", "INTEGER NOT NULL DEFAULT 0"}, {"daily_cost_limit_usd", "REAL NOT NULL DEFAULT 0"}} {
 		if err := s.ensureColumn(ctx, "project_budgets", column.name, column.definition); err != nil {
 			return err
@@ -279,8 +290,8 @@ func (s *Store) CreateProject(ctx context.Context, p model.Project) error {
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,repository_path,default_branch,provider,model,state,worktree_enabled,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.Name, p.RepositoryPath, p.DefaultBranch, p.Provider, p.Model, p.State, p.WorktreeEnabled, p.CreatedAt.Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,repository_path,default_branch,provider,model,state,worktree_enabled,auto_commit_enabled,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.RepositoryPath, p.DefaultBranch, p.Provider, p.Model, p.State, p.WorktreeEnabled, p.AutoCommitEnabled, p.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -288,8 +299,8 @@ func (s *Store) ProjectByPath(ctx context.Context, path string) (model.Project, 
 	path, _ = filepath.Abs(path)
 	var p model.Project
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,state,worktree_enabled,created_at FROM projects WHERE repository_path=?`, path).
-		Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.State, &p.WorktreeEnabled, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects WHERE repository_path=?`, path).
+		Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -302,7 +313,7 @@ func (s *Store) ProjectByPath(ctx context.Context, path string) (model.Project, 
 func (s *Store) ProjectByID(ctx context.Context, id string) (model.Project, error) {
 	var p model.Project
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,state,worktree_enabled,created_at FROM projects WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.State, &p.WorktreeEnabled, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -313,7 +324,7 @@ func (s *Store) ProjectByID(ctx context.Context, id string) (model.Project, erro
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,state,worktree_enabled,created_at FROM projects ORDER BY created_at,id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects ORDER BY created_at,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +333,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 	for rows.Next() {
 		var project model.Project
 		var created string
-		if err = rows.Scan(&project.ID, &project.Name, &project.RepositoryPath, &project.DefaultBranch, &project.Provider, &project.Model, &project.State, &project.WorktreeEnabled, &created); err != nil {
+		if err = rows.Scan(&project.ID, &project.Name, &project.RepositoryPath, &project.DefaultBranch, &project.Provider, &project.Model, &project.State, &project.WorktreeEnabled, &project.AutoCommitEnabled, &created); err != nil {
 			return nil, err
 		}
 		project.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -555,6 +566,7 @@ func criterionMet(expected, actual string) bool {
 
 type RunRecord struct {
 	ID, ProjectID, WorkItemID, Provider, Model, State string
+	TaskType                                          string
 }
 
 type SessionRecord struct {
@@ -616,7 +628,7 @@ func (s *Store) StartRun(ctx context.Context, run RunRecord) error {
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project is not runnable")
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,started_at) VALUES(?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,started_at) VALUES(?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()

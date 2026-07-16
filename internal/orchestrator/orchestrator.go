@@ -33,6 +33,7 @@ type Orchestrator struct {
 type Request struct {
 	RunID, WorkItemID, Prompt    string
 	OutputSchema, PromptTemplate string
+	TaskType                     string
 	Project                      model.Project
 	WorkspaceWrite               bool
 	ReadOnlyTask, Isolated       bool
@@ -103,7 +104,7 @@ func (o *Orchestrator) Run(ctx context.Context, request Request) (Result, error)
 			return result, fmt.Errorf("load provider handoff: %w", handoffErr)
 		}
 	}
-	if err := o.store.StartRun(ctx, store.RunRecord{ID: request.RunID, ProjectID: request.Project.ID, WorkItemID: request.WorkItemID, Provider: p.Name(), Model: request.Project.Model}); err != nil {
+	if err := o.store.StartRun(ctx, store.RunRecord{ID: request.RunID, ProjectID: request.Project.ID, WorkItemID: request.WorkItemID, Provider: p.Name(), Model: request.Project.Model, TaskType: request.TaskType}); err != nil {
 		return result, err
 	}
 	if err := o.store.RecordPrompt(ctx, request.RunID, request.PromptTemplate, request.Prompt); err != nil {

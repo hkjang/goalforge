@@ -9,7 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
+
+	"github.com/goalforge/goalforge/internal/procctl"
 )
 
 type DecodeLine func([]byte) ([]Event, error)
@@ -31,12 +32,9 @@ func (r *ProcessRunner) Run(ctx context.Context, request RunRequest, args []stri
 	cmd := exec.CommandContext(ctx, r.Binary, args...)
 	cmd.Dir = request.WorkDir
 	cmd.Env = append(os.Environ(), request.Environment...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procctl.SetGroup(cmd)
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return procctl.KillGroup(cmd)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -94,8 +92,8 @@ func (r *ProcessRunner) Run(ctx context.Context, request RunRequest, args []stri
 		stdoutErr := <-scanErr
 		stdinErr := <-writeErr
 		waitErr := cmd.Wait()
-		if waitErr != nil && cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if waitErr != nil {
+			_ = procctl.KillGroup(cmd)
 		}
 		if stdoutErr != nil {
 			events <- Event{Type: EventFailed, RunID: request.RunID, Err: stdoutErr}
@@ -117,5 +115,5 @@ func (r *ProcessRunner) Interrupt(_ context.Context, runID string) error {
 	if cmd == nil {
 		return fmt.Errorf("run %s: %w", runID, os.ErrNotExist)
 	}
-	return syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+	return procctl.InterruptGroup(cmd)
 }

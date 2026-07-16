@@ -9,11 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/policy"
+	"github.com/goalforge/goalforge/internal/procctl"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
@@ -115,12 +115,9 @@ func (e *Engine) runGate(parent context.Context, workDir string, gate Gate) (Res
 	cmd := exec.CommandContext(ctx, gate.Command[0], gate.Command[1:]...)
 	cmd.Dir = workDir
 	cmd.Env = os.Environ()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procctl.SetGroup(cmd)
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return procctl.KillGroup(cmd)
 	}
 	writer := &limitWriter{remaining: e.maxOutputBytes}
 	cmd.Stdout = writer
