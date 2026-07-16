@@ -132,6 +132,13 @@ Additional release blockers from the numbered requirements:
   types and per-run tokens (`ListRecentRuns`), pending approvals with copy-
   ready CLI commands (`ListPendingApprovals`), and sessions. Completed
   projects fall back to their latest goal instead of "목표 미등록".
+- Approval inbox: the dashboard gained its first write path. A cross-project
+  pending-approvals panel (with project names) and per-approval 승인/거절
+  buttons call POST approve/reject endpoints; mutations require the
+  `X-Requested-With: GoalForge` header (CSRF preflight guard) on top of the
+  bearer token, rejected approvals can never be consumed, and `goalforge
+  approval reject` gives CLI parity. A stray `run approve` dispatch that
+  aliased approval approve was removed.
 - The manual sandbox E2E is codified as `cmd/goalforge/main_e2e_test.go`: an
   automated test drives the real CLI dispatch through project init → goal →
   work → gate → continue (worktree isolation, verification, auto-commit

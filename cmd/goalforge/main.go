@@ -155,6 +155,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "approve" {
 			return approvalApprove(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "reject" {
+			return approvalReject(ctx, s, args[2:])
+		}
 	case "doctor":
 		return runDoctor(ctx, s, args[1:])
 	case "worker":
@@ -164,9 +167,6 @@ func run(ctx context.Context, args []string) error {
 	case "run":
 		if len(args) > 1 && args[1] == "--until-quota" {
 			return runUntilQuota(ctx, s, args[2:])
-		}
-		if len(args) > 1 && args[1] == "approve" {
-			return approvalApprove(ctx, s, args[2:])
 		}
 	}
 	return usage()
@@ -188,7 +188,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|merge|doctor|cancel|approval request|approval approve ID|worker [--once]|serve")
+	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|merge|doctor|cancel|approval request|approval approve ID|approval reject ID|worker [--once]|serve")
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -805,6 +805,21 @@ func approvalApprove(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	fmt.Printf("approval granted: %s\n", args[0])
+	return nil
+}
+
+func approvalReject(ctx context.Context, s *store.Store, args []string) error {
+	if len(args) != 1 {
+		return errors.New("approval reject requires an approval ID")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	if err = s.RejectApproval(ctx, p.ID, args[0]); err != nil {
+		return err
+	}
+	fmt.Printf("approval rejected: %s\n", args[0])
 	return nil
 }
 

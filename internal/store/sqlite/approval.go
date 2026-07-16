@@ -45,6 +45,45 @@ func (s *Store) Approve(ctx context.Context, projectID, approvalID string) error
 	return nil
 }
 
+// RejectApproval declines a pending approval; rejected approvals can never
+// be consumed by a run.
+func (s *Store) RejectApproval(ctx context.Context, projectID, approvalID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='REJECTED',approved_at=? WHERE id=? AND project_id=? AND status='PENDING'`, time.Now().UTC().Format(time.RFC3339Nano), approvalID, projectID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errors.New("approval is not pending")
+	}
+	return nil
+}
+
+// PendingApproval is an approval joined with its project name for the
+// cross-project inbox.
+type PendingApproval struct {
+	Approval
+	ProjectName string
+}
+
+func (s *Store) ListAllPendingApprovals(ctx context.Context) ([]PendingApproval, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.project_id,a.action_type,a.reason,a.status,a.requested_at,p.name FROM approvals a JOIN projects p ON p.id=a.project_id WHERE a.status='PENDING' ORDER BY a.requested_at,a.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []PendingApproval
+	for rows.Next() {
+		var approval PendingApproval
+		var requested string
+		if err = rows.Scan(&approval.ID, &approval.ProjectID, &approval.ActionType, &approval.Reason, &approval.Status, &requested, &approval.ProjectName); err != nil {
+			return nil, err
+		}
+		approval.RequestedAt, _ = time.Parse(time.RFC3339Nano, requested)
+		result = append(result, approval)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ListPendingApprovals(ctx context.Context, projectID string) ([]Approval, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,project_id,action_type,reason,status,requested_at FROM approvals WHERE project_id=? AND status='PENDING' ORDER BY requested_at,id`, projectID)
 	if err != nil {

@@ -38,6 +38,64 @@ func apiFixture(t *testing.T, token string) (*Server, *store.Store) {
 	return server, db
 }
 
+func TestApprovalInboxAndDecisions(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	ctx := context.Background()
+	first, err := db.RequestApproval(ctx, "P-API", store.ApprovalMergeBranch, "merge test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.RequestApproval(ctx, "P-API", store.ApprovalPublishBranch, "publish test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/approvals", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	var inbox struct {
+		Approvals []store.PendingApproval `json:"approvals"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &inbox); err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox.Approvals) != 2 || inbox.Approvals[0].ProjectName != "dashboard" {
+		t.Fatalf("inbox=%+v", inbox)
+	}
+	// Mutations without the CSRF header are rejected even without a token.
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/projects/P-API/approvals/"+first.ID+"/approve", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing CSRF header must be rejected: %d", response.Code)
+	}
+	post := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, nil)
+		request.Header.Set("X-Requested-With", "GoalForge")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if response := post("/api/v1/projects/P-API/approvals/" + first.ID + "/approve"); response.Code != http.StatusOK {
+		t.Fatalf("approve status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := post("/api/v1/projects/P-API/approvals/" + second.ID + "/reject"); response.Code != http.StatusOK {
+		t.Fatalf("reject status=%d body=%s", response.Code, response.Body.String())
+	}
+	// Double decisions conflict; approved consumes, rejected never does.
+	if response := post("/api/v1/projects/P-API/approvals/" + first.ID + "/approve"); response.Code != http.StatusConflict {
+		t.Fatalf("second approve must conflict: %d", response.Code)
+	}
+	approved, err := db.ConsumeApproval(ctx, "P-API", store.ApprovalMergeBranch, "run-1")
+	if err != nil || !approved {
+		t.Fatalf("approved=%t err=%v", approved, err)
+	}
+	rejected, err := db.ConsumeApproval(ctx, "P-API", store.ApprovalPublishBranch, "run-2")
+	if err != nil || rejected {
+		t.Fatalf("rejected approval must not be consumable: %t err=%v", rejected, err)
+	}
+}
+
 func TestMetricsEndpointServesPrometheusFormatBehindBearer(t *testing.T) {
 	server, db := apiFixture(t, "secret")
 	defer db.Close()

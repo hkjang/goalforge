@@ -66,6 +66,9 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	server.mux.HandleFunc("GET /metrics", server.metrics)
 	server.mux.HandleFunc("GET /api/v1/projects", server.projects)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}", server.project)
+	server.mux.HandleFunc("GET /api/v1/approvals", server.pendingApprovals)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/approve", server.decideApproval)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/reject", server.decideApproval)
 	server.mux.HandleFunc("GET /", server.dashboard)
 	return server, nil
 }
@@ -76,6 +79,12 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
 		if s.token != "" && (strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics") && r.Header.Get("Authorization") != "Bearer "+s.token {
 			writeError(w, http.StatusUnauthorized, "valid bearer token required")
+			return
+		}
+		// Mutations require a custom header so cross-site form posts fail
+		// the CORS preflight even when no bearer token is configured.
+		if r.Method != http.MethodGet && r.Header.Get("X-Requested-With") != "GoalForge" {
+			writeError(w, http.StatusForbidden, "mutations require the X-Requested-With: GoalForge header")
 			return
 		}
 		s.mux.ServeHTTP(w, r)
@@ -172,6 +181,39 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *Server) pendingApprovals(w http.ResponseWriter, r *http.Request) {
+	approvals, err := s.store.ListAllPendingApprovals(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": approvals})
+}
+
+// decideApproval approves or rejects one pending approval. Approvals stay a
+// deliberate human action: one decision per request, no bulk endpoint.
+func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request) {
+	projectID, approvalID := r.PathValue("id"), r.PathValue("approvalID")
+	var err error
+	if strings.HasSuffix(r.URL.Path, "/reject") {
+		err = s.store.RejectApproval(r.Context(), projectID, approvalID)
+	} else {
+		err = s.store.Approve(r.Context(), projectID, approvalID)
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"approval": approvalID, "status": statusForPath(r.URL.Path)})
+}
+
+func statusForPath(path string) string {
+	if strings.HasSuffix(path, "/reject") {
+		return "REJECTED"
+	}
+	return "APPROVED"
 }
 
 func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSummary, error) {
