@@ -20,6 +20,7 @@ import (
 	"github.com/goalforge/goalforge/internal/api"
 	"github.com/goalforge/goalforge/internal/app"
 	"github.com/goalforge/goalforge/internal/gitops"
+	"github.com/goalforge/goalforge/internal/mcp"
 	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/orchestrator"
 	"github.com/goalforge/goalforge/internal/planner"
@@ -166,6 +167,8 @@ func run(ctx context.Context, args []string) error {
 		return runWorker(ctx, s, args[1:])
 	case "serve":
 		return serveAPI(ctx, s, args[1:])
+	case "mcp":
+		return mcpServe(ctx, s, args[1:])
 	case "run":
 		if len(args) > 1 && args[1] == "--until-quota" {
 			return runUntilQuota(ctx, s, args[2:])
@@ -190,7 +193,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|merge|doctor|cancel|approval request|approval approve ID|approval reject ID|worker [--once]|serve")
+	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|merge|doctor|cancel|approval request|approval approve ID|approval reject ID|worker [--once]|serve|mcp [--addr HOST:PORT]")
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -615,6 +618,47 @@ func runDoctor(ctx context.Context, s *store.Store, args []string) error {
 		return fmt.Errorf("doctor found %d blocking problem(s)", failed)
 	}
 	fmt.Println("doctor: environment looks ready")
+	return nil
+}
+
+// mcpServe exposes GoalForge management over the Model Context Protocol:
+// stdio by default (for `claude mcp add goalforge -- goalforge mcp`), or the
+// Streamable HTTP transport with --addr for remote clients. Binding beyond
+// localhost without a bearer token is refused.
+func mcpServe(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	addr := f.String("addr", "", "serve MCP over Streamable HTTP on this address (empty = stdio)")
+	token := f.String("token", os.Getenv("GOALFORGE_MCP_TOKEN"), "bearer token required from HTTP clients")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	server, err := mcp.New(s, "")
+	if err != nil {
+		return err
+	}
+	if *addr == "" {
+		return server.Serve(ctx, os.Stdin, os.Stdout)
+	}
+	host, _, splitErr := net.SplitHostPort(*addr)
+	if splitErr != nil {
+		host = *addr
+	}
+	if *token == "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return errors.New("--token (or GOALFORGE_MCP_TOKEN) is required when binding beyond localhost")
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", server.Handler(*token))
+	httpServer := &http.Server{Addr: *addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
+	fmt.Printf("MCP server listening on http://%s/mcp\n", *addr)
+	if err = httpServer.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
 	return nil
 }
 

@@ -98,6 +98,29 @@ goalforge approval approve APR-ID
 GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
 ```
 
+### MCP server
+
+GoalForge management is exposed over the Model Context Protocol, so MCP
+clients (Claude Code, editors, other agents) can inspect and steer projects
+conversationally — 15 tools covering status, goal/backlog editing, triage,
+approvals, usage/quota reports, run replay, checkpoints, and enqueueing the
+autonomous CONTINUE job.
+
+```sh
+goalforge mcp                                # stdio transport
+claude mcp add goalforge -- goalforge --db /path/to/goalforge.db mcp
+
+goalforge mcp --addr 127.0.0.1:8799          # Streamable HTTP (POST /mcp)
+goalforge mcp --addr 0.0.0.0:8799 --token S  # remote: bearer token required
+claude mcp add --transport http goalforge http://HOST:8799/mcp --header "Authorization: Bearer S"
+```
+
+HTTP mode is stateless JSON-RPC per POST; binding beyond localhost without
+`--token` (or `GOALFORGE_MCP_TOKEN`) is refused, and browser `Origin`
+headers are validated against localhost to block DNS rebinding. Triage
+tools accept only backlog transitions; execution states, merges, and
+publishes stay behind the same approval gates as the CLI.
+
 ### Environment variables
 
 | Variable | Purpose |
@@ -105,6 +128,7 @@ GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
 | `GOALFORGE_DB` | SQLite path (default `.goalforge/goalforge.db`; also `--db PATH`) |
 | `GOALFORGE_CLAUDE_BIN` / `GOALFORGE_CODEX_BIN` / `GOALFORGE_QWEN_BIN` / `GOALFORGE_OPENCODE_BIN` | Provider CLI binary override |
 | `GOALFORGE_WEBHOOK_URL` | Slack-compatible JSON webhook for WAITING_QUOTA / BLOCKED / COMPLETED |
+| `GOALFORGE_MCP_TOKEN` | Bearer token for the MCP Streamable HTTP transport |
 | `GOALFORGE_AUDIT_KEY` | AES key (base64) to retain encrypted prompt originals |
 | `GOALFORGE_CODEX_TRANSPORT=app-server` | Experimental Codex App Server transport |
 | `GOALFORGE_CLAUDE_OTEL_ENDPOINT` / `_PROTOCOL` | Opt-in Claude OpenTelemetry export |
