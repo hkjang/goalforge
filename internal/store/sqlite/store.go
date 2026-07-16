@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS run_commits (
  work_item_id TEXT NOT NULL, commit_sha TEXT NOT NULL, branch TEXT NOT NULL,
  files_committed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS turns (
+ run_id TEXT NOT NULL REFERENCES runs(id), provider_turn_id TEXT NOT NULL,
+ status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(run_id, provider_turn_id)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_session_active
  ON provider_session_history(project_id,provider) WHERE status='ACTIVE';
 CREATE TABLE IF NOT EXISTS runs (
@@ -732,6 +737,20 @@ func (s *Store) recordProviderEvent(ctx context.Context, projectID string, event
 			return err
 		}
 	}
+	if event.TurnID != "" {
+		turnStatus := "RUNNING"
+		switch event.Type {
+		case provider.EventCompleted:
+			turnStatus = "COMPLETED"
+		case provider.EventFailed:
+			turnStatus = "FAILED"
+		}
+		// Terminal turn statuses stick; later stream events never downgrade
+		// a COMPLETED or FAILED turn back to RUNNING.
+		if _, err = tx.ExecContext(ctx, `INSERT INTO turns(run_id,provider_turn_id,status,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(run_id,provider_turn_id) DO UPDATE SET status=CASE WHEN turns.status='RUNNING' THEN excluded.status ELSE turns.status END,updated_at=excluded.updated_at`, event.RunID, event.TurnID, turnStatus, now, now); err != nil {
+			return err
+		}
+	}
 	if event.Usage != nil {
 		entries := []struct {
 			name   string
@@ -770,6 +789,33 @@ func (s *Store) ActiveSession(ctx context.Context, projectID, providerName strin
 	result.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
 	result.RetentionUntil, _ = time.Parse(time.RFC3339Nano, retention)
 	return result, err
+}
+
+// TurnRecord is one provider turn inside a run (requirement 11: first-class
+// turns instead of folding them into usage event keys).
+type TurnRecord struct {
+	RunID, ProviderTurnID, Status string
+	CreatedAt, UpdatedAt          time.Time
+}
+
+func (s *Store) ListTurns(ctx context.Context, runID string) ([]TurnRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT run_id,provider_turn_id,status,created_at,updated_at FROM turns WHERE run_id=? ORDER BY created_at,provider_turn_id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var turns []TurnRecord
+	for rows.Next() {
+		var turn TurnRecord
+		var created, updated string
+		if err = rows.Scan(&turn.RunID, &turn.ProviderTurnID, &turn.Status, &created, &updated); err != nil {
+			return nil, err
+		}
+		turn.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		turn.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+		turns = append(turns, turn)
+	}
+	return turns, rows.Err()
 }
 
 func (s *Store) RunUsage(ctx context.Context, runID string) (provider.Usage, error) {

@@ -89,6 +89,13 @@ Additional release blockers from the numbered requirements:
 - Notifications: when `GOALFORGE_WEBHOOK_URL` is set, WAITING_QUOTA,
   BLOCKED (loop or pre-run), and COMPLETED transitions post a best-effort,
   secret-redacted, Slack-compatible JSON payload.
+- Section 6.3 estimator: work items without a manual token estimate get a
+  conservative prediction (recent work-run average + 50% margin via
+  `EstimateWorkItemTokens`) so the 80%-quota large-work deferral always has
+  a signal.
+- Section 11 `turns`: provider turns are now first-class rows keyed by
+  `(run_id, provider_turn_id)` with sticky terminal statuses, populated from
+  the event stream alongside the usage ledger.
 
 The active goal must remain open until every required row is `PASS` or the
 scope is explicitly revised by the user.

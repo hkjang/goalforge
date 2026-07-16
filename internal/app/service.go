@@ -368,8 +368,18 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	if err != nil {
 		return result, fmt.Errorf("capture workspace audit snapshot: %w", err)
 	}
+	estimatedTokens := result.WorkItem.EstimatedTokens
+	if estimatedTokens == 0 {
+		// No manual estimate: predict conservatively from recent run history
+		// so the quota-warning large-work deferral still has a signal.
+		if historical, estimateErr := s.store.EstimateWorkItemTokens(ctx, project.ID); estimateErr == nil {
+			estimatedTokens = historical
+		} else if !errors.Is(estimateErr, store.ErrNotFound) {
+			return result, estimateErr
+		}
+	}
 	rendered := prompt.Execution(goal, result.WorkItem, prompt.Budget{TokenLimit: budget.TokenLimit, TokensUsed: budget.TokensUsed, CostLimitUSD: budget.CostLimitUSD, CostUsedUSD: budget.CostUsedUSD})
-	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.WorkItem.ID, Prompt: rendered, PromptTemplate: "work_item_execution", TaskType: taskType, Project: executionProject, WorkspaceWrite: true, EstimatedTokens: result.WorkItem.EstimatedTokens})
+	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.WorkItem.ID, Prompt: rendered, PromptTemplate: "work_item_execution", TaskType: taskType, Project: executionProject, WorkspaceWrite: true, EstimatedTokens: estimatedTokens})
 	auditErr := s.recordWorkspaceChanges(ctx, executionProject.RepositoryPath, runID, workspaceBefore)
 	if err != nil || auditErr != nil {
 		return result, errors.Join(err, auditErr)
