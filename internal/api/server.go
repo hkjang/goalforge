@@ -29,15 +29,16 @@ type ProjectSummary struct {
 
 type ProjectDetail struct {
 	ProjectSummary
-	WorkItems []model.WorkItem        `json:"work_items"`
-	Sessions  []store.SessionRecord   `json:"sessions"`
-	Quotas    []QuotaView             `json:"quota_windows"`
-	Jobs      []JobView               `json:"scheduler_jobs"`
-	Budget    *store.ProjectBudget    `json:"budget,omitempty"`
-	Daily     *store.DailyUsage       `json:"daily_usage,omitempty"`
-	Criteria  []store.CriterionStatus `json:"criteria"`
-	Runs      []store.RunView         `json:"runs"`
-	Approvals []ApprovalView          `json:"pending_approvals"`
+	WorkItems  []model.WorkItem           `json:"work_items"`
+	Sessions   []store.SessionRecord      `json:"sessions"`
+	Quotas     []QuotaView                `json:"quota_windows"`
+	Jobs       []JobView                  `json:"scheduler_jobs"`
+	Budget     *store.ProjectBudget       `json:"budget,omitempty"`
+	Daily      *store.DailyUsage          `json:"daily_usage,omitempty"`
+	Criteria   []store.CriterionStatus    `json:"criteria"`
+	Runs       []store.RunView            `json:"runs"`
+	Approvals  []ApprovalView             `json:"pending_approvals"`
+	IdeaScores map[string]model.IdeaScore `json:"idea_scores"`
 }
 
 type ApprovalView struct {
@@ -52,9 +53,9 @@ type QuotaView struct {
 }
 
 type JobView struct {
-	ID, Type, Status string
-	RunAt            time.Time
-	Attempts         int
+	ID, Type, Status, LastError string
+	RunAt                       time.Time
+	Attempts                    int
 }
 
 func New(s *store.Store, bearerToken string) (*Server, error) {
@@ -69,6 +70,7 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	server.mux.HandleFunc("GET /api/v1/approvals", server.pendingApprovals)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/approve", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/reject", server.decideApproval)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/status/{status}", server.setWorkStatus)
 	server.mux.HandleFunc("GET /", server.dashboard)
 	return server, nil
 }
@@ -134,6 +136,9 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			detail.Criteria, err = s.store.CriteriaStatus(r.Context(), *summary.Goal)
 		}
+		if err == nil {
+			detail.IdeaScores, err = s.store.IdeaScoresForGoal(r.Context(), summary.Goal.ID)
+		}
 	}
 	if err == nil {
 		detail.Runs, err = s.store.ListRecentRuns(r.Context(), project.ID, 15)
@@ -159,7 +164,7 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 		var jobs []store.SchedulerJob
 		jobs, err = s.store.ListSchedulerJobs(r.Context(), project.ID, true)
 		for _, job := range jobs {
-			detail.Jobs = append(detail.Jobs, JobView{ID: job.ID, Type: job.Type, Status: job.Status, RunAt: job.RunAt, Attempts: job.Attempts})
+			detail.Jobs = append(detail.Jobs, JobView{ID: job.ID, Type: job.Type, Status: job.Status, LastError: job.LastError, RunAt: job.RunAt, Attempts: job.Attempts})
 		}
 	}
 	if err == nil {
@@ -207,6 +212,28 @@ func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"approval": approvalID, "status": statusForPath(r.URL.Path)})
+}
+
+// triageStatuses are the only transitions the dashboard may perform: triage
+// decisions on backlog candidates. Execution states stay orchestrator-owned.
+var triageStatuses = map[string]bool{"APPROVED": true, "BLOCKED": true, "DISCARDED": true, "BACKLOG": true}
+
+func (s *Server) setWorkStatus(w http.ResponseWriter, r *http.Request) {
+	projectID, workID, status := r.PathValue("id"), r.PathValue("workID"), r.PathValue("status")
+	if !triageStatuses[status] {
+		writeError(w, http.StatusBadRequest, "status must be one of APPROVED, BLOCKED, DISCARDED, BACKLOG")
+		return
+	}
+	goal, err := s.store.CurrentGoal(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "no active goal for this project")
+		return
+	}
+	if err = s.store.SetWorkItemStatus(r.Context(), goal.ID, workID, status); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"work_item": workID, "status": status})
 }
 
 func statusForPath(path string) string {

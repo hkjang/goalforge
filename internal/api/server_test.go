@@ -96,6 +96,58 @@ func TestApprovalInboxAndDecisions(t *testing.T) {
 	}
 }
 
+func TestWorkStatusTriageEndpoint(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	ctx := context.Background()
+	idea, err := db.CreateScoredIdea(ctx, model.WorkItem{GoalID: goalID(t, db), Title: "Add exporter", ChangeScope: "internal/export"}, model.IdeaScore{GoalContribution: 80, UserValue: 70, OperationalNeed: 60, Feasibility: 75, RiskReduction: 50, Difficulty: 30, PriorityScore: 70.5, ExpectedChangeScope: "internal/export", Fingerprint: "fp-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, nil)
+		request.Header.Set("X-Requested-With", "GoalForge")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if response := post("/api/v1/projects/P-API/work/" + idea.ID + "/status/RUNNING"); response.Code != http.StatusBadRequest {
+		t.Fatalf("execution states must be rejected: %d", response.Code)
+	}
+	if response := post("/api/v1/projects/P-API/work/" + idea.ID + "/status/APPROVED"); response.Code != http.StatusOK {
+		t.Fatalf("approve status=%d body=%s", response.Code, response.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects/P-API", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	var detail ProjectDetail
+	if err = json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	score, ok := detail.IdeaScores[idea.ID]
+	if !ok || score.PriorityScore != 70.5 {
+		t.Fatalf("idea scores missing from detail: %+v", detail.IdeaScores)
+	}
+	found := false
+	for _, item := range detail.WorkItems {
+		if item.ID == idea.ID && item.Status == "APPROVED" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("work item not approved: %+v", detail.WorkItems)
+	}
+}
+
+func goalID(t *testing.T, db *store.Store) string {
+	t.Helper()
+	goal, err := db.CurrentGoal(context.Background(), "P-API")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return goal.ID
+}
+
 func TestMetricsEndpointServesPrometheusFormatBehindBearer(t *testing.T) {
 	server, db := apiFixture(t, "secret")
 	defer db.Close()

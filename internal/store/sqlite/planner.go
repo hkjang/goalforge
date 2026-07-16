@@ -71,6 +71,26 @@ func (s *Store) RecordLoopSignal(ctx context.Context, projectID, workItemID, sig
 	return count, err
 }
 
+// IdeaScoresForGoal returns the persisted scoring breakdown per work item so
+// triage surfaces can rank and explain candidates.
+func (s *Store) IdeaScoresForGoal(ctx context.Context, goalID string) (map[string]model.IdeaScore, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT i.work_item_id,i.goal_contribution,i.user_value,i.operational_need,i.feasibility,i.risk_reduction,i.difficulty,i.priority_score,i.expected_change_scope,i.fingerprint,i.scope_expansion,i.approval_required FROM idea_scores i JOIN work_items w ON w.id=i.work_item_id WHERE w.goal_id=?`, goalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]model.IdeaScore)
+	for rows.Next() {
+		var id string
+		var score model.IdeaScore
+		if err = rows.Scan(&id, &score.GoalContribution, &score.UserValue, &score.OperationalNeed, &score.Feasibility, &score.RiskReduction, &score.Difficulty, &score.PriorityScore, &score.ExpectedChangeScope, &score.Fingerprint, &score.ScopeExpansion, &score.ApprovalRequired); err != nil {
+			return nil, err
+		}
+		result[id] = score
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) BlockProjectForLoop(ctx context.Context, projectID string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE projects SET state='BLOCKED' WHERE id=? AND state NOT IN ('COMPLETED','CANCELLED','BLOCKED')`, projectID)
 	if err != nil {

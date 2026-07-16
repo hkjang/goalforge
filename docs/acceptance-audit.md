@@ -139,6 +139,12 @@ Additional release blockers from the numbered requirements:
   bearer token, rejected approvals can never be consumed, and `goalforge
   approval reject` gives CLI parity. A stray `run approve` dispatch that
   aliased approval approve was removed.
+- Idea triage board and quota timeline: the project detail view ranks
+  BACKLOG/BLOCKED ideas by persisted priority score with the full scoring
+  breakdown and scope-expansion flags, and 승인/보류/폐기 buttons call a new
+  POST work-status endpoint restricted to triage transitions (execution
+  states remain orchestrator-owned). A chronological timeline lists quota
+  reset/resume times with source confidence alongside scheduled jobs.
 - The manual sandbox E2E is codified as `cmd/goalforge/main_e2e_test.go`: an
   automated test drives the real CLI dispatch through project init → goal →
   work → gate → continue (worktree isolation, verification, auto-commit
