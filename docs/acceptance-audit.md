@@ -72,6 +72,17 @@ Additional release blockers from the numbered requirements:
 - Section 6.7 refinement: `policy.ParseRetryAfter` extracts Retry-After hints
   from provider error text so short rate-limit retries honor the provider's
   wait over the backoff ladder.
+- Section 5.2 `REPLAN_GOAL`: `goalforge replan` compares implementation vs
+  goal criteria; gap items flow through the discovery pipeline and stale
+  BACKLOG/APPROVED entries are flagged `BLOCKED` for review — nothing is
+  discarded automatically.
+- Section 6.7 `model_unsupported`: projects carry an approved
+  `--fallback-model`; `run --until-quota` switches to it via the provider
+  handoff path (session retired, model change persisted) before retrying.
+- LOOP-005 refinement: repeated no-change completion claims first rotate the
+  provider session (`InvalidateSession`) and block only at twice the
+  threshold; `RecoverFailedProject` returns FAILED projects and stuck work
+  items to a runnable state so deliberate retries actually run.
 
 The active goal must remain open until every required row is `PASS` or the
 scope is explicitly revised by the user.

@@ -124,6 +124,66 @@ func TestAuditRunsIsolatedImprovementDiscovery(t *testing.T) {
 	}
 }
 
+func TestReplanFlagsStaleItemsAndFilesGaps(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := model.Project{ID: "P-REPLAN", Name: "demo", RepositoryPath: t.TempDir(), DefaultBranch: "main", Provider: "fake"}
+	if err = db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := db.SetGoal(ctx, project.ID, "ship", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-STALE", GoalID: goal.ID, Type: "IDEA", Title: "legacy exporter nobody needs", Priority: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-KEEP", GoalID: goal.ID, Type: "IMPLEMENT", Title: "core scheduler", Priority: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.SetWorkItemStatus(ctx, goal.ID, "W-KEEP", "IN_PROGRESS"); err != nil {
+		t.Fatal(err)
+	}
+	final := `{"gaps":[{"title":"Implement missing integration test harness","expected_change_scope":"internal/verification","risk":"low","goal_contribution":85,"user_value":60,"operational_need":75,"feasibility":80,"risk_reduction":70,"difficulty":40,"scope_expansion":false}],` +
+		`"stale_items":[{"id":"W-STALE","reason":"no longer contributes to the goal"},{"id":"W-KEEP","reason":"should be skipped"},{"id":"W-GHOST","reason":"does not exist"}]}`
+	fake := &fakeProvider{finalMessage: final}
+	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
+	runner, _ := orchestrator.New(db, fake)
+	verify, _ := verification.New(db, 1024)
+	service, _ := New(db, plannerService, runner, verify, func() string { return "RUN-RP" })
+	result, err := service.Replan(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fake.request.Prompt, "W-STALE") || !strings.Contains(fake.request.Prompt, "완료 조건") {
+		t.Fatalf("replan prompt missing backlog IDs or criteria: %q", fake.request.Prompt)
+	}
+	if len(result.Stale) != 3 {
+		t.Fatalf("stale=%+v", result.Stale)
+	}
+	if !result.Stale[0].Applied || result.Stale[1].Applied || result.Stale[2].Applied {
+		t.Fatalf("stale application mismatch: %+v", result.Stale)
+	}
+	items, err := db.ListWorkItems(ctx, goal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]string{}
+	for _, item := range items {
+		statuses[item.ID] = item.Status
+	}
+	if statuses["W-STALE"] != "BLOCKED" || statuses["W-KEEP"] != "IN_PROGRESS" {
+		t.Fatalf("statuses=%+v", statuses)
+	}
+	if len(result.Discovery.Accepted) != 1 || result.Discovery.Accepted[0].Candidate.Title != "Implement missing integration test harness" {
+		t.Fatalf("gaps=%+v", result.Discovery)
+	}
+}
+
 func (f *fakeProvider) Resume(ctx context.Context, _ string, r provider.RunRequest) (<-chan provider.Event, error) {
 	return f.Start(ctx, r)
 }
@@ -351,15 +411,24 @@ func TestContinueBlocksAfterRepeatedNoChangeFailures(t *testing.T) {
 		run++
 		return fmt.Sprintf("RUN-NC-%d", run)
 	})
-	// LOOP-005: two failing runs without any file change block the project
-	// before the same_error threshold of three is reached.
-	for i := 0; i < 2; i++ {
+	// LOOP-005: the second failing run without any file change rotates the
+	// provider session instead of blocking; the identical-error threshold
+	// still blocks the project on the third run.
+	for i := 0; i < 3; i++ {
 		result, continueErr := service.Continue(ctx, project)
 		if continueErr != nil {
 			t.Fatalf("run %d: %v", i+1, continueErr)
 		}
 		if result.Verification.Passed {
 			t.Fatalf("run %d unexpectedly passed", i+1)
+		}
+		_, sessionErr := db.ActiveSession(ctx, project.ID, "fake")
+		if i == 1 {
+			if !errors.Is(sessionErr, store.ErrNotFound) {
+				t.Fatalf("run %d: session was not rotated: %v", i+1, sessionErr)
+			}
+		} else if i == 0 && sessionErr != nil {
+			t.Fatalf("run %d: expected active session: %v", i+1, sessionErr)
 		}
 	}
 	got, err := db.ProjectByID(ctx, project.ID)

@@ -122,6 +122,8 @@ func run(ctx context.Context, args []string) error {
 		return ideasGoal(ctx, s)
 	case "audit":
 		return auditGoal(ctx, s)
+	case "replan":
+		return replanGoal(ctx, s)
 	case "usage":
 		return usageShow(ctx, s)
 	case "sessions":
@@ -173,7 +175,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|cancel|approval request|approval approve ID|worker [--once]|serve")
+	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|cancel|approval request|approval approve ID|worker [--once]|serve")
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -326,18 +328,40 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 			failures++
 			kind := policy.ClassifyFailure(runErr, "")
 			decision := policy.DecideRetry(kind, failures, 3, policy.ParseRetryAfter(runErr.Error()), rand.Float64)
-			if decision.Action == policy.WaitQuotaReset {
+			switch decision.Action {
+			case policy.WaitQuotaReset:
 				fmt.Printf("quota exhausted (%s); stopping until reset\n", kind)
 				return runErr
-			}
-			if decision.Action != policy.RetryAfterDelay {
+			case policy.UseFallbackModel:
+				if project.FallbackModel == "" || project.FallbackModel == project.Model {
+					return fmt.Errorf("%s (no approved fallback model configured): %w", decision.Reason, runErr)
+				}
+				if recoverErr := recoverIfFailed(ctx, s, project.ID); recoverErr != nil {
+					return errors.Join(runErr, recoverErr)
+				}
+				if _, switchErr := s.SwitchProvider(ctx, project.ID, project.Provider, project.FallbackModel, "approved fallback model after unsupported model failure"); switchErr != nil {
+					return errors.Join(runErr, switchErr)
+				}
+				fmt.Printf("switched to approved fallback model %s\n", project.FallbackModel)
+				continue
+			case policy.NewSessionFromCkpt:
+				fmt.Printf("session unusable (%s); retrying with a fresh session\n", kind)
+				if recoverErr := recoverIfFailed(ctx, s, project.ID); recoverErr != nil {
+					return errors.Join(runErr, recoverErr)
+				}
+				continue
+			case policy.RetryAfterDelay:
+				fmt.Printf("retryable failure (%s): %v; retrying in %s\n", kind, runErr, decision.Delay.Round(time.Second))
+				if waitErr := policy.WaitForRetry(ctx, decision); waitErr != nil {
+					return errors.Join(runErr, waitErr)
+				}
+				if recoverErr := recoverIfFailed(ctx, s, project.ID); recoverErr != nil {
+					return errors.Join(runErr, recoverErr)
+				}
+				continue
+			default:
 				return fmt.Errorf("%s: %w", decision.Reason, runErr)
 			}
-			fmt.Printf("retryable failure (%s): %v; retrying in %s\n", kind, runErr, decision.Delay.Round(time.Second))
-			if waitErr := policy.WaitForRetry(ctx, decision); waitErr != nil {
-				return errors.Join(runErr, waitErr)
-			}
-			continue
 		}
 		failures = 0
 		fmt.Printf("run %d: work=%s state=%s verified=%t progress=%.1f%%\n", index+1, result.WorkItem.ID, result.Run.State, result.Verification.Passed, result.Verification.Progress)
@@ -346,6 +370,19 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 		}
 	}
 	return fmt.Errorf("maximum consecutive run limit reached: %d", *maxRuns)
+}
+
+// recoverIfFailed returns a FAILED project (and its stuck work item) to a
+// runnable state before a deliberate retry; other states pass through.
+func recoverIfFailed(ctx context.Context, s *store.Store, projectID string) error {
+	project, err := s.ProjectByID(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if project.State != "FAILED" {
+		return nil
+	}
+	return s.RecoverFailedProject(ctx, projectID)
 }
 
 func runWorker(ctx context.Context, s *store.Store, args []string) error {
@@ -683,6 +720,37 @@ func ideasGoal(ctx context.Context, s *store.Store) error {
 	return discoverGoal(ctx, s, false)
 }
 
+func replanGoal(ctx context.Context, s *store.Store) error {
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	service, cleanup, err := runtimeService(ctx, s, p)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	result, err := service.Replan(ctx, p)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("run: %s state=%s\n", result.Run.RunID, result.Run.State)
+	for _, stale := range result.Stale {
+		status := "flagged"
+		if !stale.Applied {
+			status = "skipped (" + stale.Note + ")"
+		}
+		fmt.Printf("stale\t%s\t%s\t%s\n", status, stale.ID, stale.Reason)
+	}
+	for _, gap := range result.Discovery.Accepted {
+		fmt.Printf("gap\t%s\t%.2f\t%s\t%s\n", gap.Status, gap.Score.PriorityScore, gap.Candidate.Risk, gap.Candidate.Title)
+	}
+	for title, reason := range result.Discovery.Rejected {
+		fmt.Printf("rejected\t%s\t%s\n", reason, title)
+	}
+	return nil
+}
+
 func auditGoal(ctx context.Context, s *store.Store) error {
 	return discoverGoal(ctx, s, true)
 }
@@ -879,6 +947,7 @@ func projectInit(ctx context.Context, s *store.Store, args []string) error {
 	branch := f.String("branch", "", "default branch")
 	provider := f.String("provider", "codex", "provider")
 	modelName := f.String("model", "", "model")
+	fallbackModel := f.String("fallback-model", "", "approved substitute model when the configured model is rejected")
 	worktreeEnabled := f.Bool("worktrees", false, "run each work item in a dedicated Git worktree")
 	autoCommit := f.Bool("auto-commit", false, "commit verified changes with Goal/Work-Item trailers after gates pass")
 	if err := f.Parse(args); err != nil {
@@ -904,7 +973,7 @@ func projectInit(ctx context.Context, s *store.Store, args []string) error {
 			*branch = "main"
 		}
 	}
-	p := model.Project{Name: *name, RepositoryPath: abs, DefaultBranch: *branch, Provider: *provider, Model: *modelName, WorktreeEnabled: *worktreeEnabled, AutoCommitEnabled: *autoCommit}
+	p := model.Project{Name: *name, RepositoryPath: abs, DefaultBranch: *branch, Provider: *provider, Model: *modelName, FallbackModel: *fallbackModel, WorktreeEnabled: *worktreeEnabled, AutoCommitEnabled: *autoCommit}
 	if err = s.CreateProject(ctx, p); err != nil {
 		return err
 	}

@@ -394,6 +394,28 @@ func (s *Store) DeferWorkForQuotaWarning(ctx context.Context, projectID, workIte
 	return tx.Commit()
 }
 
+// RecoverFailedProject releases a FAILED project back to READY and returns
+// any in-progress work item to the backlog so a deliberate retry (backoff
+// ladder, fallback model) can claim it again.
+func (s *Store) RecoverFailedProject(ctx context.Context, projectID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE work_items SET status='BACKLOG' WHERE status='IN_PROGRESS' AND goal_id IN (SELECT id FROM goals WHERE project_id=?)`, projectID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE projects SET state='READY' WHERE id=? AND state='FAILED'`, projectID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errors.New("project is not in FAILED state")
+	}
+	return tx.Commit()
+}
+
 func (s *Store) FailBeforeRun(ctx context.Context, projectID, workItemID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

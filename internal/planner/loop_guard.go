@@ -13,6 +13,18 @@ func DefaultLoopPolicy() LoopPolicy {
 	return LoopPolicy{SameError: 3, NoChange: 2, SameWork: 3, SameChange: 3}
 }
 
+// LoopAction tells the caller how to break a detected loop.
+type LoopAction string
+
+const (
+	LoopNone LoopAction = "NONE"
+	// LoopRotateSession asks for a fresh provider session (LOOP-005: repeated
+	// completion claims without file changes replace the session first).
+	LoopRotateSession LoopAction = "ROTATE_SESSION"
+	// LoopBlock means the project was blocked for user review.
+	LoopBlock LoopAction = "BLOCK"
+)
+
 type LoopGuard struct {
 	store  *store.Store
 	policy LoopPolicy
@@ -24,10 +36,10 @@ func NewLoopGuard(s *store.Store, p LoopPolicy) (*LoopGuard, error) {
 	}
 	return &LoopGuard{store: s, policy: p}, nil
 }
-func (g *LoopGuard) Record(ctx context.Context, projectID, workID, signal, fingerprint, runID string) (bool, int, error) {
+func (g *LoopGuard) Record(ctx context.Context, projectID, workID, signal, fingerprint, runID string) (LoopAction, int, error) {
 	count, err := g.store.RecordLoopSignal(ctx, projectID, workID, signal, fingerprint, runID)
 	if err != nil {
-		return false, 0, err
+		return LoopNone, 0, err
 	}
 	limit := 0
 	switch signal {
@@ -40,13 +52,24 @@ func (g *LoopGuard) Record(ctx context.Context, projectID, workID, signal, finge
 	case "same_change":
 		limit = g.policy.SameChange
 	default:
-		return false, count, errors.New("unknown loop signal")
+		return LoopNone, count, errors.New("unknown loop signal")
 	}
-	blocked := limit > 0 && count >= limit
-	if blocked {
-		if err := g.store.BlockProjectForLoop(ctx, projectID); err != nil {
-			return false, count, err
+	if limit <= 0 {
+		return LoopNone, count, nil
+	}
+	if signal == "no_change" {
+		// Replace the session at the threshold; block only when a fresh
+		// session keeps claiming completion without changing anything.
+		if count >= 2*limit {
+			return LoopBlock, count, g.store.BlockProjectForLoop(ctx, projectID)
 		}
+		if count >= limit {
+			return LoopRotateSession, count, nil
+		}
+		return LoopNone, count, nil
 	}
-	return blocked, count, nil
+	if count >= limit {
+		return LoopBlock, count, g.store.BlockProjectForLoop(ctx, projectID)
+	}
+	return LoopNone, count, nil
 }

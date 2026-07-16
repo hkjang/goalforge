@@ -16,10 +16,13 @@ const (
 
 type Project struct {
 	ID, Name, RepositoryPath, DefaultBranch, Provider, Model string
-	State                                                    string
-	WorktreeEnabled                                          bool
-	AutoCommitEnabled                                        bool
-	CreatedAt                                                time.Time
+	// FallbackModel is the approved substitute used when the configured
+	// model is rejected by the provider (retry matrix: model_unsupported).
+	FallbackModel     string
+	State             string
+	WorktreeEnabled   bool
+	AutoCommitEnabled bool
+	CreatedAt         time.Time
 }
 
 type Goal struct {

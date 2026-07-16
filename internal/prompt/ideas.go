@@ -14,18 +14,22 @@ var ideasSchema = map[string]any{
 	"required":             []string{"ideas"},
 	"properties": map[string]any{"ideas": map[string]any{
 		"type": "array", "maxItems": 5,
-		"items": map[string]any{
-			"type": "object", "additionalProperties": false,
-			"required": []string{"title", "expected_change_scope", "risk", "goal_contribution", "user_value", "operational_need", "feasibility", "risk_reduction", "difficulty", "scope_expansion"},
-			"properties": map[string]any{
-				"title": map[string]any{"type": "string"}, "expected_change_scope": map[string]any{"type": "string"},
-				"risk":              map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}},
-				"goal_contribution": scoreSchema(), "user_value": scoreSchema(), "operational_need": scoreSchema(),
-				"feasibility": scoreSchema(), "risk_reduction": scoreSchema(), "difficulty": scoreSchema(),
-				"scope_expansion": map[string]any{"type": "boolean"},
-			},
-		},
+		"items": ideaItemSchema(),
 	}},
+}
+
+func ideaItemSchema() map[string]any {
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"title", "expected_change_scope", "risk", "goal_contribution", "user_value", "operational_need", "feasibility", "risk_reduction", "difficulty", "scope_expansion"},
+		"properties": map[string]any{
+			"title": map[string]any{"type": "string"}, "expected_change_scope": map[string]any{"type": "string"},
+			"risk":              map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}},
+			"goal_contribution": scoreSchema(), "user_value": scoreSchema(), "operational_need": scoreSchema(),
+			"feasibility": scoreSchema(), "risk_reduction": scoreSchema(), "difficulty": scoreSchema(),
+			"scope_expansion": map[string]any{"type": "boolean"},
+		},
+	}
 }
 
 func scoreSchema() map[string]any {

@@ -56,6 +56,41 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRecoverFailedProjectReleasesWorkItem(t *testing.T) {
+	ctx, s, p := recoveryStore(t)
+	defer s.Close()
+	goal, err := s.SetGoal(ctx, p.ID, "ship", "objective", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, goal.ID, "W1", "IN_PROGRESS"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecoverFailedProject(ctx, p.ID); err == nil {
+		t.Fatal("recovery must require FAILED state")
+	}
+	if err = s.StartRun(ctx, RunRecord{ID: "R1", ProjectID: p.ID, WorkItemID: "W1", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinishRun(ctx, "R1", "FAILED", "FAILED"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecoverFailedProject(ctx, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	project, err := s.ProjectByID(ctx, p.ID)
+	if err != nil || project.State != "READY" {
+		t.Fatalf("state=%s err=%v", project.State, err)
+	}
+	item, err := s.ClaimNextWorkItem(ctx, goal.ID)
+	if err != nil || item.ID != "W1" {
+		t.Fatalf("item=%+v err=%v", item, err)
+	}
+}
+
 func TestScheduleJobIsIdempotentAndClaimedOnce(t *testing.T) {
 	ctx, s, p := recoveryStore(t)
 	defer s.Close()

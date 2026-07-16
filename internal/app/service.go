@@ -105,6 +105,83 @@ func (s *Service) discover(ctx context.Context, project model.Project, render fu
 	return result, err
 }
 
+// StaleItem is a backlog entry replanning flagged as no longer serving the
+// goal. Applied entries were moved to BLOCKED for user review; nothing is
+// discarded automatically.
+type StaleItem struct {
+	ID, Reason, Note string
+	Applied          bool
+}
+type ReplanResult struct {
+	Run       orchestrator.Result
+	Discovery planner.DiscoveryResult
+	Stale     []StaleItem
+}
+
+// Replan compares the implementation against the goal (REPLAN_GOAL): gap work
+// items flow through the discovery pipeline and stale backlog entries are
+// flagged BLOCKED for review.
+func (s *Service) Replan(ctx context.Context, project model.Project) (result ReplanResult, err error) {
+	runID := s.newRunID()
+	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+		return result, err
+	}
+	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	goal, err := s.store.CurrentGoal(ctx, project.ID)
+	if err != nil {
+		return result, err
+	}
+	existing, err := s.store.ListWorkItems(ctx, goal.ID)
+	if err != nil {
+		return result, err
+	}
+	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{
+		RunID: runID, Prompt: prompt.Replan(goal, existing), OutputSchema: prompt.ReplanSchema(),
+		PromptTemplate: "goal_replan", TaskType: model.TaskReplanGoal, Project: project, ReadOnlyTask: true, Isolated: true,
+	})
+	if err != nil {
+		return result, err
+	}
+	if strings.TrimSpace(result.Run.FinalMessage) == "" {
+		return result, errors.New("provider returned no structured replan result")
+	}
+	var response struct {
+		Gaps  []planner.Candidate `json:"gaps"`
+		Stale []struct {
+			ID     string `json:"id"`
+			Reason string `json:"reason"`
+		} `json:"stale_items"`
+	}
+	if err = json.Unmarshal([]byte(result.Run.FinalMessage), &response); err != nil {
+		return result, fmt.Errorf("decode structured replan result: %w", err)
+	}
+	// Flag stale items first: sending them to review frees backlog capacity
+	// before the gap candidates pass the unimplemented-work limit.
+	byID := make(map[string]model.WorkItem, len(existing))
+	for _, item := range existing {
+		byID[item.ID] = item
+	}
+	for _, stale := range response.Stale {
+		entry := StaleItem{ID: stale.ID, Reason: stale.Reason}
+		item, known := byID[stale.ID]
+		switch {
+		case !known:
+			entry.Note = "unknown work item"
+		case item.Status != "BACKLOG" && item.Status != "APPROVED":
+			entry.Note = "only BACKLOG or APPROVED items can be flagged"
+		default:
+			if statusErr := s.store.SetWorkItemStatus(ctx, goal.ID, stale.ID, "BLOCKED"); statusErr != nil {
+				entry.Note = statusErr.Error()
+			} else {
+				entry.Applied = true
+			}
+		}
+		result.Stale = append(result.Stale, entry)
+	}
+	result.Discovery, err = s.planner.DiscoverAndStore(ctx, goal.ID, response.Gaps)
+	return result, err
+}
+
 func (s *Service) ResumePaused(ctx context.Context, project model.Project) (result ResumeResult, err error) {
 	runID := s.newRunID()
 	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
@@ -178,7 +255,7 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 		if changesErr != nil {
 			return result, changesErr
 		}
-		err = s.recordVerificationLoop(ctx, project.ID, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
+		err = s.recordVerificationLoop(ctx, project, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
 	}
 	if err == nil && result.Verification.Passed && project.AutoCommitEnabled && result.Checkpoint.WorkItemID != "" {
 		goal, goalErr := s.store.CurrentGoal(ctx, project.ID)
@@ -317,7 +394,7 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	}
 	result.Verification, err = s.verification.Verify(ctx, result.Run.RunID, executionProject, verificationGates)
 	if err == nil {
-		err = s.recordVerificationLoop(ctx, project.ID, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
+		err = s.recordVerificationLoop(ctx, project, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
 	}
 	if err == nil && result.Verification.Passed && project.AutoCommitEnabled {
 		err = s.commitVerifiedRun(ctx, project, executionProject.RepositoryPath, goal.ID, result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID)
@@ -353,9 +430,10 @@ func (s *Service) recordWorkspaceChanges(ctx context.Context, repository, runID 
 // recordVerificationLoop feeds the loop guard after a failed verification:
 // same_error fingerprints identical gate output (LOOP-004), same_work counts
 // repeated failing runs on one item (LOOP-002), no_change catches completion
-// claims without any file change (LOOP-005), and same_change catches runs
-// that keep producing an identical change set (LOOP-003).
-func (s *Service) recordVerificationLoop(ctx context.Context, projectID, workItemID, runID string, changes []gitops.FileChange, report verification.Report) error {
+// claims without any file change (LOOP-005, answered with a session rotation
+// before any block), and same_change catches runs that keep producing an
+// identical change set (LOOP-003).
+func (s *Service) recordVerificationLoop(ctx context.Context, project model.Project, workItemID, runID string, changes []gitops.FileChange, report verification.Report) error {
 	if report.Passed {
 		return nil
 	}
@@ -369,24 +447,48 @@ func (s *Service) recordVerificationLoop(ctx context.Context, projectID, workIte
 		return nil
 	}
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(failed, "\x00"))))
-	if _, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "same_error", fingerprint, runID); err != nil {
+	if _, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_error", fingerprint, runID); err != nil {
 		return err
 	}
 	if workItemID != "" {
-		if _, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "same_work", workItemID, runID); err != nil {
+		if _, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_work", workItemID, runID); err != nil {
 			return err
 		}
 	}
 	if len(changes) == 0 {
-		_, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "no_change", "no-change:"+workItemID, runID)
-		return err
+		action, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "no_change", "no-change:"+workItemID, runID)
+		if err != nil {
+			return err
+		}
+		if action == planner.LoopRotateSession {
+			return s.rotateSessionForLoop(ctx, project, "no_change_loop: repeated completion claims without file changes")
+		}
+		return nil
 	}
 	var parts []string
 	for _, change := range changes {
 		parts = append(parts, change.Path+"\x00"+change.ChangeType+"\x00"+change.AfterHash)
 	}
 	changeFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
-	_, _, err := s.loopGuard.Record(ctx, projectID, workItemID, "same_change", changeFingerprint, runID)
+	_, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_change", changeFingerprint, runID)
+	return err
+}
+
+// rotateSessionForLoop retires the active provider session so the next run
+// starts fresh instead of continuing a conversation that stopped producing
+// real changes.
+func (s *Service) rotateSessionForLoop(ctx context.Context, project model.Project, reason string) error {
+	session, err := s.store.ActiveSession(ctx, project.ID, project.Provider)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	err = s.store.InvalidateSession(ctx, project.ID, project.Provider, session.SessionID, reason, 7*24*time.Hour)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
 	return err
 }
 
