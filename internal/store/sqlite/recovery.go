@@ -158,6 +158,35 @@ func (s *Store) ScheduleJob(ctx context.Context, j SchedulerJob) (SchedulerJob, 
 	return j, nil
 }
 
+// ScheduleRecurringJob schedules a job like ScheduleJob but revives a prior
+// FAILED or COMPLETED job with the same idempotency key, so recurring intents
+// (CONTINUE) can be re-enqueued after they finish or fail. PENDING and
+// RUNNING jobs are left untouched.
+func (s *Store) ScheduleRecurringJob(ctx context.Context, j SchedulerJob) (SchedulerJob, error) {
+	if j.ProjectID == "" || j.Type == "" || j.IdempotencyKey == "" || j.RunAt.IsZero() {
+		return j, errors.New("job project, type, idempotency key, and run time are required")
+	}
+	if j.ID == "" {
+		j.ID = NewID("JOB")
+	}
+	if j.Payload == "" {
+		j.Payload = "{}"
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO scheduler_jobs(id,project_id,job_type,run_at,idempotency_key,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,'PENDING',?,?,?) ON CONFLICT(idempotency_key) DO UPDATE SET run_at=excluded.run_at,payload=excluded.payload,updated_at=excluded.updated_at,status=CASE WHEN scheduler_jobs.status IN ('PENDING','RUNNING') THEN scheduler_jobs.status ELSE 'PENDING' END,last_error=CASE WHEN scheduler_jobs.status IN ('PENDING','RUNNING') THEN scheduler_jobs.last_error ELSE '' END`, j.ID, j.ProjectID, j.Type, j.RunAt.UTC().Format(time.RFC3339Nano), j.IdempotencyKey, j.Payload, now, now)
+	if err != nil {
+		return j, err
+	}
+	var runAt, lease string
+	err = s.db.QueryRowContext(ctx, `SELECT id,project_id,job_type,run_at,idempotency_key,status,payload,attempts,owner,COALESCE(lease_until,''),last_error FROM scheduler_jobs WHERE idempotency_key=?`, j.IdempotencyKey).Scan(&j.ID, &j.ProjectID, &j.Type, &runAt, &j.IdempotencyKey, &j.Status, &j.Payload, &j.Attempts, &j.Owner, &lease, &j.LastError)
+	if err != nil {
+		return j, err
+	}
+	j.RunAt, _ = time.Parse(time.RFC3339Nano, runAt)
+	j.LeaseUntil, _ = time.Parse(time.RFC3339Nano, lease)
+	return j, nil
+}
+
 func (s *Store) ClaimDueJob(ctx context.Context, now time.Time, owner string, leaseDuration time.Duration) (SchedulerJob, error) {
 	var j SchedulerJob
 	if owner == "" || leaseDuration <= 0 {

@@ -112,6 +112,18 @@ Additional release blockers from the numbered requirements:
   merge commit carries Goal/Work/Run trailers.
 - `goalforge usage` now reports ledger totals (per token type + cost)
   independently of whether a budget is configured.
+- Autonomous continue: `goalforge continue --enqueue` schedules a persistent
+  `CONTINUE` job; the worker executes one verified work item at a time,
+  reschedules itself, waits out quota windows, and stops on completion or
+  anything needing user judgment. `ScheduleRecurringJob` revives FAILED or
+  COMPLETED jobs so the intent can be re-enqueued. The worker also prunes
+  expired sessions hourly (SESSION-010).
+- Claude hook capture registers `Stop` alongside `StopFailure`; non-failure
+  hook lines are skipped instead of surfacing as decode errors, keeping the
+  capture path useful on CLI versions without a StopFailure hook.
+- CommitVerified stages first and commits only when `git diff --cached`
+  shows real content, so Windows line-ending normalization can no longer
+  fail a verified run with "nothing to commit".
 - E2E validated against the real Claude Code CLI (2.1.25) contract: the
   observed stream-json init/assistant/result payloads decode correctly
   (including `is_error:true` results), and a full

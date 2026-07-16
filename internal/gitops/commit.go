@@ -97,10 +97,20 @@ func CommitVerified(ctx context.Context, repository, protectedBranch, goalID, wo
 	if status == "" {
 		return CommitInfo{}, nil
 	}
-	files := len(strings.Split(status, "\n"))
 	if output, addErr := exec.CommandContext(ctx, "git", "-C", repository, "add", "-A").CombinedOutput(); addErr != nil {
 		return CommitInfo{}, fmt.Errorf("stage changes: %w: %s", addErr, strings.TrimSpace(string(output)))
 	}
+	// Count what actually staged: line-ending normalization can make the
+	// porcelain status dirty while the staged content is identical to HEAD,
+	// which would otherwise fail the commit with "nothing to commit".
+	staged, err := gitOutput(ctx, repository, "diff", "--cached", "--name-only")
+	if err != nil {
+		return CommitInfo{}, err
+	}
+	if staged == "" {
+		return CommitInfo{}, nil
+	}
+	files := len(strings.Split(staged, "\n"))
 	subject := strings.TrimSpace(title)
 	if subject == "" {
 		subject = "GoalForge verified change for " + workItemID

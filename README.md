@@ -2,56 +2,104 @@
 
 GoalForge is a goal-first development orchestrator. The Go process owns project
 state, versioned goals, work ordering, verification evidence, and completion;
-AI sessions are execution tools rather than the source of truth.
+AI sessions (Codex, Claude Code) are execution tools rather than the source of
+truth.
 
-## MVP commands
+## Quick start
 
 ```sh
-go run ./cmd/goalforge project init --name goalforge --repo . --provider codex
-go run ./cmd/goalforge goal set --title "Build GoalForge" --objective "Ship the orchestrator MVP" \
-  --criterion build_passed=true --criterion unit_test_pass_rate=100
-go run ./cmd/goalforge goal show
-go run ./cmd/goalforge milestone add --title "Persistence" --weight 2
-go run ./cmd/goalforge work add --title "Implement session store" --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
-go run ./cmd/goalforge project provider set --provider claude --model sonnet --reason "compare provider quality"
-go run ./cmd/goalforge project init --name demo --worktrees
-go run ./cmd/goalforge rollback --work-item WORK-123 --reason "failed verification"
-go run ./cmd/goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily-tokens 250000 --daily-cost-usd 15
-go run ./cmd/goalforge project runtime --turn-timeout 30m --run-timeout 2h
-go run ./cmd/goalforge serve --addr 127.0.0.1:8787
-GOALFORGE_POSTGRES_DSN='postgres://goalforge:secret@localhost/goalforge' go run ./cmd/goalforge storage postgres migrate
-go run ./cmd/goalforge work list
-go run ./cmd/goalforge work status WORK-ID --set IN_PROGRESS
-go run ./cmd/goalforge verify record --check build_passed --status PASSED --actual true
-go run ./cmd/goalforge verify gate add --type build_passed \
-  --command-json '["go","build","./..."]' --timeout-seconds 300
-go run ./cmd/goalforge verify gate add --type unit_test_pass_rate \
-  --command-json '["go","test","./..."]' --success-value 100
-go run ./cmd/goalforge project budget --tokens 2000000 --cost-usd 100
-go run ./cmd/goalforge ideas
-go run ./cmd/goalforge continue
-go run ./cmd/goalforge run --until-quota --max-runs 100
-go run ./cmd/goalforge usage
-go run ./cmd/goalforge sessions
-go run ./cmd/goalforge checkpoint --next-action "implement the next approved work item"
-go run ./cmd/goalforge logs --limit 50
-go run ./cmd/goalforge pause
-go run ./cmd/goalforge resume
-go run ./cmd/goalforge cancel
-GOALFORGE_CODEX_TRANSPORT=app-server go run ./cmd/goalforge worker
-go run ./cmd/goalforge approval request --action protected-files --reason "rotate test certificate"
-go run ./cmd/goalforge approval approve APPROVAL-ID
-go run ./cmd/goalforge status
+goalforge doctor                       # verify git, provider CLI, flags, auth
+goalforge project init --name demo --provider claude --model haiku \
+  --worktrees --auto-commit --fallback-model sonnet
+goalforge goal set --title "Ship the feature" --objective "..." \
+  --criterion build_passed=true
+goalforge verify gate add --type build_passed --command-json '["go","build","./..."]'
+goalforge work add --title "Implement session store" --priority 90 --scope "internal/session/**"
+goalforge continue                     # one verified work item
+goalforge status
 ```
 
-The database defaults to `.goalforge/goalforge.db`. Override it with
-`--db PATH` or `GOALFORGE_DB`. Goal changes create a new immutable version and
-require `--reason` after the first version.
+## Command reference
 
-`ideas` inspects the repository in a read-only, ephemeral provider session and
-uses the providers' JSON-schema output mode. GoalForge scores and deduplicates
-the returned candidates before persisting them; when the unimplemented backlog
-has reached its policy limit, it refuses discovery and prioritizes implementation.
+### Setup and planning
+
+```sh
+goalforge doctor [--probe-auth]        # environment diagnostics before anything runs
+goalforge project init --name N [--repo .] [--provider codex|claude] [--model M]
+                       [--fallback-model M] [--worktrees] [--auto-commit]
+goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily-tokens 250000 --daily-cost-usd 15
+goalforge project runtime --turn-timeout 30m --run-timeout 2h
+goalforge project provider set --provider claude --model sonnet --reason "..."
+goalforge goal set --title T --objective O --criterion build_passed=true [--reason ...]
+goalforge goal show
+goalforge milestone add --title T --weight 2
+goalforge work add --title T --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
+goalforge work list | work status ID --set APPROVED
+goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100]
+```
+
+### Discovery, execution, replanning
+
+```sh
+goalforge ideas                        # DISCOVER_IDEAS: read-only isolated discovery
+goalforge audit                        # AUDIT_AND_IMPROVE: quality/security/perf/UX/ops inspection
+goalforge replan                       # REPLAN_GOAL: gaps filed, stale backlog flagged for review
+goalforge continue [--enqueue]         # CONTINUE_GOAL: one work item (or schedule for the worker)
+goalforge develop                      # IMPLEMENT_SELECTED: highest-priority approved idea
+goalforge run --until-quota --max-runs 100
+goalforge worker [--once]              # processes RESUME and CONTINUE jobs, prunes sessions hourly
+```
+
+`ideas`/`audit`/`replan` run in read-only, ephemeral provider sessions using
+JSON-schema output. Candidates are scored (`0.30 goal + 0.25 user + 0.20 ops +
+0.15 feasibility + 0.10 risk-reduction`), trigram-deduplicated, and capped by
+WIP policy; scope-expanding proposals are parked as `BLOCKED` for approval.
+Work items without a manual token estimate get a conservative prediction from
+recent run history so the 80%-quota large-work deferral always has a signal.
+
+### Shipping verified work
+
+Runs never push or merge on their own. With `--auto-commit`, a run whose gates
+pass is committed in its worktree as author `GoalForge` with
+`Goal-ID`/`Work-Item-ID`/`Run-ID` trailers, never on the default branch.
+
+```sh
+goalforge approval request --action merge-branch --reason "..."   # then: approval approve APR-...
+goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
+goalforge approval request --action publish-branch --reason "..."
+goalforge publish --work-item WORK-1 [--remote origin]
+goalforge worktree gc [--force]        # remove worktrees of DONE/DISCARDED items; branches kept
+goalforge rollback --work-item WORK-1 --reason "..."
+```
+
+### Operations
+
+```sh
+goalforge status | usage | sessions | logs [--limit 50]
+goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
+goalforge pause | resume | cancel
+goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
+goalforge approval request --action protected-files|publish-branch|merge-branch --reason "..."
+goalforge approval approve APR-ID
+GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
+```
+
+### Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `GOALFORGE_DB` | SQLite path (default `.goalforge/goalforge.db`; also `--db PATH`) |
+| `GOALFORGE_CLAUDE_BIN` / `GOALFORGE_CODEX_BIN` | Provider CLI binary override |
+| `GOALFORGE_WEBHOOK_URL` | Slack-compatible JSON webhook for WAITING_QUOTA / BLOCKED / COMPLETED |
+| `GOALFORGE_AUDIT_KEY` | AES key (base64) to retain encrypted prompt originals |
+| `GOALFORGE_CODEX_TRANSPORT=app-server` | Experimental Codex App Server transport |
+| `GOALFORGE_CLAUDE_OTEL_ENDPOINT` / `_PROTOCOL` | Opt-in Claude OpenTelemetry export |
+
+Goal changes create a new immutable version and require `--reason` after the
+first version. Failed runs classify into a retry matrix (account quota waits
+for reset without polling; short rate limits honor Retry-After; transient
+failures back off 30s-1m-2m-5m-10m with jitter; auth and git conflicts block
+for the user; an unsupported model switches to the approved fallback).
 
 Operational commands expose the separate project token/cost ledger, provider
 quota windows, persisted sessions, raw provider events, and Git-backed manual

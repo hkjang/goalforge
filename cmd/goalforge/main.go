@@ -115,9 +115,9 @@ func run(ctx context.Context, args []string) error {
 			return gateAdd(ctx, s, args[3:])
 		}
 	case "continue":
-		return continueGoal(ctx, s, false)
+		return continueGoal(ctx, s, args[1:], false)
 	case "develop":
-		return continueGoal(ctx, s, true)
+		return continueGoal(ctx, s, args[1:], true)
 	case "ideas":
 		return ideasGoal(ctx, s)
 	case "audit":
@@ -646,6 +646,21 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 	if err = worker.Handle("RESUME", runner.ResumeHandler(orchestrator.ResumeConfig{Owner: owner + "-project", LeaseDuration: *lease, Policy: usagepolicy.DefaultPolicy(), Inspector: gitops.GitInspector{}})); err != nil {
 		return err
 	}
+	planning, err := planner.NewService(s, planner.DefaultPolicy())
+	if err != nil {
+		return err
+	}
+	verifier, err := verification.New(s, 1024*1024)
+	if err != nil {
+		return err
+	}
+	service, err := app.New(s, planning, runner, verifier, nil)
+	if err != nil {
+		return err
+	}
+	if err = worker.Handle("CONTINUE", continueHandler(s, service)); err != nil {
+		return err
+	}
 	runOnce := func() (bool, error) { return worker.RunOne(ctx, time.Now().UTC()) }
 	if *once {
 		ran, runErr := runOnce()
@@ -654,7 +669,17 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 	}
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
+	lastPrune := time.Time{}
 	for {
+		// SESSION-010: retention pruning rides along with the job pump.
+		if now := time.Now().UTC(); now.Sub(lastPrune) >= time.Hour {
+			if pruned, pruneErr := s.PruneSessions(ctx, now); pruneErr != nil {
+				fmt.Fprintln(os.Stderr, "worker prune error:", pruneErr)
+			} else if pruned > 0 {
+				fmt.Printf("worker: pruned %d expired sessions\n", pruned)
+			}
+			lastPrune = now
+		}
 		ran, runErr := runOnce()
 		if runErr != nil {
 			fmt.Fprintln(os.Stderr, "worker job error:", runErr)
@@ -667,6 +692,57 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 			return nil
 		case <-ticker.C:
 		}
+	}
+}
+
+// continueHandler drives a project toward its goal one work item at a time:
+// the CONTINUE job reschedules itself after every verified run, waits out
+// quota windows, and stops on completion or anything needing user judgment.
+func continueHandler(s *store.Store, service *app.Service) scheduler.Handler {
+	return func(ctx context.Context, job store.SchedulerJob) (out scheduler.Outcome, err error) {
+		project, err := s.ProjectByID(ctx, job.ProjectID)
+		if err != nil {
+			return out, err
+		}
+		rescheduleAfterQuota := func() {
+			at := time.Now().UTC().Add(30 * time.Minute)
+			if quotas, quotaErr := s.ListQuotaWindows(ctx, project.Provider); quotaErr == nil {
+				for _, quota := range quotas {
+					if quota.ResumeAt != nil && quota.ResumeAt.After(time.Now().UTC()) {
+						value := quota.ResumeAt.Add(2 * time.Minute)
+						at = value
+					}
+				}
+			}
+			out.RescheduleAt = &at
+		}
+		switch project.State {
+		case "COMPLETED", "CANCELLED":
+			return out, nil
+		case "BLOCKED", "FAILED":
+			return out, fmt.Errorf("project state %s requires user attention", project.State)
+		case "WAITING_QUOTA", "RUNNING", "PREFLIGHT", "VERIFYING", "DRAINING", "CHECKPOINTING", "RESUMING":
+			rescheduleAfterQuota()
+			return out, nil
+		}
+		result, runErr := service.Continue(ctx, project)
+		switch {
+		case errors.Is(runErr, orchestrator.ErrWaitingQuota):
+			rescheduleAfterQuota()
+			return out, nil
+		case errors.Is(runErr, store.ErrNotFound):
+			// Backlog has no executable work; completion criteria decide the
+			// rest, so hand control back to the user.
+			return out, nil
+		case runErr != nil:
+			return out, runErr
+		}
+		if result.Verification.GoalCompleted {
+			return out, nil
+		}
+		next := time.Now().UTC().Add(5 * time.Second)
+		out.RescheduleAt = &next
+		return out, nil
 	}
 }
 
@@ -944,10 +1020,23 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	return nil
 }
 
-func continueGoal(ctx context.Context, s *store.Store, developSelected bool) error {
+func continueGoal(ctx context.Context, s *store.Store, args []string, developSelected bool) error {
+	f := flag.NewFlagSet("continue", flag.ContinueOnError)
+	enqueue := f.Bool("enqueue", false, "schedule a persistent CONTINUE job for the worker instead of running inline")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return err
+	}
+	if *enqueue {
+		job, jobErr := s.ScheduleRecurringJob(ctx, store.SchedulerJob{ProjectID: p.ID, Type: "CONTINUE", RunAt: time.Now().UTC(), IdempotencyKey: "continue:" + p.ID})
+		if jobErr != nil {
+			return jobErr
+		}
+		fmt.Printf("continue job scheduled: %s (run `goalforge worker` to process it)\n", job.ID)
+		return nil
 	}
 	service, cleanup, err := runtimeService(ctx, s, p)
 	if err != nil {
@@ -1134,12 +1223,20 @@ func workAdd(ctx context.Context, s *store.Store, args []string) error {
 
 func workList(ctx context.Context, s *store.Store) error {
 	g, err := activeGoal(ctx, s)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Println("no active goal for this project (the goal may be completed; set a new one with `goalforge goal set`)")
+		return nil
+	}
 	if err != nil {
 		return err
 	}
 	items, err := s.ListWorkItems(ctx, g.ID)
 	if err != nil {
 		return err
+	}
+	if len(items) == 0 {
+		fmt.Println("backlog is empty (add work with `goalforge work add` or discover with `goalforge ideas`)")
+		return nil
 	}
 	for _, w := range items {
 		fmt.Printf("%s\t%s\t%.2f\t%s\n", w.ID, w.Status, w.Priority, w.Title)

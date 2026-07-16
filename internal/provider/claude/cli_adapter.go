@@ -100,7 +100,11 @@ func (a *Adapter) runWithStopFailure(ctx context.Context, request provider.RunRe
 		return nil, err
 	}
 	hookCommand := "sh \"" + filepath.ToSlash(script) + "\""
-	configuration := map[string]any{"hooks": map[string]any{"StopFailure": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hookCommand, "timeout": 5}}}}}}
+	// Stop is registered alongside StopFailure as a fallback: CLI versions
+	// without a StopFailure hook still record the stop payload, and lines
+	// that carry no error are skipped when the capture file is drained.
+	hookEntry := []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hookCommand, "timeout": 5}}}}
+	configuration := map[string]any{"hooks": map[string]any{"StopFailure": hookEntry, "Stop": hookEntry}}
 	rawSettings, _ := json.Marshal(configuration)
 	if err = os.WriteFile(settings, rawSettings, 0o600); err != nil {
 		cleanup()
@@ -140,6 +144,9 @@ func (a *Adapter) runWithStopFailure(ctx context.Context, request provider.RunRe
 				continue
 			}
 			failure, quota, decodeErr := DecodeStopFailure(line, time.Now())
+			if errors.Is(decodeErr, ErrNotStopFailure) {
+				continue
+			}
 			if decodeErr != nil {
 				out <- provider.Event{Type: provider.EventFailed, RunID: request.RunID, Raw: line, Err: decodeErr}
 				continue

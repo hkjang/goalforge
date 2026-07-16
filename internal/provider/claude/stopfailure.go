@@ -16,6 +16,11 @@ type StopFailure struct {
 	SessionID, Error, ErrorDetails, LastAssistantMessage string
 }
 
+// ErrNotStopFailure marks a captured hook line that is not a failure (for
+// example a normal Stop event); callers skip it rather than treating it as
+// an error.
+var ErrNotStopFailure = errors.New("not a Claude StopFailure payload")
+
 func DecodeStopFailure(raw []byte, now time.Time) (StopFailure, provider.QuotaSnapshot, error) {
 	var payload struct {
 		SessionID            string `json:"session_id"`
@@ -28,7 +33,7 @@ func DecodeStopFailure(raw []byte, now time.Time) (StopFailure, provider.QuotaSn
 		return StopFailure{}, provider.QuotaSnapshot{}, fmt.Errorf("decode Claude StopFailure: %w", err)
 	}
 	if payload.HookEventName != "StopFailure" || payload.Error == "" {
-		return StopFailure{}, provider.QuotaSnapshot{}, errors.New("not a Claude StopFailure payload")
+		return StopFailure{}, provider.QuotaSnapshot{}, ErrNotStopFailure
 	}
 	failure := StopFailure{SessionID: payload.SessionID, Error: payload.Error, ErrorDetails: payload.ErrorDetails, LastAssistantMessage: payload.LastAssistantMessage}
 	message := strings.TrimSpace(strings.Join([]string{payload.ErrorDetails, payload.LastAssistantMessage}, " "))
