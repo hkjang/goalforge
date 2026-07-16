@@ -106,7 +106,10 @@ func (a *Adapter) runWithStopFailure(ctx context.Context, request provider.RunRe
 		cleanup()
 		return nil, err
 	}
-	args = append(args, "--settings", settings, "--include-hook-events")
+	// Claude Code CLI (2.1.x) has no --include-hook-events flag; the hook
+	// writes its capture file regardless, and an absent file simply means
+	// the StopFailure hook never fired.
+	args = append(args, "--settings", settings)
 	source, err := a.runner.Run(ctx, request, args, DecodeLine)
 	if err != nil {
 		cleanup()

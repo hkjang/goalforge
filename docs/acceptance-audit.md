@@ -102,6 +102,14 @@ Additional release blockers from the numbered requirements:
 - SEC-011 publishing: `goalforge publish --work-item` pushes a verified work
   branch to a remote only after a consumable `PUBLISH_BRANCH` approval;
   runs never push on their own and only recorded verified commits qualify.
+- E2E validated against the real Claude Code CLI (2.1.25) contract: the
+  observed stream-json init/assistant/result payloads decode correctly
+  (including `is_error:true` results), and a full
+  init→goal→work→gate→continue→auto-commit→publish→gc pipeline passes with
+  a contract-faithful fake CLI. Two real integration bugs were found and
+  fixed: the CLI has no `--include-hook-events` flag, and `approval approve`
+  was never dispatched. Provider binaries are now overridable via
+  `GOALFORGE_CLAUDE_BIN` / `GOALFORGE_CODEX_BIN`.
 
 The active goal must remain open until every required row is `PASS` or the
 scope is explicitly revised by the user.

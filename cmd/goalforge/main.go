@@ -150,6 +150,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "request" {
 			return approvalRequest(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "approve" {
+			return approvalApprove(ctx, s, args[2:])
+		}
 	case "worker":
 		return runWorker(ctx, s, args[1:])
 	case "serve":
@@ -521,7 +524,7 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 
 func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
 	cleanup := func() {}
-	var codexProvider provider.Provider = codex.New("")
+	var codexProvider provider.Provider = codex.New(os.Getenv("GOALFORGE_CODEX_BIN"))
 	if os.Getenv("GOALFORGE_CODEX_TRANSPORT") == "app-server" {
 		adapter, err := codex.StartAppServerAdapter(ctx, "")
 		if err != nil {
@@ -530,7 +533,7 @@ func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
 		codexProvider = adapter
 		cleanup = func() { _ = adapter.Close() }
 	}
-	return []provider.Provider{codexProvider, claude.New("")}, cleanup, nil
+	return []provider.Provider{codexProvider, claude.New(os.Getenv("GOALFORGE_CLAUDE_BIN"))}, cleanup, nil
 }
 
 func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
@@ -884,10 +887,10 @@ func runtimeService(ctx context.Context, s *store.Store, p model.Project) (*app.
 			selected = adapter
 			cleanup = func() { _ = adapter.Close() }
 		} else {
-			selected = codex.New("")
+			selected = codex.New(os.Getenv("GOALFORGE_CODEX_BIN"))
 		}
 	case "claude":
-		selected = claude.New("")
+		selected = claude.New(os.Getenv("GOALFORGE_CLAUDE_BIN"))
 	default:
 		return nil, cleanup, fmt.Errorf("unsupported provider %q", p.Provider)
 	}
