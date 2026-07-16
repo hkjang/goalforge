@@ -9,7 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/provider"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
@@ -68,6 +70,7 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	server.mux.HandleFunc("GET /api/v1/projects", server.projects)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}", server.project)
 	server.mux.HandleFunc("GET /api/v1/approvals", server.pendingApprovals)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}", server.runDetail)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/approve", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/reject", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/status/{status}", server.setWorkStatus)
@@ -183,6 +186,69 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// RunDetail is one run replayed from authoritative audit records.
+type RunDetail struct {
+	Run           store.RunView              `json:"run"`
+	Prompt        *store.PromptView          `json:"prompt,omitempty"`
+	Turns         []store.TurnRecord         `json:"turns"`
+	Usage         provider.Usage             `json:"usage"`
+	FileChanges   []gitops.FileChange        `json:"file_changes"`
+	Verifications []store.VerificationRecord `json:"verifications"`
+	Commit        *store.RunCommit           `json:"commit,omitempty"`
+	Events        []store.EventLog           `json:"events"`
+}
+
+func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
+	projectID, runID := r.PathValue("id"), r.PathValue("runID")
+	runs, err := s.store.ListRecentRuns(r.Context(), projectID, 1000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	detail := RunDetail{}
+	found := false
+	for _, run := range runs {
+		if run.ID == runID {
+			detail.Run, found = run, true
+			break
+		}
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if prompt, promptErr := s.store.PromptForRun(r.Context(), runID); promptErr == nil {
+		detail.Prompt = &prompt
+	} else if !errors.Is(promptErr, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, promptErr.Error())
+		return
+	}
+	detail.Turns, err = s.store.ListTurns(r.Context(), runID)
+	if err == nil {
+		detail.Usage, err = s.store.RunUsage(r.Context(), runID)
+	}
+	if err == nil {
+		detail.FileChanges, err = s.store.ListRunFileChanges(r.Context(), runID)
+	}
+	if err == nil {
+		detail.Verifications, err = s.store.VerificationsForRun(r.Context(), runID)
+	}
+	if err == nil {
+		detail.Events, err = s.store.EventLogsForRun(r.Context(), projectID, runID, 200)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if commit, commitErr := s.store.RunCommitByRun(r.Context(), runID); commitErr == nil {
+		detail.Commit = &commit
+	} else if !errors.Is(commitErr, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, commitErr.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, detail)

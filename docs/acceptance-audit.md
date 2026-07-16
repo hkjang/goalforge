@@ -145,6 +145,11 @@ Additional release blockers from the numbered requirements:
   POST work-status endpoint restricted to triage transitions (execution
   states remain orchestrator-owned). A chronological timeline lists quota
   reset/resume times with source confidence alongside scheduled jobs.
+- Run replay: `GET /api/v1/projects/{id}/runs/{runID}` reconstructs one run
+  from authoritative audit records — task type and duration, per-type token
+  usage and cost, the redacted prompt with its SHA-256, verification gate
+  outputs, recorded file changes, the verified commit, turns, and the raw
+  (redacted) event stream. Run IDs in the dashboard link to the replay view.
 - The manual sandbox E2E is codified as `cmd/goalforge/main_e2e_test.go`: an
   automated test drives the real CLI dispatch through project init → goal →
   work → gate → continue (worktree isolation, verification, auto-commit

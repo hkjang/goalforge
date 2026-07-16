@@ -176,6 +176,55 @@ func (s *Store) ListQuotaWindows(ctx context.Context, providerName string) ([]Qu
 	return result, rows.Err()
 }
 
+// EventLogsForRun returns a run's redacted provider events in stream order
+// for the replay view.
+func (s *Store) EventLogsForRun(ctx context.Context, projectID, runID string, limit int) ([]EventLog, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.run_id,e.provider,e.event_type,CAST(e.raw_payload AS TEXT),e.created_at FROM event_logs e JOIN runs r ON r.id=e.run_id WHERE r.project_id=? AND e.run_id=? ORDER BY e.id LIMIT ?`, projectID, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEventLogs(rows)
+}
+
+// PromptForRun returns the audited prompt record (template, hash, redacted
+// preview) for a run.
+type PromptView struct {
+	Template, RenderedHash, RedactedPrompt string
+}
+
+func (s *Store) PromptForRun(ctx context.Context, runID string) (PromptView, error) {
+	var record PromptView
+	err := s.db.QueryRowContext(ctx, `SELECT template,rendered_hash,redacted_prompt FROM prompt_records WHERE run_id=?`, runID).Scan(&record.Template, &record.RenderedHash, &record.RedactedPrompt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return record, ErrNotFound
+	}
+	return record, err
+}
+
+func (s *Store) VerificationsForRun(ctx context.Context, runID string) ([]VerificationRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT check_type,status,actual_value,command,exit_code,duration_ms,required,output FROM verification_results WHERE run_id=? ORDER BY id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []VerificationRecord
+	for rows.Next() {
+		var record VerificationRecord
+		var durationMS int64
+		if err = rows.Scan(&record.CheckType, &record.Status, &record.ActualValue, &record.Command, &record.ExitCode, &durationMS, &record.Required, &record.Output); err != nil {
+			return nil, err
+		}
+		record.RunID = runID
+		record.Duration = time.Duration(durationMS) * time.Millisecond
+		result = append(result, record)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ListEventLogs(ctx context.Context, projectID string, limit int) ([]EventLog, error) {
 	if limit <= 0 || limit > 1000 {
 		return nil, errors.New("event log limit must be between 1 and 1000")
@@ -185,11 +234,15 @@ func (s *Store) ListEventLogs(ctx context.Context, projectID string, limit int) 
 		return nil, err
 	}
 	defer rows.Close()
+	return scanEventLogs(rows)
+}
+
+func scanEventLogs(rows *sql.Rows) ([]EventLog, error) {
 	var result []EventLog
 	for rows.Next() {
 		var event EventLog
 		var created string
-		if err = rows.Scan(&event.ID, &event.RunID, &event.Provider, &event.Type, &event.Raw, &created); err != nil {
+		if err := rows.Scan(&event.ID, &event.RunID, &event.Provider, &event.Type, &event.Raw, &created); err != nil {
 			return nil, err
 		}
 		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)

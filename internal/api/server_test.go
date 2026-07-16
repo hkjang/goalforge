@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/provider"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
@@ -146,6 +147,43 @@ func goalID(t *testing.T, db *store.Store) string {
 		t.Fatal(err)
 	}
 	return goal.ID
+}
+
+func TestRunDetailReplaysAuditRecords(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.StartRun(ctx, store.RunRecord{ID: "R-DETAIL", ProjectID: "P-API", WorkItemID: "W-API", Provider: "codex", TaskType: "CONTINUE_GOAL"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordPrompt(ctx, "R-DETAIL", "work_item_execution", "do the work with token=secret-value-123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordProviderEvent(ctx, "P-API", provider.Event{RunID: "R-DETAIL", Type: provider.EventCompleted, TurnID: "t1", Raw: json.RawMessage(`{"type":"turn.completed"}`), Usage: &provider.Usage{InputTokens: 500, OutputTokens: 100}}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects/P-API/runs/R-DETAIL", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var detail RunDetail
+	if err := json.Unmarshal(response.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Run.TaskType != "CONTINUE_GOAL" || detail.Usage.InputTokens != 500 || len(detail.Turns) != 1 || len(detail.Events) != 1 {
+		t.Fatalf("detail=%+v", detail)
+	}
+	if detail.Prompt == nil || detail.Prompt.Template != "work_item_execution" {
+		t.Fatalf("prompt=%+v", detail.Prompt)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/projects/P-API/runs/R-MISSING", nil)
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing run must 404: %d", response.Code)
+	}
 }
 
 func TestMetricsEndpointServesPrometheusFormatBehindBearer(t *testing.T) {
