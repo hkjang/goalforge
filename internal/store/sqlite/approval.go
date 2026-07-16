@@ -14,6 +14,9 @@ const (
 	// ApprovalPublishBranch gates pushing a verified work branch to a remote
 	// (SEC-011: external transfers require explicit user approval).
 	ApprovalPublishBranch = "PUBLISH_BRANCH"
+	// ApprovalMergeBranch gates merging a verified work branch into the
+	// protected default branch.
+	ApprovalMergeBranch = "MERGE_BRANCH"
 )
 
 type Approval struct {

@@ -19,6 +19,45 @@ const (
 	commitAuthorEmail = "goalforge@goalforge.invalid"
 )
 
+// ErrMergeConflict means the merge could not complete cleanly; the merge was
+// aborted and the repository left untouched for user review (자동 병합 금지).
+var ErrMergeConflict = errors.New("merge conflict requires user review")
+
+// MergeVerified merges a verified work branch into defaultBranch with a
+// traceable merge commit. The repository must already be checked out on
+// defaultBranch with a clean tree; a conflicting merge is aborted and
+// surfaced as ErrMergeConflict instead of being auto-resolved.
+func MergeVerified(ctx context.Context, repository, defaultBranch, branch, message string) (string, error) {
+	if repository == "" || defaultBranch == "" || branch == "" || message == "" {
+		return "", errors.New("repository, default branch, work branch, and message are required")
+	}
+	current, err := gitOutput(ctx, repository, "branch", "--show-current")
+	if err != nil {
+		return "", err
+	}
+	if current != defaultBranch {
+		return "", fmt.Errorf("repository is on %s; check out %s before merging", current, defaultBranch)
+	}
+	status, err := gitOutput(ctx, repository, "status", "--porcelain")
+	if err != nil {
+		return "", err
+	}
+	if status != "" {
+		return "", errors.New("working tree must be clean before merging")
+	}
+	merge := exec.CommandContext(ctx, "git",
+		"-C", repository,
+		"-c", "user.name="+commitAuthorName,
+		"-c", "user.email="+commitAuthorEmail,
+		"merge", "--no-ff", "-m", message, branch)
+	if output, mergeErr := merge.CombinedOutput(); mergeErr != nil {
+		abort := exec.CommandContext(ctx, "git", "-C", repository, "merge", "--abort")
+		_ = abort.Run()
+		return "", fmt.Errorf("%w: %s", ErrMergeConflict, strings.TrimSpace(string(output)))
+	}
+	return gitOutput(ctx, repository, "rev-parse", "HEAD")
+}
+
 // PushBranch publishes branch to the named remote. Callers must hold an
 // explicit user approval first (SEC-011); this function never forces.
 func PushBranch(ctx context.Context, repository, remote, branch string) error {

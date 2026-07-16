@@ -144,6 +144,8 @@ func run(ctx context.Context, args []string) error {
 		}
 	case "publish":
 		return publishWork(ctx, s, args[1:])
+	case "merge":
+		return mergeWork(ctx, s, args[1:])
 	case "rollback":
 		return rollbackWork(ctx, s, args[1:])
 	case "approval":
@@ -153,6 +155,8 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "approve" {
 			return approvalApprove(ctx, s, args[2:])
 		}
+	case "doctor":
+		return runDoctor(ctx, s, args[1:])
 	case "worker":
 		return runWorker(ctx, s, args[1:])
 	case "serve":
@@ -184,7 +188,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|cancel|approval request|approval approve ID|worker [--once]|serve")
+	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|merge|doctor|cancel|approval request|approval approve ID|worker [--once]|serve")
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -241,6 +245,45 @@ func projectRuntime(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	fmt.Printf("runtime policy set: turn_timeout=%s run_timeout=%s\n", policy.TurnTimeout, policy.RunTimeout)
+	return nil
+}
+
+// mergeWork merges a verified work branch into the project's default branch.
+// Like publish it is manual and approval-gated; conflicts are aborted for
+// user review rather than auto-resolved.
+func mergeWork(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("merge", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item whose verified branch to merge")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	project, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	commit, err := s.LatestRunCommitForWork(ctx, project.ID, *workItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("work item %s has no verified commit; only verified work can be merged", *workItemID)
+	}
+	if err != nil {
+		return err
+	}
+	approved, err := s.ConsumeApproval(ctx, project.ID, store.ApprovalMergeBranch, "merge:"+*workItemID)
+	if err != nil {
+		return err
+	}
+	if !approved {
+		return fmt.Errorf("merging into %s requires approval: run `goalforge approval request --action merge-branch --reason ...` and approve it first", project.DefaultBranch)
+	}
+	message := "Merge verified work " + *workItemID + "\n\nGoal-ID: " + commit.GoalID + "\nWork-Item-ID: " + commit.WorkItemID + "\nRun-ID: " + commit.RunID + "\n"
+	sha, err := gitops.MergeVerified(ctx, project.RepositoryPath, project.DefaultBranch, commit.Branch, message)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("merged: branch=%s into=%s commit=%s work=%s\n", commit.Branch, project.DefaultBranch, sha, *workItemID)
 	return nil
 }
 
@@ -457,6 +500,111 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 	return fmt.Errorf("maximum consecutive run limit reached: %d", *maxRuns)
 }
 
+// requiredProviderFlags are the CLI flags each adapter passes; a provider
+// binary whose help output lacks one would fail on every run, so doctor
+// verifies them up front.
+var requiredProviderFlags = map[string][]string{
+	"claude": {"--output-format", "--resume", "--settings", "--permission-mode", "--json-schema", "--no-session-persistence"},
+	"codex":  {"--json", "--sandbox", "--output-schema"},
+}
+
+func providerBinary(providerName string) string {
+	switch providerName {
+	case "claude":
+		if bin := os.Getenv("GOALFORGE_CLAUDE_BIN"); bin != "" {
+			return bin
+		}
+		return "claude"
+	case "codex":
+		if bin := os.Getenv("GOALFORGE_CODEX_BIN"); bin != "" {
+			return bin
+		}
+		return "codex"
+	}
+	return providerName
+}
+
+// runDoctor diagnoses the failure modes that otherwise only surface mid-run:
+// missing tools, unauthenticated or incompatible provider CLIs, and an
+// unregistered project.
+func runDoctor(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	probeAuth := f.Bool("probe-auth", false, "send one minimal provider request to verify authentication (consumes a small amount of quota)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	failed := 0
+	report := func(level, name, detail string) {
+		if level == "FAIL" {
+			failed++
+		}
+		fmt.Printf("%-4s %-16s %s\n", level, name, detail)
+	}
+	if output, err := exec.CommandContext(ctx, "git", "--version").Output(); err != nil {
+		report("FAIL", "git", "git is required but not found: "+err.Error())
+	} else {
+		report("OK", "git", strings.TrimSpace(string(output)))
+	}
+	report("OK", "database", "state store opened")
+	providers := []string{"claude", "codex"}
+	cwd, _ := os.Getwd()
+	project, projectErr := s.ProjectByPath(ctx, cwd)
+	if projectErr == nil {
+		report("OK", "project", fmt.Sprintf("%s provider=%s model=%s state=%s", project.Name, project.Provider, project.Model, project.State))
+		providers = []string{project.Provider}
+	} else if errors.Is(projectErr, store.ErrNotFound) {
+		report("WARN", "project", "no project registered for this directory (goalforge project init)")
+	} else {
+		return projectErr
+	}
+	for _, name := range providers {
+		binary := providerBinary(name)
+		resolved, err := exec.LookPath(binary)
+		if err != nil {
+			report("FAIL", name+" cli", fmt.Sprintf("%s not found in PATH", binary))
+			continue
+		}
+		version := "version unknown"
+		if output, versionErr := exec.CommandContext(ctx, resolved, "--version").Output(); versionErr == nil {
+			version = strings.TrimSpace(strings.Split(string(output), "\n")[0])
+		}
+		report("OK", name+" cli", resolved+" ("+version+")")
+		if help, helpErr := exec.CommandContext(ctx, resolved, "--help").CombinedOutput(); helpErr == nil {
+			var missing []string
+			for _, flagName := range requiredProviderFlags[name] {
+				if !strings.Contains(string(help), flagName) {
+					missing = append(missing, flagName)
+				}
+			}
+			if len(missing) > 0 {
+				report("FAIL", name+" flags", "CLI does not support required flags: "+strings.Join(missing, ", "))
+			} else {
+				report("OK", name+" flags", "all adapter flags supported")
+			}
+		} else {
+			report("WARN", name+" flags", "could not read CLI help to verify flag support")
+		}
+		if *probeAuth && name == "claude" {
+			probe := exec.CommandContext(ctx, resolved, "-p", "--output-format", "json", "--model", "haiku")
+			probe.Stdin = strings.NewReader("reply with the single word ok")
+			output, probeErr := probe.CombinedOutput()
+			switch {
+			case strings.Contains(string(output), "\"is_error\":true") || strings.Contains(string(output), "401"):
+				report("FAIL", name+" auth", "authentication failed; run `claude /login` in a terminal")
+			case probeErr != nil:
+				report("FAIL", name+" auth", "probe failed: "+probeErr.Error())
+			default:
+				report("OK", name+" auth", "authenticated")
+			}
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("doctor found %d blocking problem(s)", failed)
+	}
+	fmt.Println("doctor: environment looks ready")
+	return nil
+}
+
 // recoverIfFailed returns a FAILED project (and its stuck work item) to a
 // runnable state before a deliberate retry; other states pass through.
 func recoverIfFailed(ctx context.Context, s *store.Store, projectID string) error {
@@ -538,7 +686,7 @@ func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
 
 func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("approval request", flag.ContinueOnError)
-	action := f.String("action", "protected-files", "protected-files or publish-branch")
+	action := f.String("action", "protected-files", "protected-files, publish-branch, or merge-branch")
 	reason := f.String("reason", "", "reason for approval")
 	if err := f.Parse(args); err != nil {
 		return err
@@ -552,6 +700,8 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 		actionType = store.ApprovalProtectedFiles
 	case "publish-branch", store.ApprovalPublishBranch:
 		actionType = store.ApprovalPublishBranch
+	case "merge-branch", store.ApprovalMergeBranch:
+		actionType = store.ApprovalMergeBranch
 	default:
 		return fmt.Errorf("unsupported approval action %q", *action)
 	}
@@ -587,13 +737,22 @@ func usageShow(ctx context.Context, s *store.Store) error {
 	if err != nil {
 		return err
 	}
-	budget, err := s.ProjectBudgetUsage(ctx, p.ID)
-	if errors.Is(err, store.ErrNotFound) {
-		budget = store.ProjectBudget{}
-	} else if err != nil {
+	// Actual usage comes from the ledger and must be visible even when no
+	// budget was configured.
+	metrics, err := s.ProjectMetrics(ctx, p.ID)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("project tokens: %d / %d\nproject cost: %.4f / %.4f USD\n", budget.TokensUsed, budget.TokenLimit, budget.CostUsedUSD, budget.CostLimitUSD)
+	total := metrics.InputTokens + metrics.OutputTokens + metrics.CachedInputTokens + metrics.ReasoningTokens
+	fmt.Printf("tokens used: input=%d output=%d cached=%d reasoning=%d total=%d\ncost used: %.4f USD\n", metrics.InputTokens, metrics.OutputTokens, metrics.CachedInputTokens, metrics.ReasoningTokens, total, metrics.CostUSD)
+	budget, err := s.ProjectBudgetUsage(ctx, p.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Println("budget: not set (goalforge project budget --tokens ... --cost-usd ...)")
+	} else if err != nil {
+		return err
+	} else {
+		fmt.Printf("token budget: %d / %d\ncost budget: %.4f / %.4f USD\n", budget.TokensUsed, budget.TokenLimit, budget.CostUsedUSD, budget.CostLimitUSD)
+	}
 	quotas, err := s.ListQuotaWindows(ctx, p.Provider)
 	if err != nil {
 		return err

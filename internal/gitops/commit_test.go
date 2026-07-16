@@ -2,12 +2,80 @@ package gitops
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMergeVerifiedMergesCleanAndAbortsConflicts(t *testing.T) {
+	ctx := context.Background()
+	repository := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repository, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-b", "main")
+	run("config", "user.email", "goalforge@example.invalid")
+	run("config", "user.name", "GoalForge Test")
+	write("README.md", "base")
+	run("add", "README.md")
+	run("commit", "-m", "base")
+	run("checkout", "-b", "goalforge/P1-W1")
+	write("feature.go", "package feature")
+	run("add", "feature.go")
+	run("commit", "-m", "feature")
+	run("checkout", "main")
+
+	message := "Merge verified work W1\n\nGoal-ID: G1\nWork-Item-ID: W1\nRun-ID: R1\n"
+	sha, err := MergeVerified(ctx, repository, "main", "goalforge/P1-W1", message)
+	if err != nil || sha == "" {
+		t.Fatalf("sha=%q err=%v", sha, err)
+	}
+	log := run("log", "-1", "--format=%an%n%B")
+	for _, expected := range []string{"GoalForge", "Merge verified work W1", "Work-Item-ID: W1"} {
+		if !strings.Contains(log, expected) {
+			t.Fatalf("missing %q in merge commit %q", expected, log)
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(repository, "feature.go")); statErr != nil {
+		t.Fatalf("merged file missing: %v", statErr)
+	}
+
+	// A conflicting branch must abort cleanly instead of auto-resolving.
+	run("checkout", "-b", "goalforge/P1-W2")
+	write("README.md", "branch change")
+	run("add", "README.md")
+	run("commit", "-m", "branch side")
+	run("checkout", "main")
+	write("README.md", "main change")
+	run("add", "README.md")
+	run("commit", "-m", "main side")
+	if _, err = MergeVerified(ctx, repository, "main", "goalforge/P1-W2", message); !errors.Is(err, ErrMergeConflict) {
+		t.Fatalf("expected ErrMergeConflict, got %v", err)
+	}
+	if status := run("status", "--porcelain"); status != "" {
+		t.Fatalf("repository dirty after aborted merge: %q", status)
+	}
+	// Wrong checked-out branch is refused before touching anything.
+	run("checkout", "goalforge/P1-W2")
+	if _, err = MergeVerified(ctx, repository, "main", "goalforge/P1-W1", message); err == nil {
+		t.Fatal("merge must require the default branch to be checked out")
+	}
+}
 
 func TestPushBranchPublishesToLocalRemote(t *testing.T) {
 	ctx := context.Background()

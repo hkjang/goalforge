@@ -102,6 +102,16 @@ Additional release blockers from the numbered requirements:
 - SEC-011 publishing: `goalforge publish --work-item` pushes a verified work
   branch to a remote only after a consumable `PUBLISH_BRANCH` approval;
   runs never push on their own and only recorded verified commits qualify.
+- `goalforge doctor` diagnoses the failure modes E2E surfaced before any
+  run: git presence, provider CLI presence/version, adapter-flag support
+  (would have caught the `--include-hook-events` bug), project
+  registration, and optional `--probe-auth`.
+- `goalforge merge --work-item` completes the pipeline: a verified work
+  branch merges into the default branch behind a consumable `MERGE_BRANCH`
+  approval; conflicts abort cleanly for user review (자동 병합 금지) and the
+  merge commit carries Goal/Work/Run trailers.
+- `goalforge usage` now reports ledger totals (per token type + cost)
+  independently of whether a budget is configured.
 - E2E validated against the real Claude Code CLI (2.1.25) contract: the
   observed stream-json init/assistant/result payloads decode correctly
   (including `is_error:true` results), and a full
