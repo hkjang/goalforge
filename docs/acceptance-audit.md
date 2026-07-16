@@ -124,6 +124,12 @@ Additional release blockers from the numbered requirements:
 - CommitVerified stages first and commits only when `git diff --cached`
   shows real content, so Windows line-ending normalization can no longer
   fail a verified run with "nothing to commit".
+- The manual sandbox E2E is codified as `cmd/goalforge/main_e2e_test.go`: an
+  automated test drives the real CLI dispatch through project init → goal →
+  work → gate → continue (worktree isolation, verification, auto-commit
+  trailers, usage in status) → approval-denied/approved merge and publish →
+  worktree gc → revived CONTINUE job via `worker --once`. The CLI layer —
+  where both dispatch bugs hid — is no longer untested.
 - E2E validated against the real Claude Code CLI (2.1.25) contract: the
   observed stream-json init/assistant/result payloads decode correctly
   (including `is_error:true` results), and a full
