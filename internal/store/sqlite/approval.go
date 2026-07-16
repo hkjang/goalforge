@@ -45,6 +45,25 @@ func (s *Store) Approve(ctx context.Context, projectID, approvalID string) error
 	return nil
 }
 
+func (s *Store) ListPendingApprovals(ctx context.Context, projectID string) ([]Approval, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,project_id,action_type,reason,status,requested_at FROM approvals WHERE project_id=? AND status='PENDING' ORDER BY requested_at,id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []Approval
+	for rows.Next() {
+		var approval Approval
+		var requested string
+		if err = rows.Scan(&approval.ID, &approval.ProjectID, &approval.ActionType, &approval.Reason, &approval.Status, &requested); err != nil {
+			return nil, err
+		}
+		approval.RequestedAt, _ = time.Parse(time.RFC3339Nano, requested)
+		result = append(result, approval)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ConsumeApproval(ctx context.Context, projectID, actionType, runID string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

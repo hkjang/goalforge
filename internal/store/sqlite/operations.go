@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/goalforge/goalforge/internal/model"
 )
 
 type EventLog struct {
@@ -61,6 +63,61 @@ func (s *Store) ProjectMetrics(ctx context.Context, projectID string) (ProjectMe
 		}
 	}
 	return metrics, rows.Err()
+}
+
+// CriterionStatus reports whether a completion criterion is satisfied by the
+// latest verification evidence.
+type CriterionStatus struct {
+	Type, ExpectedValue, ActualValue string
+	Satisfied                        bool
+}
+
+func (s *Store) CriteriaStatus(ctx context.Context, goal model.Goal) ([]CriterionStatus, error) {
+	result := make([]CriterionStatus, 0, len(goal.Criteria))
+	for _, criterion := range goal.Criteria {
+		entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue}
+		var actual, status string
+		err := s.db.QueryRowContext(ctx, `SELECT actual_value,status FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goal.ID, criterion.Type).Scan(&actual, &status)
+		if err == nil {
+			entry.ActualValue = actual
+			entry.Satisfied = status == "PASSED" && criterionMet(criterion.ExpectedValue, actual)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
+// RunView is a run summarized for operational displays.
+type RunView struct {
+	ID, WorkItemID, TaskType, State string
+	StartedAt, EndedAt              time.Time
+	Tokens                          int64
+	CostUSD                         float64
+}
+
+func (s *Store) ListRecentRuns(ctx context.Context, projectID string, limit int) ([]RunView, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,COALESCE(r.work_item_id,''),r.task_type,r.state,r.started_at,COALESCE(r.ended_at,''),COALESCE(SUM(CASE WHEN l.token_type<>'cost_usd' THEN l.amount ELSE 0 END),0),COALESCE(SUM(l.cost),0) FROM runs r LEFT JOIN usage_ledger l ON l.run_id=r.id WHERE r.project_id=? GROUP BY r.id ORDER BY r.started_at DESC,r.id DESC LIMIT ?`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []RunView
+	for rows.Next() {
+		var run RunView
+		var started, ended string
+		if err = rows.Scan(&run.ID, &run.WorkItemID, &run.TaskType, &run.State, &started, &ended, &run.Tokens, &run.CostUSD); err != nil {
+			return nil, err
+		}
+		run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+		run.EndedAt, _ = time.Parse(time.RFC3339Nano, ended)
+		result = append(result, run)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) ListSessions(ctx context.Context, projectID string) ([]SessionRecord, error) {

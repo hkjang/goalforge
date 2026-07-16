@@ -124,6 +124,14 @@ Additional release blockers from the numbered requirements:
 - CommitVerified stages first and commits only when `git diff --cached`
   shows real content, so Windows line-ending normalization can no longer
   fail a verified run with "nothing to commit".
+- Mission-control dashboard: the embedded web UI now hash-routes to a
+  project detail view — goal header with version/status, state chip with a
+  live resume countdown, threshold-colored gauges (progress, token/cost
+  budget, per-window account quota), completion-criteria checklist backed
+  by `CriteriaStatus` evidence, backlog kanban, recent-runs table with task
+  types and per-run tokens (`ListRecentRuns`), pending approvals with copy-
+  ready CLI commands (`ListPendingApprovals`), and sessions. Completed
+  projects fall back to their latest goal instead of "목표 미등록".
 - The manual sandbox E2E is codified as `cmd/goalforge/main_e2e_test.go`: an
   automated test drives the real CLI dispatch through project init → goal →
   work → gate → continue (worktree isolation, verification, auto-commit

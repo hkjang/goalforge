@@ -29,12 +29,20 @@ type ProjectSummary struct {
 
 type ProjectDetail struct {
 	ProjectSummary
-	WorkItems []model.WorkItem      `json:"work_items"`
-	Sessions  []store.SessionRecord `json:"sessions"`
-	Quotas    []QuotaView           `json:"quota_windows"`
-	Jobs      []JobView             `json:"scheduler_jobs"`
-	Budget    *store.ProjectBudget  `json:"budget,omitempty"`
-	Daily     *store.DailyUsage     `json:"daily_usage,omitempty"`
+	WorkItems []model.WorkItem        `json:"work_items"`
+	Sessions  []store.SessionRecord   `json:"sessions"`
+	Quotas    []QuotaView             `json:"quota_windows"`
+	Jobs      []JobView               `json:"scheduler_jobs"`
+	Budget    *store.ProjectBudget    `json:"budget,omitempty"`
+	Daily     *store.DailyUsage       `json:"daily_usage,omitempty"`
+	Criteria  []store.CriterionStatus `json:"criteria"`
+	Runs      []store.RunView         `json:"runs"`
+	Approvals []ApprovalView          `json:"pending_approvals"`
+}
+
+type ApprovalView struct {
+	ID, ActionType, Reason string
+	RequestedAt            time.Time
 }
 
 type QuotaView struct {
@@ -114,6 +122,19 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 	detail := ProjectDetail{ProjectSummary: summary}
 	if summary.Goal != nil {
 		detail.WorkItems, err = s.store.ListWorkItems(r.Context(), summary.Goal.ID)
+		if err == nil {
+			detail.Criteria, err = s.store.CriteriaStatus(r.Context(), *summary.Goal)
+		}
+	}
+	if err == nil {
+		detail.Runs, err = s.store.ListRecentRuns(r.Context(), project.ID, 15)
+	}
+	if err == nil {
+		var pending []store.Approval
+		pending, err = s.store.ListPendingApprovals(r.Context(), project.ID)
+		for _, approval := range pending {
+			detail.Approvals = append(detail.Approvals, ApprovalView{ID: approval.ID, ActionType: approval.ActionType, Reason: approval.Reason, RequestedAt: approval.RequestedAt})
+		}
 	}
 	if err == nil {
 		detail.Sessions, err = s.store.ListSessions(r.Context(), project.ID)
@@ -156,6 +177,11 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSummary, error) {
 	summary := ProjectSummary{Project: project}
 	goal, err := s.store.CurrentGoal(ctx, project.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		// A completed project has no ACTIVE goal; show the last goal so the
+		// dashboard still explains what was accomplished.
+		goal, err = s.store.LatestGoal(ctx, project.ID)
+	}
 	if err == nil {
 		summary.Goal = &goal
 		summary.Progress, summary.Complete, err = s.store.GoalProgress(ctx, goal)
