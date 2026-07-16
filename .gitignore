@@ -1,0 +1,5 @@
+/.goalforge/
+/goalforge
+*.db
+*.db-shm
+*.db-wal
