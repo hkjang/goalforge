@@ -2,8 +2,22 @@
 
 GoalForge is a goal-first development orchestrator. The Go process owns project
 state, versioned goals, work ordering, verification evidence, and completion;
-AI sessions (Codex, Claude Code) are execution tools rather than the source of
-truth.
+AI sessions (Codex, Claude Code, Qwen Code, OpenCode) are execution tools
+rather than the source of truth.
+
+## Providers
+
+| Provider | Binary | Transport | Read-only mapping | Writable mapping | Resume |
+| --- | --- | --- | --- | --- | --- |
+| `codex` | `codex` | `exec --json` (or App Server) | `--sandbox read-only` | `--sandbox workspace-write` | `exec resume ID` |
+| `claude` | `claude` | `-p --output-format stream-json` | `--permission-mode plan` | `--permission-mode acceptEdits` | `--resume ID` |
+| `qwen` | `qwen` | `--output-format stream-json` | `--approval-mode plan` | `--approval-mode auto-edit` | `--resume ID` |
+| `opencode` | `opencode` | `run --format json` | `--agent plan` | `--auto` (denied permissions stay denied) | `--session ID` |
+
+Writable mappings deliberately avoid each tool's broadest permission mode
+(`--yolo`, `--dangerously-skip-permissions`); verification gates run under
+GoalForge's own policy-checked engine either way. Run `goalforge doctor` to
+verify the installed CLI supports every flag the adapter passes.
 
 ## Quick start
 
@@ -25,7 +39,7 @@ goalforge status
 
 ```sh
 goalforge doctor [--probe-auth]        # environment diagnostics before anything runs
-goalforge project init --name N [--repo .] [--provider codex|claude] [--model M]
+goalforge project init --name N [--repo .] [--provider codex|claude|qwen|opencode] [--model M]
                        [--fallback-model M] [--worktrees] [--auto-commit]
 goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily-tokens 250000 --daily-cost-usd 15
 goalforge project runtime --turn-timeout 30m --run-timeout 2h
@@ -89,7 +103,7 @@ GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
 | Variable | Purpose |
 | --- | --- |
 | `GOALFORGE_DB` | SQLite path (default `.goalforge/goalforge.db`; also `--db PATH`) |
-| `GOALFORGE_CLAUDE_BIN` / `GOALFORGE_CODEX_BIN` | Provider CLI binary override |
+| `GOALFORGE_CLAUDE_BIN` / `GOALFORGE_CODEX_BIN` / `GOALFORGE_QWEN_BIN` / `GOALFORGE_OPENCODE_BIN` | Provider CLI binary override |
 | `GOALFORGE_WEBHOOK_URL` | Slack-compatible JSON webhook for WAITING_QUOTA / BLOCKED / COMPLETED |
 | `GOALFORGE_AUDIT_KEY` | AES key (base64) to retain encrypted prompt originals |
 | `GOALFORGE_CODEX_TRANSPORT=app-server` | Experimental Codex App Server transport |

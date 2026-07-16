@@ -158,6 +158,18 @@ Additional release blockers from the numbered requirements:
 - `NewID` is now monotonic per process: Windows' coarse clock returned
   identical `UnixNano` values for rapid consecutive calls, causing
   intermittent `UNIQUE constraint failed` test flakes.
+- Providers: Qwen Code and OpenCode join Codex and Claude Code. Qwen Code's
+  headless mode speaks a Claude-compatible stream-json contract
+  (`--output-format stream-json`, `--resume`, `--approval-mode plan` /
+  `auto-edit`); OpenCode runs via `run --format json` with `--session`
+  resume, the built-in `plan` agent for read-only work, and `--auto` (never
+  `--dangerously-skip-permissions`) for writable work. Both are wired into
+  the worker, runtime service, provider switching, doctor flag probes, and
+  `GOALFORGE_QWEN_BIN` / `GOALFORGE_OPENCODE_BIN` overrides. Doctor now
+  treats missing CLIs as WARN when no project is registered and FAIL only
+  for the provider a project actually uses. Sandbox E2E: both providers
+  drive a goal to COMPLETED with session capture, token ledger entries, and
+  (qwen) auto-commit.
 - The manual sandbox E2E is codified as `cmd/goalforge/main_e2e_test.go`: an
   automated test drives the real CLI dispatch through project init → goal →
   work → gate → continue (worktree isolation, verification, auto-commit

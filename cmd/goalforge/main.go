@@ -27,6 +27,8 @@ import (
 	"github.com/goalforge/goalforge/internal/provider"
 	"github.com/goalforge/goalforge/internal/provider/claude"
 	"github.com/goalforge/goalforge/internal/provider/codex"
+	"github.com/goalforge/goalforge/internal/provider/opencode"
+	"github.com/goalforge/goalforge/internal/provider/qwen"
 	"github.com/goalforge/goalforge/internal/scheduler"
 	pgstore "github.com/goalforge/goalforge/internal/store/postgres"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
@@ -398,14 +400,14 @@ func rollbackWork(ctx context.Context, s *store.Store, args []string) error {
 
 func projectProviderSet(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("project provider set", flag.ContinueOnError)
-	providerName := f.String("provider", "", "target provider: codex or claude")
+	providerName := f.String("provider", "", "target provider: codex, claude, qwen, or opencode")
 	modelName := f.String("model", "", "target model")
 	reason := f.String("reason", "provider transition requested by user", "handoff reason")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if *providerName != "codex" && *providerName != "claude" {
-		return errors.New("--provider must be codex or claude")
+	if !isSupportedProvider(*providerName) {
+		return fmt.Errorf("--provider must be one of %s", strings.Join(supportedProviders, ", "))
 	}
 	project, err := currentProject(ctx, s)
 	if err != nil {
@@ -504,24 +506,31 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 // binary whose help output lacks one would fail on every run, so doctor
 // verifies them up front.
 var requiredProviderFlags = map[string][]string{
-	"claude": {"--output-format", "--resume", "--settings", "--permission-mode", "--json-schema", "--no-session-persistence"},
-	"codex":  {"--json", "--sandbox", "--output-schema"},
+	"claude":   {"--output-format", "--resume", "--settings", "--permission-mode", "--json-schema", "--no-session-persistence"},
+	"codex":    {"--json", "--sandbox", "--output-schema"},
+	"qwen":     {"--output-format", "--resume", "--approval-mode", "--model"},
+	"opencode": {"run", "--format", "--session", "--agent", "--model"},
 }
 
+var supportedProviders = []string{"codex", "claude", "qwen", "opencode"}
+
 func providerBinary(providerName string) string {
-	switch providerName {
-	case "claude":
-		if bin := os.Getenv("GOALFORGE_CLAUDE_BIN"); bin != "" {
+	overrides := map[string]string{"claude": "GOALFORGE_CLAUDE_BIN", "codex": "GOALFORGE_CODEX_BIN", "qwen": "GOALFORGE_QWEN_BIN", "opencode": "GOALFORGE_OPENCODE_BIN"}
+	if env, ok := overrides[providerName]; ok {
+		if bin := os.Getenv(env); bin != "" {
 			return bin
 		}
-		return "claude"
-	case "codex":
-		if bin := os.Getenv("GOALFORGE_CODEX_BIN"); bin != "" {
-			return bin
-		}
-		return "codex"
 	}
 	return providerName
+}
+
+func isSupportedProvider(name string) bool {
+	for _, candidate := range supportedProviders {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }
 
 // runDoctor diagnoses the failure modes that otherwise only surface mid-run:
@@ -546,12 +555,16 @@ func runDoctor(ctx context.Context, s *store.Store, args []string) error {
 		report("OK", "git", strings.TrimSpace(string(output)))
 	}
 	report("OK", "database", "state store opened")
-	providers := []string{"claude", "codex"}
+	providers := supportedProviders
+	// Without a registered project every provider is optional: only the
+	// provider a project actually uses can block readiness.
+	missingLevel := "WARN"
 	cwd, _ := os.Getwd()
 	project, projectErr := s.ProjectByPath(ctx, cwd)
 	if projectErr == nil {
 		report("OK", "project", fmt.Sprintf("%s provider=%s model=%s state=%s", project.Name, project.Provider, project.Model, project.State))
 		providers = []string{project.Provider}
+		missingLevel = "FAIL"
 	} else if errors.Is(projectErr, store.ErrNotFound) {
 		report("WARN", "project", "no project registered for this directory (goalforge project init)")
 	} else {
@@ -561,7 +574,7 @@ func runDoctor(ctx context.Context, s *store.Store, args []string) error {
 		binary := providerBinary(name)
 		resolved, err := exec.LookPath(binary)
 		if err != nil {
-			report("FAIL", name+" cli", fmt.Sprintf("%s not found in PATH", binary))
+			report(missingLevel, name+" cli", fmt.Sprintf("%s not found in PATH", binary))
 			continue
 		}
 		version := "version unknown"
@@ -757,7 +770,12 @@ func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
 		codexProvider = adapter
 		cleanup = func() { _ = adapter.Close() }
 	}
-	return []provider.Provider{codexProvider, claude.New(os.Getenv("GOALFORGE_CLAUDE_BIN"))}, cleanup, nil
+	return []provider.Provider{
+		codexProvider,
+		claude.New(os.Getenv("GOALFORGE_CLAUDE_BIN")),
+		qwen.New(os.Getenv("GOALFORGE_QWEN_BIN")),
+		opencode.New(os.Getenv("GOALFORGE_OPENCODE_BIN")),
+	}, cleanup, nil
 }
 
 func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
@@ -1154,6 +1172,10 @@ func runtimeService(ctx context.Context, s *store.Store, p model.Project) (*app.
 		}
 	case "claude":
 		selected = claude.New(os.Getenv("GOALFORGE_CLAUDE_BIN"))
+	case "qwen":
+		selected = qwen.New(os.Getenv("GOALFORGE_QWEN_BIN"))
+	case "opencode":
+		selected = opencode.New(os.Getenv("GOALFORGE_OPENCODE_BIN"))
 	default:
 		return nil, cleanup, fmt.Errorf("unsupported provider %q", p.Provider)
 	}
@@ -1307,7 +1329,7 @@ func projectInit(ctx context.Context, s *store.Store, args []string) error {
 	name := f.String("name", "", "project name")
 	repo := f.String("repo", ".", "repository path")
 	branch := f.String("branch", "", "default branch")
-	provider := f.String("provider", "codex", "provider")
+	provider := f.String("provider", "codex", "provider: codex, claude, qwen, or opencode")
 	modelName := f.String("model", "", "model")
 	fallbackModel := f.String("fallback-model", "", "approved substitute model when the configured model is rejected")
 	worktreeEnabled := f.Bool("worktrees", false, "run each work item in a dedicated Git worktree")
@@ -1317,6 +1339,9 @@ func projectInit(ctx context.Context, s *store.Store, args []string) error {
 	}
 	if *name == "" {
 		return errors.New("--name is required")
+	}
+	if !isSupportedProvider(*provider) {
+		return fmt.Errorf("--provider must be one of %s", strings.Join(supportedProviders, ", "))
 	}
 	abs, err := filepath.Abs(*repo)
 	if err != nil {
