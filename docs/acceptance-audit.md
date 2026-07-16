@@ -62,6 +62,16 @@ Additional release blockers from the numbered requirements:
   control is platform-split in `internal/procctl`, fake CLI fixtures come from
   `internal/testscript`, and the Claude StopFailure hook uses `sh`-portable
   paths.
+- Section 5.2 `AUDIT_AND_IMPROVE`: `goalforge audit` runs a read-only isolated
+  inspection across quality/security/performance/UX/operability and funnels
+  candidates through the same dedup/scoring/WIP pipeline as idea discovery.
+- Sections 6.5/18: every DB checkpoint (manual, safe drain, quota wait) also
+  writes a human-readable `continuity/<project>.md` companion next to the
+  database — outside the repository tree so the recorded dirty snapshot stays
+  valid.
+- Section 6.7 refinement: `policy.ParseRetryAfter` extracts Retry-After hints
+  from provider error text so short rate-limit retries honor the provider's
+  wait over the backoff ladder.
 
 The active goal must remain open until every required row is `PASS` or the
 scope is explicitly revised by the user.

@@ -3,7 +3,9 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +39,20 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	}
 	if got.ID != created.ID || got.SessionID != "thr-1" || len(got.DirtyFiles) != 2 || got.DirtyFingerprint != "fingerprint-1" || got.NextAction != "resume work" {
 		t.Fatalf("checkpoint=%+v", got)
+	}
+	// Every DB checkpoint keeps a human-readable CONTINUITY.md companion in
+	// the state directory, never inside the repository working tree.
+	continuity, err := os.ReadFile(s.ContinuityPath(p.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{created.ID, "resume work", "run tests", "a.go, b.go", "thr-1"} {
+		if !strings.Contains(string(continuity), expected) {
+			t.Fatalf("continuity missing %q:\n%s", expected, continuity)
+		}
+	}
+	if strings.HasPrefix(s.ContinuityPath(p.ID), p.RepositoryPath) {
+		t.Fatal("continuity file must not live inside the repository")
 	}
 }
 

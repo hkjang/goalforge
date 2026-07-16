@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -141,6 +143,41 @@ func DecideRetry(kind FailureKind, attempt, maxAttempts int, retryAfter *time.Du
 		}
 		return RetryDecision{Action: RetryAfterDelay, Delay: Backoff(attempt, jitter), Reason: "unclassified failure; conservative backoff"}
 	}
+}
+
+var (
+	retryAfterHeader   = regexp.MustCompile(`(?i)retry-after[:=]?\s*(\d+)`)
+	retryAfterDuration = regexp.MustCompile(`(?i)(?:retry|try again|wait)\s+(?:in|after)?\s*(\d+(?:\.\d+)?)\s*(seconds?|secs?|s\b|minutes?|mins?|m\b|hours?|hrs?|h\b)`)
+)
+
+// ParseRetryAfter extracts a short-wait hint from a provider error message:
+// an HTTP Retry-After value (seconds) or phrases like "retry in 30 seconds"
+// and "try again in 2 minutes". It returns nil when no hint is present so the
+// caller falls back to the backoff ladder.
+func ParseRetryAfter(message string) *time.Duration {
+	if match := retryAfterHeader.FindStringSubmatch(message); match != nil {
+		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
+			value := time.Duration(seconds) * time.Second
+			return &value
+		}
+	}
+	match := retryAfterDuration.FindStringSubmatch(message)
+	if match == nil {
+		return nil
+	}
+	amount, err := strconv.ParseFloat(match[1], 64)
+	if err != nil || amount <= 0 {
+		return nil
+	}
+	unit := time.Second
+	switch strings.ToLower(match[2])[0] {
+	case 'm':
+		unit = time.Minute
+	case 'h':
+		unit = time.Hour
+	}
+	value := time.Duration(amount * float64(unit))
+	return &value
 }
 
 // WaitForRetry sleeps for decision.Delay unless ctx ends first.

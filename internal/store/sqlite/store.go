@@ -21,7 +21,10 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db       *sql.DB
+	stateDir string
+}
 
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -32,7 +35,7 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, stateDir: filepath.Dir(path)}
 	if err := s.migrate(context.Background()); err != nil {
 		db.Close()
 		return nil, err

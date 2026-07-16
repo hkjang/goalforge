@@ -120,6 +120,8 @@ func run(ctx context.Context, args []string) error {
 		return continueGoal(ctx, s, true)
 	case "ideas":
 		return ideasGoal(ctx, s)
+	case "audit":
+		return auditGoal(ctx, s)
 	case "usage":
 		return usageShow(ctx, s)
 	case "sessions":
@@ -171,7 +173,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|cancel|approval request|approval approve ID|worker [--once]|serve")
+	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|cancel|approval request|approval approve ID|worker [--once]|serve")
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -323,7 +325,7 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 		if runErr != nil {
 			failures++
 			kind := policy.ClassifyFailure(runErr, "")
-			decision := policy.DecideRetry(kind, failures, 3, nil, rand.Float64)
+			decision := policy.DecideRetry(kind, failures, 3, policy.ParseRetryAfter(runErr.Error()), rand.Float64)
 			if decision.Action == policy.WaitQuotaReset {
 				fmt.Printf("quota exhausted (%s); stopping until reset\n", kind)
 				return runErr
@@ -527,7 +529,7 @@ func checkpointCreate(ctx context.Context, s *store.Store, args []string) error 
 	if err != nil {
 		return err
 	}
-	fmt.Printf("checkpoint created: %s commit=%s dirty_files=%d\n", cp.ID, cp.CommitSHA, len(cp.DirtyFiles))
+	fmt.Printf("checkpoint created: %s commit=%s dirty_files=%d\ncontinuity: %s\n", cp.ID, cp.CommitSHA, len(cp.DirtyFiles), s.ContinuityPath(p.ID))
 	return nil
 }
 
@@ -678,6 +680,14 @@ func continueGoal(ctx context.Context, s *store.Store, developSelected bool) err
 }
 
 func ideasGoal(ctx context.Context, s *store.Store) error {
+	return discoverGoal(ctx, s, false)
+}
+
+func auditGoal(ctx context.Context, s *store.Store) error {
+	return discoverGoal(ctx, s, true)
+}
+
+func discoverGoal(ctx context.Context, s *store.Store, audit bool) error {
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return err
@@ -687,7 +697,11 @@ func ideasGoal(ctx context.Context, s *store.Store) error {
 		return err
 	}
 	defer cleanup()
-	result, err := service.Ideas(ctx, p)
+	discover := service.Ideas
+	if audit {
+		discover = service.Audit
+	}
+	result, err := discover(ctx, p)
 	if err != nil {
 		return err
 	}

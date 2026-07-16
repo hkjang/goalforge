@@ -85,6 +85,45 @@ func TestIdeasRunsIsolatedStructuredDiscovery(t *testing.T) {
 		t.Fatalf("isolated discovery persisted active session: %v", err)
 	}
 }
+func TestAuditRunsIsolatedImprovementDiscovery(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := model.Project{ID: "P-AUDIT", Name: "demo", RepositoryPath: t.TempDir(), DefaultBranch: "main", Provider: "fake"}
+	if err = db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := db.SetGoal(ctx, project.ID, "ship", "objective", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
+	fake := &fakeProvider{finalMessage: `{"ideas":[{"title":"Close leaked worktree handles","expected_change_scope":"internal/gitops","risk":"low","goal_contribution":80,"user_value":60,"operational_need":90,"feasibility":85,"risk_reduction":80,"difficulty":30,"scope_expansion":false}]}`}
+	runner, _ := orchestrator.New(db, fake)
+	verify, _ := verification.New(db, 1024)
+	service, _ := New(db, plannerService, runner, verify, func() string { return "RUN-A" })
+	result, err := service.Audit(ctx, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Run.State != "COMPLETED" || len(result.Discovery.Accepted) != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	if fake.request.WorkspaceWrite || !fake.request.Ephemeral || fake.request.OutputSchema == "" {
+		t.Fatalf("request=%+v", fake.request)
+	}
+	if !strings.Contains(fake.request.Prompt, "감사") || !strings.Contains(fake.request.Prompt, "보안") {
+		t.Fatalf("audit prompt missing audit perspectives: %q", fake.request.Prompt)
+	}
+	items, err := db.ListWorkItems(ctx, goal.ID)
+	if err != nil || len(items) != 1 || items[0].Title != "Close leaked worktree handles" {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+}
+
 func (f *fakeProvider) Resume(ctx context.Context, _ string, r provider.RunRequest) (<-chan provider.Event, error) {
 	return f.Start(ctx, r)
 }

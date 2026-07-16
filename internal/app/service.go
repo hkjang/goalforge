@@ -56,7 +56,19 @@ func New(s *store.Store, p *planner.Service, o *orchestrator.Orchestrator, v *ve
 	}
 	return &Service{store: s, planner: p, orchestrator: o, verification: v, loopGuard: loopGuard, newRunID: newRunID, leaseDuration: 2 * time.Hour}, nil
 }
-func (s *Service) Ideas(ctx context.Context, project model.Project) (result IdeasResult, err error) {
+
+// Ideas discovers new goal-contributing work candidates (DISCOVER_IDEAS).
+func (s *Service) Ideas(ctx context.Context, project model.Project) (IdeasResult, error) {
+	return s.discover(ctx, project, prompt.Ideas, "idea_discovery", model.TaskDiscoverIdeas)
+}
+
+// Audit inspects the repository for quality, security, performance, UI/UX,
+// and operability problems and files improvements (AUDIT_AND_IMPROVE).
+func (s *Service) Audit(ctx context.Context, project model.Project) (IdeasResult, error) {
+	return s.discover(ctx, project, prompt.Audit, "audit_and_improve", model.TaskAuditAndImprove)
+}
+
+func (s *Service) discover(ctx context.Context, project model.Project, render func(model.Goal, []model.WorkItem) string, template, taskType string) (result IdeasResult, err error) {
 	runID := s.newRunID()
 	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
 		return result, err
@@ -74,8 +86,8 @@ func (s *Service) Ideas(ctx context.Context, project model.Project) (result Idea
 		return result, err
 	}
 	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{
-		RunID: runID, Prompt: prompt.Ideas(goal, existing), OutputSchema: prompt.IdeasSchema(),
-		PromptTemplate: "idea_discovery", TaskType: model.TaskDiscoverIdeas, Project: project, ReadOnlyTask: true, Isolated: true,
+		RunID: runID, Prompt: render(goal, existing), OutputSchema: prompt.IdeasSchema(),
+		PromptTemplate: template, TaskType: taskType, Project: project, ReadOnlyTask: true, Isolated: true,
 	})
 	if err != nil {
 		return result, err

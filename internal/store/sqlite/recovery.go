@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/audit"
@@ -45,7 +49,64 @@ func (s *Store) CreateCheckpoint(ctx context.Context, c Checkpoint) (Checkpoint,
 		runID = c.RunID
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO checkpoints(id,project_id,run_id,goal_version,work_item_id,provider,model,session_id,commit_sha,branch,dirty_files,dirty_fingerprint,completed_summary,verification_summary,remaining_steps,next_action,risk_summary,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.ID, c.ProjectID, runID, c.GoalVersion, c.WorkItemID, c.Provider, c.Model, c.SessionID, c.CommitSHA, c.Branch, string(dirty), c.DirtyFingerprint, c.CompletedSummary, c.VerificationSummary, c.RemainingSteps, c.NextAction, c.RiskSummary, c.CreatedAt.Format(time.RFC3339Nano))
-	return c, err
+	if err != nil {
+		return c, err
+	}
+	return c, s.writeContinuity(c)
+}
+
+var unsafeFileName = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+// ContinuityPath returns where the human-readable companion of the latest
+// checkpoint for projectID is written.
+func (s *Store) ContinuityPath(projectID string) string {
+	name := strings.Trim(unsafeFileName.ReplaceAllString(projectID, "-"), "-.")
+	if name == "" {
+		name = "project"
+	}
+	return filepath.Join(s.stateDir, "continuity", name+".md")
+}
+
+// writeContinuity keeps a CONTINUITY.md companion next to the database for
+// every checkpoint so a human can pick the project up during a quota wait.
+// It lives in the state directory, never in the repository working tree,
+// which would dirty the snapshot the checkpoint just recorded.
+func (s *Store) writeContinuity(c Checkpoint) error {
+	path := s.ContinuityPath(c.ProjectID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(continuityDocument(c)), 0o600)
+}
+
+func continuityDocument(c Checkpoint) string {
+	section := func(title, body string) string {
+		if strings.TrimSpace(body) == "" {
+			body = "(기록 없음)"
+		}
+		return "## " + title + "\n" + body + "\n\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# CONTINUITY — %s\n\n", c.ProjectID)
+	fmt.Fprintf(&b, "- 체크포인트: %s (%s)\n", c.ID, c.CreatedAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(&b, "- 목표 버전: v%d\n", c.GoalVersion)
+	fmt.Fprintf(&b, "- 현재 작업: %s\n", valueOr(c.WorkItemID, "(없음)"))
+	fmt.Fprintf(&b, "- 세션: %s %s %s\n", c.Provider, valueOr(c.Model, "(기본 모델)"), valueOr(c.SessionID, "(세션 없음)"))
+	fmt.Fprintf(&b, "- 저장소: %s @ %s\n", valueOr(c.Branch, "(브랜치 미상)"), valueOr(c.CommitSHA, "(커밋 미상)"))
+	fmt.Fprintf(&b, "- Dirty 파일: %s\n\n", valueOr(strings.Join(c.DirtyFiles, ", "), "(없음)"))
+	b.WriteString(section("완료 내역", c.CompletedSummary))
+	b.WriteString(section("검증 상태", c.VerificationSummary))
+	b.WriteString(section("남은 작업", c.RemainingSteps))
+	b.WriteString(section("다음 행동", c.NextAction))
+	b.WriteString(section("위험", c.RiskSummary))
+	return b.String()
+}
+
+func valueOr(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func (s *Store) LatestCheckpoint(ctx context.Context, projectID string) (Checkpoint, error) {
@@ -264,7 +325,10 @@ func (s *Store) EnterQuotaWait(ctx context.Context, q QuotaWindow, c Checkpoint,
 	if _, err = tx.ExecContext(ctx, `INSERT INTO scheduler_jobs(id,project_id,job_type,run_at,idempotency_key,status,payload,created_at,updated_at) VALUES(?,?,?,?,?,'PENDING',?,?,?) ON CONFLICT(idempotency_key) DO UPDATE SET run_at=excluded.run_at,status=CASE WHEN scheduler_jobs.status='COMPLETED' THEN scheduler_jobs.status ELSE 'PENDING' END,payload=excluded.payload,updated_at=excluded.updated_at`, j.ID, j.ProjectID, j.Type, j.RunAt.UTC().Format(time.RFC3339Nano), j.IdempotencyKey, j.Payload, now, now); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return s.writeContinuity(c)
 }
 
 func (s *Store) BlockBeforeRun(ctx context.Context, projectID, workItemID string, q QuotaWindow, reason string) error {

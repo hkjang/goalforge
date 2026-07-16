@@ -48,6 +48,31 @@ func TestClassifyFailureMatrix(t *testing.T) {
 	}
 }
 
+func TestParseRetryAfter(t *testing.T) {
+	cases := []struct {
+		message string
+		want    time.Duration
+	}{
+		{"429 Too Many Requests. Retry-After: 42", 42 * time.Second},
+		{"rate limited, retry-after=90", 90 * time.Second},
+		{"please retry in 30 seconds", 30 * time.Second},
+		{"overloaded, try again in 2 minutes", 2 * time.Minute},
+		{"rate limit reached, retry after 1 hour", time.Hour},
+		{"wait 15 secs before retrying", 15 * time.Second},
+	}
+	for _, c := range cases {
+		got := ParseRetryAfter(c.message)
+		if got == nil || *got != c.want {
+			t.Fatalf("%q: got %v want %s", c.message, got, c.want)
+		}
+	}
+	for _, message := range []string{"generic failure", "retry later", "wait for the reset"} {
+		if got := ParseRetryAfter(message); got != nil {
+			t.Fatalf("%q: expected nil, got %s", message, *got)
+		}
+	}
+}
+
 func TestDecideRetryMatrix(t *testing.T) {
 	if d := DecideRetry(FailureAccountQuota, 1, 3, nil, nil); d.Action != WaitQuotaReset || d.Delay != 0 {
 		t.Fatalf("quota decision=%+v", d)
