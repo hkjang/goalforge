@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -289,7 +290,24 @@ func (s *Store) ensureColumn(ctx context.Context, table, name, definition string
 	return err
 }
 
-func NewID(prefix string) string { return fmt.Sprintf("%s-%d", prefix, time.Now().UTC().UnixNano()) }
+var lastGeneratedID atomic.Int64
+
+// NewID returns a time-ordered identifier that stays unique even when the
+// platform clock is coarser than a nanosecond (Windows returns identical
+// UnixNano values for rapid consecutive calls, which produced intermittent
+// UNIQUE violations).
+func NewID(prefix string) string {
+	for {
+		now := time.Now().UTC().UnixNano()
+		last := lastGeneratedID.Load()
+		if now <= last {
+			now = last + 1
+		}
+		if lastGeneratedID.CompareAndSwap(last, now) {
+			return fmt.Sprintf("%s-%d", prefix, now)
+		}
+	}
+}
 
 func (s *Store) CreateProject(ctx context.Context, p model.Project) error {
 	if p.ID == "" {

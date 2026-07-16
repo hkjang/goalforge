@@ -41,6 +41,7 @@ type ProjectDetail struct {
 	Runs       []store.RunView            `json:"runs"`
 	Approvals  []ApprovalView             `json:"pending_approvals"`
 	IdeaScores map[string]model.IdeaScore `json:"idea_scores"`
+	Series     []store.DailyUsagePoint    `json:"usage_series"`
 }
 
 type ApprovalView struct {
@@ -145,6 +146,9 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		detail.Runs, err = s.store.ListRecentRuns(r.Context(), project.ID, 15)
+	}
+	if err == nil {
+		detail.Series, err = s.store.DailyUsageSeries(r.Context(), project.ID, 14)
 	}
 	if err == nil {
 		var pending []store.Approval

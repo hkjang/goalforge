@@ -150,6 +150,14 @@ Additional release blockers from the numbered requirements:
   usage and cost, the redacted prompt with its SHA-256, verification gate
   outputs, recorded file changes, the verified commit, turns, and the raw
   (redacted) event stream. Run IDs in the dashboard link to the replay view.
+- Usage trend and live feed: the project detail renders a dependency-free
+  inline-SVG daily chart (tokens per bar with cost and run-count captions,
+  `DailyUsageSeries`) and, while a run is RUNNING, a live event panel that
+  polls the replay API every 3 seconds and hands back to the full view when
+  the run ends.
+- `NewID` is now monotonic per process: Windows' coarse clock returned
+  identical `UnixNano` values for rapid consecutive calls, causing
+  intermittent `UNIQUE constraint failed` test flakes.
 - The manual sandbox E2E is codified as `cmd/goalforge/main_e2e_test.go`: an
   automated test drives the real CLI dispatch through project init → goal →
   work → gate → continue (worktree isolation, verification, auto-commit

@@ -251,6 +251,35 @@ func scanEventLogs(rows *sql.Rows) ([]EventLog, error) {
 	return result, rows.Err()
 }
 
+// DailyUsagePoint aggregates one UTC day of run activity for trend charts.
+type DailyUsagePoint struct {
+	Date    string
+	Runs    int64
+	Tokens  int64
+	CostUSD float64
+}
+
+func (s *Store) DailyUsageSeries(ctx context.Context, projectID string, days int) ([]DailyUsagePoint, error) {
+	if days <= 0 || days > 90 {
+		days = 14
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days+1).Format("2006-01-02")
+	rows, err := s.db.QueryContext(ctx, `SELECT date(r.started_at) AS day,COUNT(DISTINCT r.id),COALESCE(SUM(CASE WHEN l.token_type<>'cost_usd' THEN l.amount ELSE 0 END),0),COALESCE(SUM(l.cost),0) FROM runs r LEFT JOIN usage_ledger l ON l.run_id=r.id WHERE r.project_id=? AND date(r.started_at)>=? GROUP BY day ORDER BY day`, projectID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []DailyUsagePoint
+	for rows.Next() {
+		var point DailyUsagePoint
+		if err = rows.Scan(&point.Date, &point.Runs, &point.Tokens, &point.CostUSD); err != nil {
+			return nil, err
+		}
+		result = append(result, point)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ListSchedulerJobs(ctx context.Context, projectID string, activeOnly bool) ([]SchedulerJob, error) {
 	query := `SELECT id,project_id,job_type,run_at,idempotency_key,status,payload,attempts,owner,COALESCE(lease_until,''),last_error FROM scheduler_jobs WHERE project_id=?`
 	if activeOnly {
