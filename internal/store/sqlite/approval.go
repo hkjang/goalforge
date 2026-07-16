@@ -9,7 +9,12 @@ import (
 	"github.com/goalforge/goalforge/internal/audit"
 )
 
-const ApprovalProtectedFiles = "MODIFY_PROTECTED_FILES"
+const (
+	ApprovalProtectedFiles = "MODIFY_PROTECTED_FILES"
+	// ApprovalPublishBranch gates pushing a verified work branch to a remote
+	// (SEC-011: external transfers require explicit user approval).
+	ApprovalPublishBranch = "PUBLISH_BRANCH"
+)
 
 type Approval struct {
 	ID, ProjectID, ActionType, Reason, Status, ConsumedRunID string

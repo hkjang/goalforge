@@ -19,6 +19,19 @@ const (
 	commitAuthorEmail = "goalforge@goalforge.invalid"
 )
 
+// PushBranch publishes branch to the named remote. Callers must hold an
+// explicit user approval first (SEC-011); this function never forces.
+func PushBranch(ctx context.Context, repository, remote, branch string) error {
+	if repository == "" || remote == "" || branch == "" {
+		return errors.New("repository, remote, and branch are required")
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repository, "push", remote, branch)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("push %s to %s: %w: %s", branch, remote, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
 // CommitVerified stages every pending change in repository and commits it with
 // Goal-ID, Work-Item-ID, and Run-ID trailers so AI changes stay attributable.
 // It refuses to commit on protectedBranch and returns an empty CommitInfo when

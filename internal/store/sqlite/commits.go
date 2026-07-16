@@ -27,6 +27,22 @@ func (s *Store) RecordRunCommit(ctx context.Context, commit RunCommit) error {
 	return err
 }
 
+// LatestRunCommitForWork returns the newest verified commit recorded for a
+// work item; only such commits are eligible for publishing.
+func (s *Store) LatestRunCommitForWork(ctx context.Context, projectID, workItemID string) (RunCommit, error) {
+	var commit RunCommit
+	var created string
+	err := s.db.QueryRowContext(ctx, `SELECT run_id,project_id,goal_id,work_item_id,commit_sha,branch,files_committed,created_at FROM run_commits WHERE project_id=? AND work_item_id=? ORDER BY created_at DESC,run_id DESC LIMIT 1`, projectID, workItemID).
+		Scan(&commit.RunID, &commit.ProjectID, &commit.GoalID, &commit.WorkItemID, &commit.CommitSHA, &commit.Branch, &commit.FilesCommitted, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return commit, ErrNotFound
+	}
+	if err == nil {
+		commit.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	}
+	return commit, err
+}
+
 func (s *Store) RunCommitByRun(ctx context.Context, runID string) (RunCommit, error) {
 	var commit RunCommit
 	var created string

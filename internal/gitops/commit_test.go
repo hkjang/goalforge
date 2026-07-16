@@ -9,6 +9,48 @@ import (
 	"testing"
 )
 
+func TestPushBranchPublishesToLocalRemote(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	bare := t.TempDir()
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	run(bare, "init", "--bare", "-b", "main")
+	run(source, "init", "-b", "main")
+	run(source, "config", "user.email", "goalforge@example.invalid")
+	run(source, "config", "user.name", "GoalForge Test")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "README.md")
+	run(source, "commit", "-m", "base")
+	run(source, "remote", "add", "origin", bare)
+	run(source, "checkout", "-b", "goalforge/P1-WORK-1")
+	if err := os.WriteFile(filepath.Join(source, "feature.go"), []byte("package feature"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(source, "add", "feature.go")
+	run(source, "commit", "-m", "feature")
+	if err := PushBranch(ctx, source, "origin", "goalforge/P1-WORK-1"); err != nil {
+		t.Fatal(err)
+	}
+	local := run(source, "rev-parse", "goalforge/P1-WORK-1")
+	remote := run(bare, "rev-parse", "goalforge/P1-WORK-1")
+	if local != remote {
+		t.Fatalf("remote branch mismatch: local=%s remote=%s", local, remote)
+	}
+	if err := PushBranch(ctx, source, "origin", ""); err == nil {
+		t.Fatal("empty branch must be rejected")
+	}
+}
+
 func TestCommitVerifiedCreatesTrailedCommitOffProtectedBranch(t *testing.T) {
 	ctx := context.Background()
 	repository := t.TempDir()

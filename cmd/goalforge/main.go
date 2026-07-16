@@ -142,6 +142,8 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "gc" {
 			return worktreeGC(ctx, s, args[2:])
 		}
+	case "publish":
+		return publishWork(ctx, s, args[1:])
 	case "rollback":
 		return rollbackWork(ctx, s, args[1:])
 	case "approval":
@@ -179,7 +181,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|cancel|approval request|approval approve ID|worker [--once]|serve")
+	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|cancel|approval request|approval approve ID|worker [--once]|serve")
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -236,6 +238,44 @@ func projectRuntime(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	fmt.Printf("runtime policy set: turn_timeout=%s run_timeout=%s\n", policy.TurnTimeout, policy.RunTimeout)
+	return nil
+}
+
+// publishWork pushes a verified work branch to a remote. It is deliberately
+// manual and approval-gated (SEC-011): runs never push on their own, and a
+// PUBLISH_BRANCH approval must exist before anything leaves the machine.
+func publishWork(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("publish", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item whose verified branch to push")
+	remote := f.String("remote", "origin", "git remote to push to")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	project, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	commit, err := s.LatestRunCommitForWork(ctx, project.ID, *workItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("work item %s has no verified commit; only verified work can be published", *workItemID)
+	}
+	if err != nil {
+		return err
+	}
+	approved, err := s.ConsumeApproval(ctx, project.ID, store.ApprovalPublishBranch, "publish:"+*workItemID)
+	if err != nil {
+		return err
+	}
+	if !approved {
+		return fmt.Errorf("publishing requires approval: run `goalforge approval request --action %s --reason ...` and approve it first", store.ApprovalPublishBranch)
+	}
+	if err = gitops.PushBranch(ctx, project.RepositoryPath, *remote, commit.Branch); err != nil {
+		return err
+	}
+	fmt.Printf("published: branch=%s commit=%s remote=%s work=%s\n", commit.Branch, commit.CommitSHA, *remote, *workItemID)
 	return nil
 }
 
@@ -495,7 +535,7 @@ func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
 
 func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("approval request", flag.ContinueOnError)
-	action := f.String("action", "protected-files", "protected-files")
+	action := f.String("action", "protected-files", "protected-files or publish-branch")
 	reason := f.String("reason", "", "reason for approval")
 	if err := f.Parse(args); err != nil {
 		return err
@@ -503,14 +543,20 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	if *reason == "" {
 		return errors.New("--reason is required")
 	}
-	if *action != "protected-files" {
+	actionType := ""
+	switch *action {
+	case "protected-files", store.ApprovalProtectedFiles:
+		actionType = store.ApprovalProtectedFiles
+	case "publish-branch", store.ApprovalPublishBranch:
+		actionType = store.ApprovalPublishBranch
+	default:
 		return fmt.Errorf("unsupported approval action %q", *action)
 	}
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return err
 	}
-	approval, err := s.RequestApproval(ctx, p.ID, store.ApprovalProtectedFiles, *reason)
+	approval, err := s.RequestApproval(ctx, p.ID, actionType, *reason)
 	if err != nil {
 		return err
 	}

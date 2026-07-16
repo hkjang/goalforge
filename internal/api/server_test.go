@@ -38,6 +38,39 @@ func apiFixture(t *testing.T, token string) (*Server, *store.Store) {
 	return server, db
 }
 
+func TestMetricsEndpointServesPrometheusFormatBehindBearer(t *testing.T) {
+	server, db := apiFixture(t, "secret")
+	defer db.Close()
+	request := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated scrape must be rejected: %d", response.Code)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	response = httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.HasPrefix(response.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("content type %q", response.Header().Get("Content-Type"))
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		"# HELP goalforge_runs_total",
+		"# TYPE goalforge_runs_total counter",
+		`goalforge_runs_total{project="dashboard",state="READY"} 0`,
+		`goalforge_goal_progress_percent{project="dashboard"`,
+		"goalforge_cost_usd_total",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("missing %q in metrics:\n%s", expected, body)
+		}
+	}
+}
+
 func TestProjectAPIAndDashboard(t *testing.T) {
 	server, db := apiFixture(t, "")
 	defer db.Close()

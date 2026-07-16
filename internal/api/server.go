@@ -55,6 +55,7 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	}
 	server := &Server{store: s, token: bearerToken, mux: http.NewServeMux()}
 	server.mux.HandleFunc("GET /healthz", server.health)
+	server.mux.HandleFunc("GET /metrics", server.metrics)
 	server.mux.HandleFunc("GET /api/v1/projects", server.projects)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}", server.project)
 	server.mux.HandleFunc("GET /", server.dashboard)
@@ -65,7 +66,7 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'")
-		if s.token != "" && strings.HasPrefix(r.URL.Path, "/api/") && r.Header.Get("Authorization") != "Bearer "+s.token {
+		if s.token != "" && (strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/metrics") && r.Header.Get("Authorization") != "Bearer "+s.token {
 			writeError(w, http.StatusUnauthorized, "valid bearer token required")
 			return
 		}

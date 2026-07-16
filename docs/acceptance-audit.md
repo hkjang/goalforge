@@ -96,6 +96,12 @@ Additional release blockers from the numbered requirements:
 - Section 11 `turns`: provider turns are now first-class rows keyed by
   `(run_id, provider_turn_id)` with sticky terminal statuses, populated from
   the event stream alongside the usage ledger.
+- Section 15: `/metrics` serves the observability metrics per project in
+  Prometheus exposition format (bearer-protected when a token is set), with
+  no external dependencies.
+- SEC-011 publishing: `goalforge publish --work-item` pushes a verified work
+  branch to a remote only after a consumable `PUBLISH_BRANCH` approval;
+  runs never push on their own and only recorded verified commits qualify.
 
 The active goal must remain open until every required row is `PASS` or the
 scope is explicitly revised by the user.
