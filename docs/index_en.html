@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GoalForge | 개발자 주도 AI 개발 오케스트레이터</title>
-  <meta name="description" content="GoalForge는 Codex, Claude Code, Qwen, OpenCode 등 다양한 AI 모델을 관리하는 목표 중심 개발 오케스트레이터입니다. 결정론적 검증 게이트와 격리된 워크트리 환경에서 안전한 자동화를 실현하세요.">
+  <meta name="description" content="GoalForge는 Codex, Claude Code, Qwen, OpenCode 등 다양한 AI 모델을 관리하는 목표 중심 개발 오케스트레이터입니다. Deterministic Validation 게이트와 격리된 워크트리 환경에서 안전한 자동화를 실현하세요.">
   <meta name="keywords" content="GoalForge, AI Orchestrator, AI Coding Agent, Claude Code, OpenAI Codex, Qwen Code, OpenCode, Model Context Protocol, MCP, Deterministic Verification, Go Developer Tools, AI 에이전트 오케스트레이터">
   <meta name="author" content="hkjang">
   <meta name="robots" content="index, follow">
@@ -15,7 +15,7 @@
   <meta property="og:url" content="https://hkjang.github.io/goalforge/">
   <meta property="og:site_name" content="GoalForge">
   <meta property="og:title" content="GoalForge | 개발자 주도 AI 개발 오케스트레이터">
-  <meta property="og:description" content="AI는 실행 도구일 뿐, 프로젝트 주도권은 개발자가 쥔다. Codex, Claude Code, Qwen, OpenCode 통합 제어 및 결정론적 검증 오케스트레이션.">
+  <meta property="og:description" content="AI is the Execution Engine, Developers Hold the Control. Codex, Claude Code, Qwen, OpenCode 통합 제어 및 Deterministic Validation 오케스트레이션.">
   <meta property="og:image" content="https://hkjang.github.io/goalforge/assets/og-image.jpg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -183,12 +183,12 @@
     <section class="hero">
       <div class="container">
         <div class="hero-badge">
-          <span data-i18n="badge_hero">✨ Go 기반 결정론적 AI 개발 오케스트레이터</span>
+          <span data-i18n="badge_hero">✨ Go-Based Deterministic AI Development Orchestrator</span>
         </div>
 
         <h1 class="hero-title">
-          <span data-i18n="hero_title_1">AI는 실행 도구일 뿐,</span><br>
-          <span class="gradient-text" data-i18n="hero_title_2">프로젝트 주도권은 개발자가 쥔다</span>
+          <span data-i18n="hero_title_1">AI is merely an execution tool,</span><br>
+          <span class="gradient-text" data-i18n="hero_title_2">Developers maintain full control of the project</span>
         </h1>
 
         <p class="hero-subtitle" data-i18n="hero_subtitle">
@@ -230,7 +230,7 @@
           </div>
 
           <div class="terminal-body" id="terminal-body">
-            <span class="term-comment"># 1. 환경 진단 및 프로젝트 초기화</span>
+            <span class="term-comment"># 1. Environment Diagnostics & Project Init</span>
             <br><span class="term-cmd">$ goalforge doctor</span>
             <br><span class="term-success">[OK] Git 2.42.0 detected</span>
             <br><span class="term-success">[OK] Claude CLI (claude-code 1.2.0) verified</span>
@@ -251,15 +251,15 @@
         <div class="stats-grid">
           <div>
             <div class="stat-number">4 AI Models</div>
-            <div class="stat-label" data-i18n="stat_providers">4종 AI CLI 통합 지원</div>
+            <div class="stat-label" data-i18n="stat_providers">4 AI CLI Tool Integration</div>
           </div>
           <div>
             <div class="stat-number">100%</div>
-            <div class="stat-label" data-i18n="stat_gates">100% 결정론적 검증</div>
+            <div class="stat-label" data-i18n="stat_gates">100% Deterministic Validation</div>
           </div>
           <div>
             <div class="stat-number">0 Direct Merges</div>
-            <div class="stat-label" data-i18n="stat_isolation">0건의 무단 메인 병합</div>
+            <div class="stat-label" data-i18n="stat_isolation">Zero Unauthorized Main Branch Merges</div>
           </div>
           <div>
             <div class="stat-number">15 Tools</div>
@@ -517,7 +517,7 @@
           </div>
           <div class="mcp-tool-card">
             <div class="mcp-tool-name">verify_gate_add</div>
-            <p data-i18n="mcp_tool_3">CLI 테스트 명령어를 결정론적 검증 게이트로 대화 중 즉시 등록</p>
+            <p data-i18n="mcp_tool_3">CLI 테스트 명령어를 Deterministic Validation 게이트로 대화 중 즉시 등록</p>
           </div>
           <div class="mcp-tool-card">
             <div class="mcp-tool-name">approval_request & approve</div>
@@ -570,7 +570,7 @@ goalforge goal set --title "Ship API" \
   --objective "Implement REST endpoint" \
   --criterion build_passed=true
 
-<span class="term-comment"># 결정론적 검증 게이트 추가</span>
+<span class="term-comment"># Deterministic Validation 게이트 추가</span>
 goalforge verify gate add \
   --type build_passed \
   --command-json '["go","test","./..."]'</code></pre>
@@ -666,7 +666,7 @@ goalforge rollback --work-item WORK-101</code></pre>
                     <h4 data-i18n="m_short_4_t">GitHub Actions & CI/CD 네이티브 플러그인</h4>
                     <span class="milestone-status status-active">IN PROGRESS</span>
                   </div>
-                  <p data-i18n="m_short_4_d">CI/CD 파이프라인 상에서 GoalForge의 결정론적 검증 게이트를 원클릭으로 실행하는 공식 GitHub Action 릴리즈.</p>
+                  <p data-i18n="m_short_4_d">CI/CD 파이프라인 상에서 GoalForge의 Deterministic Validation 게이트를 원클릭으로 실행하는 공식 GitHub Action 릴리즈.</p>
                 </div>
               </li>
             </ul>
@@ -735,7 +735,7 @@ goalforge rollback --work-item WORK-101</code></pre>
       <div class="container">
         <div class="section-header">
           <span class="section-tag" data-i18n="sec_faq_tag">FAQ & AEO</span>
-          <h2 class="section-title" data-i18n="sec_faq_title">자주 묻는 질문</h2>
+          <h2 class="section-title" data-i18n="sec_faq_title">Frequently Asked Questions</h2>
           <p class="section-desc" data-i18n="sec_faq_desc">GoalForge의 핵심 개념 및 동작 방식에 대한 완벽한 가이드</p>
         </div>
 
@@ -776,7 +776,7 @@ goalforge rollback --work-item WORK-101</code></pre>
               <span class="faq-icon">+</span>
             </button>
             <div class="faq-answer" data-i18n="faq_4_a">
-              GoalForge는 `goalforge mcp` 명령어로 stdio 또는 Streamable HTTP(POST /mcp) 서버를 시작할 수 있습니다. 15가지 MCP 도구를 통해 Claude Code, Cursor 등 외부 MCP 클라이언트에서 프로젝트 상태 조회, 목표 및 작업 수정, 쿼터 리포트 확인, 승인 요청 등을 대화형으로 처리할 수 있습니다.
+              GoalForge는 `goalforge mcp` 명령어로 stdio 또는 Streamable HTTP(POST /mcp) 서버를 시작할 수 있습니다. 15가지 MCP Tools를 통해 Claude Code, Cursor 등 외부 MCP 클라이언트에서 프로젝트 상태 조회, 목표 및 작업 수정, 쿼터 리포트 확인, 승인 요청 등을 대화형으로 처리할 수 있습니다.
             </div>
           </div>
 
@@ -833,13 +833,13 @@ goalforge rollback --work-item WORK-101</code></pre>
         <div>
           <h4 class="footer-title" data-i18n="footer_links_title">바로가기</h4>
           <ul class="footer-links">
-            <li><a href="#features" data-i18n="nav_features">주요 기능</a></li>
+            <li><a href="#features" data-i18n="nav_features">Core Features</a></li>
             <li><a href="#deepdive" data-i18n="nav_deepdive">심층 메커니즘</a></li>
-            <li><a href="#architecture" data-i18n="nav_arch">아키텍처</a></li>
+            <li><a href="#architecture" data-i18n="nav_arch">Architecture</a></li>
             <li><a href="#providers" data-i18n="nav_providers">지원 프로바이더</a></li>
             <li><a href="#cli" data-i18n="nav_cli">CLI 가이드</a></li>
             <li><a href="#roadmap" data-i18n="nav_roadmap">로드맵</a></li>
-            <li><a href="#faq" data-i18n="nav_faq">자주 묻는 질문</a></li>
+            <li><a href="#faq" data-i18n="nav_faq">Frequently Asked Questions</a></li>
           </ul>
         </div>
 
