@@ -150,12 +150,29 @@ function tabsHTML(projectID,active){var tabs=[['overview','개요'],['plan','계
 // diffHTML colours a patch by line kind. The patch is escaped first: it is
 // untrusted repository content being rendered into the page.
 function diffHTML(text){var out='';String(text).split('\n').forEach(function(line){var cls='';if(line.indexOf('+++')===0||line.indexOf('---')===0||line.indexOf('diff --git')===0||line.indexOf('index ')===0)cls='meta';else if(line.indexOf('@@')===0)cls='hunk';else if(line.charAt(0)==='+')cls='add';else if(line.charAt(0)==='-')cls='del';out+='<i class="'+cls+'">'+esc(line||' ')+'</i>'});return'<pre class="diff">'+out+'</pre>'}
+// showPlan answers "what would this do and what would it cost" before any
+// model call is made, which is the cheap way to find a missing gate or an
+// exhausted budget.
+async function showPlan(projectID){var box=document.querySelector('#planbox');
+if(!box){box=document.createElement('section');box.className='panel';box.id='planbox';
+var view=document.querySelector('#view');view.insertBefore(box,view.firstChild)}
+box.innerHTML='<h2>실행 전 미리보기</h2><div class="sub">확인 중…</div>';
+try{var d=await api('/api/v1/projects/'+encodeURIComponent(projectID)+'/plan');var plan=d.plan||{};
+var html='<div class="row"><h2 style="margin:0">실행 전 미리보기</h2><span class="state '+(d.runnable?'st-ok':'st-bad')+'">'+(d.runnable?'실행 가능':'실행 불가')+'</span></div>';
+if(plan.WorkItem)html+='<div style="margin-top:8px"><strong>'+esc(plan.WorkItem.Title)+'</strong> <span class="sub mono">'+esc(plan.WorkItem.ID)+'</span><div class="sub">'+esc(plan.SelectionReason||'')+'</div></div>';
+(plan.Skipped||[]).forEach(function(sk){html+='<div class="sub" style="margin-top:4px">건너뜀: '+esc(sk.Title)+' — '+esc(sk.Reason)+'</div>'});
+html+='<table style="margin-top:10px">';
+(plan.Checks||[]).forEach(function(c){var cls=c.Level==='OK'?'st-ok':(c.Level==='BLOCK'?'st-bad':'st-warn');
+html+='<tr><td style="width:80px"><span class="state '+cls+'">'+esc(c.Level)+'</span></td><td>'+esc(c.Name)+'</td><td class="sub">'+esc(c.Detail)+'</td></tr>'});
+html+='</table><div class="actions"><button onclick="document.querySelector(\'#planbox\').remove()">닫기</button></div>';
+box.innerHTML=html}catch(e){box.innerHTML='<h2>실행 전 미리보기</h2><span class="error">'+esc(e.message)+'</span>'}}
 async function act(projectID,action,label,detail){if(!confirm(label+'\n\n'+detail+'\n\n계속할까요?'))return;try{var r=await api('/api/v1/projects/'+encodeURIComponent(projectID)+'/actions/'+action,{method:'POST'});alert(r.detail||'완료');route()}catch(e){alert(e.message)}}
 // actionBar offers what the current state actually allows, and says why a
 // button is disabled instead of leaving the state code to be interpreted.
 function actionBar(d){var p=d.project,id=p.ID;var running=(d.runs||[]).some(function(r){return r.State==='RUNNING'});var pending=(d.pending_approvals||[]).length;var failed=null;(d.runs||[]).forEach(function(r){if(!failed&&(r.State==='REPAIR_REQUIRED'||r.State==='FAILED'))failed=r.ID});var html='<div class="actions">';
 var startWhy='';if(running)startWhy='실행 중인 세션이 있습니다';else if(p.State==='COMPLETED')startWhy='목표가 완료되었습니다';else if(p.State==='BLOCKED')startWhy='차단 원인을 먼저 해결해야 합니다';else if(!d.goal)startWhy='목표가 없습니다';
 html+='<button '+(startWhy?'disabled':'onclick="act(\''+esc(id)+'\',\'continue\',\'다음 작업 실행\',\'워커가 다음 작업 1건을 실행하고 검증합니다.\')"')+'>다음 작업 실행</button>';
+html+='<button onclick="showPlan(\''+esc(id)+'\')">실행 전 미리보기</button>';
 html+='<button '+(running?'onclick="act(\''+esc(id)+'\',\'pause\',\'일시정지\',\'현재 턴이 끝나면 멈춥니다. 작업 공간과 세션은 보존됩니다.\')"':'disabled')+'>일시정지</button>';
 html+='<button onclick="act(\''+esc(id)+'\',\'cancel\',\'중지\',\'실행을 중단합니다. 검증을 통과하지 못한 변경은 작업 공간에 남고 작업은 백로그로 돌아갑니다.\')">중지</button>';
 if(failed)html+='<a class="plain" style="align-self:center" href="#/project/'+encodeURIComponent(id)+'/run/'+encodeURIComponent(failed)+'">실패 분석 →</a>';
@@ -309,6 +326,7 @@ return html}
 function verifyTab(d){var html=criteriaPanel(d)+relaxationPanel(d);
 var gated=(d.runs||[]).filter(function(r){return r.State==='REPAIR_REQUIRED'||r.State==='FAILED'});
 if(gated.length){html+='<section class="panel"><h2>검증 실패 실행 · '+gated.length+'건</h2><table>';gated.forEach(function(r){html+='<tr><td class="mono"><a class="plain" href="#/project/'+encodeURIComponent(d.project.ID)+'/run/'+encodeURIComponent(r.ID)+'">'+esc(r.ID)+'</a></td><td>'+esc(r.WorkItemID||'-')+'</td><td>'+stateChip(r.State)+'</td><td class="sub">'+fmtTime(r.StartedAt)+'</td></tr>'});html+='</table></section>'}
+html+='<section class="panel"><h2>증거 묶음</h2><div class="sub">목표 이력, 작업별 검증 결과, 승인과 반려 사유, 설계 결정, 기준 완화를 한 문서로 묶습니다. 인수인계·릴리즈 검토·감사에 그대로 씁니다.</div><div class="actions"><a class="plain" href="/api/v1/projects/'+encodeURIComponent(d.project.ID)+'/evidence" target="_blank" rel="noopener">문서 열기 →</a> <span class="why">CLI: <code>goalforge evidence export --out ./evidence</code></span></div></section>';
 html+='<section class="panel"><h2>게이트 설정</h2><div class="sub">게이트는 CLI 로 관리합니다: <code>goalforge verify gate add --type coverage --command-json \'["go","test","-cover","./..."]\' --success-value 85 --value-pattern \'([0-9.]+)%\'</code><br>수치 조건은 <code>--value-pattern</code> 이 있어야 실측값으로 판정됩니다.</div></section>';
 return html}
 function costTab(d){var m=d.metrics;var html='<div class="metrics">';

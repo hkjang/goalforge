@@ -63,6 +63,7 @@ goalforge verify gate add --type T --command-json '["go","test","./..."]' [--suc
 goalforge ideas                        # DISCOVER_IDEAS: read-only isolated discovery
 goalforge audit                        # AUDIT_AND_IMPROVE: quality/security/perf/UX/ops inspection
 goalforge replan                       # REPLAN_GOAL: gaps filed, stale backlog flagged for review
+goalforge plan [--json]                # what the next run would do, without doing it
 goalforge continue [--enqueue]         # CONTINUE_GOAL: one work item (or schedule for the worker)
 goalforge develop                      # IMPLEMENT_SELECTED: highest-priority approved idea
 goalforge run --until-quota --max-runs 100
@@ -100,6 +101,7 @@ goalforge models [--task-type CONTINUE_GOAL]  # model records, the next choice a
 goalforge verify integration               # verify the merged result on the default branch
 goalforge decision add --title T --decision "..." [--alternatives "..."] [--consequences "..."] [--supersedes DEC-1]
 goalforge decision list [--all]            # settled architecture, inherited by every later session
+goalforge evidence export --out ./evidence        # handover/audit bundle as self-contained HTML + JSON
 goalforge reproduce --run RUN-1 [--out ./repro]   # commit, workspace, gate commands, logs, environment
 goalforge takeover --work-item WORK-1 --reason "..."        # stop automation and take the workspace
 goalforge takeover return --work-item WORK-1 --summary "..." # re-verify and hand it back
@@ -242,6 +244,25 @@ previously failed approach may not be retried without saying what changed, and
 verification is never relaxed. Decisions are recorded rather than deleted; one
 is superseded by another, because the record of what was rejected is what stops
 it being proposed again.
+
+`goalforge plan` shows what the next run would do without doing any of it: the
+work item that would be chosen and why higher-priority ones were skipped, the
+model and the reason it was selected, the expected tokens and cost against the
+remaining budget, the gates that would judge the result, and every precondition
+that would refuse the run. It shares its selection rules with the real claim,
+so the preview cannot promise work the run would reject — and it distinguishes
+what would block a run from what would merely stop the goal from ever being
+judged complete. Spending a model call to discover an exhausted budget or a
+missing gate is the expensive way to learn it.
+
+`goalforge evidence export` writes the case for what a goal achieved and how it
+was proven: goal versions with their change reasons, each work item's commit
+and gate results with measured values, design decisions, the approval history
+including what was refused and why, and the checks that were relaxed. It is a
+self-contained HTML page plus the same record as JSON, and the dashboard serves
+it at `/api/v1/projects/{id}/evidence`. The refusals and relaxations are in
+there deliberately: a bundle that only keeps the good news describes a
+different project than the one that happened.
 
 `goalforge doctor` checks two different things. The environment checks ask
 whether this machine can run anything; the readiness checks ask whether this

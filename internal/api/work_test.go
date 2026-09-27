@@ -264,3 +264,58 @@ func TestRunStreamEndsOnTerminalState(t *testing.T) {
 		t.Fatalf("body=%q content-type=%q", body, recorder.Header().Get("Content-Type"))
 	}
 }
+
+// The evidence endpoint serves a readable document by default and the raw
+// record on request, and does not require the goal to be finished.
+func TestEvidenceBundleEndpoint(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects/P-API/evidence", nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("content-type=%q", recorder.Header().Get("Content-Type"))
+	}
+	body := recorder.Body.String()
+	for _, expected := range []string{"Ship GoalForge", "완료 조건과 근거", "dashboard"} {
+		if !strings.Contains(body, expected) {
+			t.Errorf("evidence page missing %q", expected)
+		}
+	}
+	var bundle store.EvidenceBundle
+	get(t, server, "/api/v1/projects/P-API/evidence?format=json", &bundle)
+	if bundle.Goal.Title != "Ship GoalForge" || len(bundle.WorkItems) != 1 {
+		t.Fatalf("bundle=%+v", bundle)
+	}
+	if response := get(t, server, "/api/v1/projects/P-GHOST/evidence", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown project status=%d", response.Code)
+	}
+}
+
+// The preview must never consume the work it previews.
+func TestPlanEndpointIsReadOnly(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	var first struct {
+		Runnable bool `json:"runnable"`
+		Plan     struct {
+			WorkItem *model.WorkItem `json:"WorkItem"`
+		} `json:"plan"`
+	}
+	get(t, server, "/api/v1/projects/P-API/plan", &first)
+	if first.Plan.WorkItem == nil || first.Plan.WorkItem.ID != "W-API" {
+		t.Fatalf("plan=%+v", first)
+	}
+	items, err := db.ListWorkItems(context.Background(), goalID(t, db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Status == "IN_PROGRESS" {
+			t.Fatalf("the preview claimed %s", item.ID)
+		}
+	}
+}

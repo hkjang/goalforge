@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/model"
@@ -129,6 +130,86 @@ var ErrAllCandidatesConflict = errors.New("all claimable work overlaps items alr
 // for work that does not collide with what is already running.
 const claimCandidateLimit = 50
 
+// SkippedCandidate is a work item that could have run but was passed over,
+// with the reason. Selection that cannot explain itself is selection nobody
+// can correct.
+type SkippedCandidate struct {
+	WorkItemID, Title, Reason string
+}
+
+// Selection is the outcome of choosing the next work item: what was chosen,
+// what was passed over and why, and how much implementation capacity is free.
+type Selection struct {
+	Chosen     model.WorkItem
+	Skipped    []SkippedCandidate
+	Candidates int
+	AgentHeld  int
+	WIPLimit   int
+	HumanHeld  int
+}
+
+// selectNext applies the claim rules without mutating anything, so a preview
+// and a real claim can never disagree about what would run.
+func (s *Store) selectNext(ctx context.Context, q queryer, goalID string) (Selection, error) {
+	var selection Selection
+	limit, err := s.wipLimit(ctx, q, goalID)
+	if err != nil {
+		return selection, err
+	}
+	selection.WIPLimit = limit
+	active, err := s.activeWorkItems(ctx, q, goalID, "")
+	if err != nil {
+		return selection, err
+	}
+	for _, item := range active {
+		if item.Owner == OwnerHuman {
+			selection.HumanHeld++
+		} else {
+			selection.AgentHeld++
+		}
+	}
+	if selection.AgentHeld >= limit {
+		return selection, fmt.Errorf("implementation WIP limit reached: %d of %d items in progress", selection.AgentHeld, limit)
+	}
+	rows, err := q.QueryContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.risk,w.change_scope,w.weight,w.estimated_tokens,w.objective,w.acceptance,w.blocked_reason FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(w.owner,'AI')='AI' AND COALESCE(i.approval_required,0)=0 AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d LEFT JOIN work_items p ON p.id=d.depends_on_id WHERE d.work_item_id=w.id AND COALESCE(p.status,'')<>'DONE') ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT ?`, goalID, claimCandidateLimit)
+	if err != nil {
+		return selection, err
+	}
+	var candidates []model.WorkItem
+	for rows.Next() {
+		var candidate model.WorkItem
+		if err = rows.Scan(&candidate.ID, &candidate.GoalID, &candidate.MilestoneID, &candidate.Type, &candidate.Title, &candidate.Priority, &candidate.Status, &candidate.Risk, &candidate.ChangeScope, &candidate.Weight, &candidate.EstimatedTokens, &candidate.Objective, &candidate.Acceptance, &candidate.BlockedReason); err != nil {
+			rows.Close()
+			return selection, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err = rows.Close(); err != nil {
+		return selection, err
+	}
+	selection.Candidates = len(candidates)
+	if len(candidates) == 0 {
+		return selection, ErrNotFound
+	}
+	for _, candidate := range candidates {
+		conflicts := scopeConflicts(candidate.ChangeScope, active)
+		if len(conflicts) == 0 {
+			selection.Chosen = candidate
+			return selection, nil
+		}
+		selection.Skipped = append(selection.Skipped, SkippedCandidate{WorkItemID: candidate.ID, Title: candidate.Title,
+			Reason: "변경 범위가 진행 중인 작업과 겹칩니다: " + strings.Join(conflicts, ", ")})
+	}
+	return selection, ErrAllCandidatesConflict
+}
+
+// PreviewNextWorkItem reports what a claim would choose, changing nothing. It
+// shares its rules with ClaimNextWorkItem so a preview cannot promise work the
+// claim would refuse.
+func (s *Store) PreviewNextWorkItem(ctx context.Context, goalID string) (Selection, error) {
+	return s.selectNext(ctx, s.db, goalID)
+}
+
 // ClaimNextWorkItem takes the highest-priority item that can actually run now.
 // Candidates whose declared change scope overlaps work already in progress are
 // skipped rather than refused: stopping at the first conflict made a raised WIP
@@ -140,53 +221,11 @@ func (s *Store) ClaimNextWorkItem(ctx context.Context, goalID string) (model.Wor
 		return w, err
 	}
 	defer tx.Rollback()
-	limit, err := s.wipLimit(ctx, tx, goalID)
+	selection, err := s.selectNext(ctx, tx, goalID)
 	if err != nil {
 		return w, err
 	}
-	active, err := s.activeWorkItems(ctx, tx, goalID, "")
-	if err != nil {
-		return w, err
-	}
-	agentHeld := 0
-	for _, item := range active {
-		if item.Owner != OwnerHuman {
-			agentHeld++
-		}
-	}
-	if agentHeld >= limit {
-		return w, fmt.Errorf("implementation WIP limit reached: %d of %d items in progress", agentHeld, limit)
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.risk,w.change_scope,w.weight,w.estimated_tokens,w.objective,w.acceptance,w.blocked_reason FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(w.owner,'AI')='AI' AND COALESCE(i.approval_required,0)=0 AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d LEFT JOIN work_items p ON p.id=d.depends_on_id WHERE d.work_item_id=w.id AND COALESCE(p.status,'')<>'DONE') ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT ?`, goalID, claimCandidateLimit)
-	if err != nil {
-		return w, err
-	}
-	var candidates []model.WorkItem
-	for rows.Next() {
-		var candidate model.WorkItem
-		if err = rows.Scan(&candidate.ID, &candidate.GoalID, &candidate.MilestoneID, &candidate.Type, &candidate.Title, &candidate.Priority, &candidate.Status, &candidate.Risk, &candidate.ChangeScope, &candidate.Weight, &candidate.EstimatedTokens, &candidate.Objective, &candidate.Acceptance, &candidate.BlockedReason); err != nil {
-			rows.Close()
-			return w, err
-		}
-		candidates = append(candidates, candidate)
-	}
-	if err = rows.Close(); err != nil {
-		return w, err
-	}
-	if len(candidates) == 0 {
-		return w, ErrNotFound
-	}
-	chosen := -1
-	for i, candidate := range candidates {
-		if len(scopeConflicts(candidate.ChangeScope, active)) == 0 {
-			chosen = i
-			break
-		}
-	}
-	if chosen < 0 {
-		return w, ErrAllCandidatesConflict
-	}
-	w = candidates[chosen]
+	w = selection.Chosen
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET status='IN_PROGRESS' WHERE id=? AND status=?`, w.ID, w.Status)
 	if err != nil {
 		return w, err
