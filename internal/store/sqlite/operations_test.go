@@ -291,3 +291,67 @@ func TestPlanRepairWithNoFailedGates(t *testing.T) {
 		t.Fatalf("plan=%+v err=%v", plan, err)
 	}
 }
+
+// Taking over is more than a pause: the run has to have stopped, the workspace
+// changes hands, automation stops claiming the item, and what the person did
+// comes back as the new baseline.
+func TestTakeoverTransfersOwnership(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: t.TempDir(), DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature", Status: "APPROVED"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A running session must be stopped before the workspace changes hands.
+	if err = s.StartRun(ctx, RunRecord{ID: "R1", ProjectID: p.ID, WorkItemID: work.ID, Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.TakeOverWorkItem(ctx, p.ID, goal.ID, work.ID, "직접 고친다", "/tmp/ws"); err == nil {
+		t.Fatal("taking over while a run executes must be refused")
+	}
+	if err = s.FinishRun(ctx, "R1", "FAILED", "REPAIR_REQUIRED"); err != nil {
+		t.Fatal(err)
+	}
+	takeover, err := s.TakeOverWorkItem(ctx, p.ID, goal.ID, work.ID, "직접 고친다", "/tmp/ws")
+	if err != nil || takeover.Workspace != "/tmp/ws" {
+		t.Fatalf("takeover=%+v err=%v", takeover, err)
+	}
+	// Automation must not pick the item back up while a person holds it. The
+	// WIP limit is raised so ownership is the only thing that can refuse it.
+	if err = s.SetWIPLimit(ctx, p.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ClaimNextWorkItem(ctx, goal.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a human-owned item must not be claimed: %v", err)
+	}
+	if _, err = s.TakeOverWorkItem(ctx, p.ID, goal.ID, work.ID, "again", "/tmp/ws"); err == nil {
+		t.Fatal("double takeover must be refused")
+	}
+	active, err := s.ActiveTakeover(ctx, p.ID, work.ID)
+	if err != nil || active.ID != takeover.ID {
+		t.Fatalf("active=%+v err=%v", active, err)
+	}
+	returned, err := s.ReturnWorkItem(ctx, p.ID, goal.ID, work.ID, "인증 흐름 직접 수정")
+	if err != nil || returned.ReturnSummary != "인증 흐름 직접 수정" {
+		t.Fatalf("returned=%+v err=%v", returned, err)
+	}
+	if _, err = s.ActiveTakeover(ctx, p.ID, work.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("takeover must be closed: %v", err)
+	}
+	claimed, err := s.ClaimNextWorkItem(ctx, goal.ID)
+	if err != nil || claimed.ID != work.ID {
+		t.Fatalf("automation resumes after the item is handed back: %+v err=%v", claimed, err)
+	}
+}

@@ -25,6 +25,7 @@ type WorkItemDetailView struct {
 	EstimateSource string                  `json:"estimate_source"`
 	Forecast       store.TokenForecast     `json:"forecast"`
 	Model          store.ModelChoice       `json:"model"`
+	Takeover       *store.Takeover         `json:"takeover,omitempty"`
 	Actionable     bool                    `json:"actionable"`
 }
 
@@ -93,7 +94,7 @@ func (s *Server) workItemDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	view := WorkItemDetailView{Item: detail.Item, Dependencies: detail.Dependencies, Blockers: detail.Blockers,
 		Runs: detail.Runs, Commit: detail.Commit, Score: detail.Score,
-		EstimateSource: detail.EstimateSource, Forecast: detail.Forecast, Model: detail.Model}
+		EstimateSource: detail.EstimateSource, Forecast: detail.Forecast, Model: detail.Model, Takeover: detail.Takeover}
 	if view.Blockers == nil {
 		view.Blockers = []store.WorkItemBlocker{}
 	}

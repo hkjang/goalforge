@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS work_items (
  weight REAL NOT NULL DEFAULT 1 CHECK(weight > 0),
  estimated_tokens INTEGER NOT NULL DEFAULT 0 CHECK(estimated_tokens >= 0),
  objective TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
- blocked_reason TEXT NOT NULL DEFAULT ''
+ blocked_reason TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT 'AI'
 );
 CREATE TABLE IF NOT EXISTS design_decisions (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), goal_id TEXT NOT NULL DEFAULT '',
@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS integration_checks (
  reason TEXT NOT NULL DEFAULT '', target_sha TEXT NOT NULL DEFAULT '',
  last_passed INTEGER NOT NULL DEFAULT 0, last_sha TEXT NOT NULL DEFAULT '',
  last_details TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS takeovers (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), work_item_id TEXT NOT NULL,
+ reason TEXT NOT NULL DEFAULT '', workspace TEXT NOT NULL DEFAULT '', stopped_run_id TEXT NOT NULL DEFAULT '',
+ taken_at TEXT NOT NULL, returned_at TEXT NOT NULL DEFAULT '', return_summary TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS work_item_dependencies (
  work_item_id TEXT NOT NULL REFERENCES work_items(id), depends_on_id TEXT NOT NULL REFERENCES work_items(id),
@@ -300,7 +305,7 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "verification_results", "stale", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	for _, column := range []struct{ name, definition string }{{"objective", "TEXT NOT NULL DEFAULT ''"}, {"acceptance", "TEXT NOT NULL DEFAULT ''"}, {"blocked_reason", "TEXT NOT NULL DEFAULT ''"}} {
+	for _, column := range []struct{ name, definition string }{{"objective", "TEXT NOT NULL DEFAULT ''"}, {"acceptance", "TEXT NOT NULL DEFAULT ''"}, {"blocked_reason", "TEXT NOT NULL DEFAULT ''"}, {"owner", "TEXT NOT NULL DEFAULT 'AI'"}} {
 		if err := s.ensureColumn(ctx, "work_items", column.name, column.definition); err != nil {
 			return err
 		}

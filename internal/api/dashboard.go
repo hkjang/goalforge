@@ -150,6 +150,7 @@ html+='<button '+(startWhy?'disabled':'onclick="act(\''+esc(id)+'\',\'continue\'
 html+='<button '+(running?'onclick="act(\''+esc(id)+'\',\'pause\',\'일시정지\',\'현재 턴이 끝나면 멈춥니다. 작업 공간과 세션은 보존됩니다.\')"':'disabled')+'>일시정지</button>';
 html+='<button onclick="act(\''+esc(id)+'\',\'cancel\',\'중지\',\'실행을 중단합니다. 검증을 통과하지 못한 변경은 작업 공간에 남고 작업은 백로그로 돌아갑니다.\')">중지</button>';
 if(failed)html+='<a class="plain" style="align-self:center" href="#/project/'+encodeURIComponent(id)+'/run/'+encodeURIComponent(failed)+'">실패 분석 →</a>';
+if(failed)html+='<span class="why" style="align-self:center">재현: <code>goalforge reproduce --run '+esc(failed)+' --out ./repro</code></span>';
 if(pending)html+='<a class="plain" style="align-self:center" href="#/project/'+encodeURIComponent(id)+'/approval/'+encodeURIComponent(d.pending_approvals[0].ID)+'">변경 검토 '+pending+'건 →</a>';
 html+='</div>';
 if(startWhy)html+='<div class="why">다음 작업 실행 불가: '+esc(startWhy)+'</div>';
@@ -382,7 +383,7 @@ html+='<div class="actions"><button onclick="saveWorkPlan(\''+esc(projectID)+'\'
 if(w.Status==='BACKLOG')html+='<button onclick="decideWork(\''+esc(projectID)+'\',\''+esc(workID)+'\',\'APPROVED\',\'작업 승인\')">승인</button>';
 if(w.Status==='BACKLOG'||w.Status==='APPROVED')html+='<button onclick="decideWork(\''+esc(projectID)+'\',\''+esc(workID)+'\',\'BLOCKED\',\'작업 보류\')">보류</button>';
 if(w.Status!=='DONE'&&w.Status!=='DISCARDED')html+='<button onclick="decideWork(\''+esc(projectID)+'\',\''+esc(workID)+'\',\'DISCARDED\',\'작업 폐기 — 목표 기준선에서 제외됩니다\')">폐기</button>';
-html+='</div><div class="why">명세 저장은 상태를 바꾸지 않습니다. 상태 변경은 위의 승인·보류·폐기 버튼으로만 이루어집니다.</div></section>';
+html+='</div>'+takeoverNote(d)+'<div class="why">명세 저장은 상태를 바꾸지 않습니다. 상태 변경은 위의 승인·보류·폐기 버튼으로만 이루어집니다.</div></section>';
 if((d.dependencies||[]).length){html+='<section class="panel"><h2>선행 작업 '+d.dependencies.length+'건</h2><table>';d.dependencies.forEach(function(dep){html+='<tr><td>'+workLink(projectID,dep)+'</td><td><span class="badge'+(dep.Status==='DONE'?' met':' unmet')+'">'+esc(workLabel(dep.Status))+'</span></td></tr>'});html+='</table></section>'}
 html+=modelNote(d);
 if(d.score){var sc=d.score;html+='<section class="panel"><h2>선정 점수</h2><div class="sub">우선순위 점수 '+sc.PriorityScore.toFixed(1)+' · 목표 기여 '+sc.GoalContribution.toFixed(0)+' · 사용자 가치 '+sc.UserValue.toFixed(0)+' · 운영 필요 '+sc.OperationalNeed.toFixed(0)+' · 실현 가능성 '+sc.Feasibility.toFixed(0)+' · 위험 감소 '+sc.RiskReduction.toFixed(0)+' · 난이도 '+sc.Difficulty.toFixed(0)+(sc.ScopeExpansion?' · 범위 확장 제안':'')+'</div></section>'}
@@ -390,8 +391,13 @@ if(d.commit)html+='<section class="panel"><h2>검증된 커밋</h2><div class="s
 if(d.runs&&d.runs.length){html+='<section class="panel"><h2>실행 이력 · '+d.runs.length+'회</h2><table><tr><th>실행</th><th>유형</th><th>토큰</th><th>비용</th><th>상태</th><th>시각</th></tr>';d.runs.forEach(function(r){html+='<tr><td class="mono"><a class="plain" href="#/project/'+encodeURIComponent(projectID)+'/run/'+encodeURIComponent(r.ID)+'">'+esc(r.ID)+'</a></td><td>'+esc(r.TaskType||'-')+'</td><td>'+fmtTokens(r.Tokens)+'</td><td>'+fmtUSD(r.CostUSD)+'</td><td>'+stateChip(r.State)+'</td><td class="sub">'+fmtTime(r.StartedAt)+'</td></tr>'});html+='</table></section>'}
 else html+='<section class="panel"><h2>실행 이력</h2><div class="sub">아직 실행된 적이 없습니다.</div></section>';
 view.innerHTML=html}
-function blockerLabel(kind){var m={DEPENDENCY:'선행 작업 미완료',WIP_LIMIT:'동시 구현 제한',APPROVAL:'승인 필요',STATUS:'현재 상태'};return m[kind]||kind}
+function blockerLabel(kind){var m={DEPENDENCY:'선행 작업 미완료',WIP_LIMIT:'동시 구현 제한',APPROVAL:'승인 필요',STATUS:'현재 상태',TAKEOVER:'사람이 수정 중'};return m[kind]||kind}
 function confidenceLabel(c){var m={high:'높음',medium:'보통',low:'낮음',none:'없음'};return m[c]||c}
+// takeoverNote explains where a hand edit happens and what returning it costs,
+// because "직접 수정하기" is only useful if the workspace and the way back are
+// both visible.
+function takeoverNote(d){if(!d.takeover)return'<div class="why">직접 수정하려면: <code>goalforge takeover --work-item '+esc(d.item.ID)+' --reason "..."</code> — 실행을 멈추고 작업 공간을 넘겨받습니다.</div>';
+var t=d.takeover;return'<div class="attn warn" style="margin-top:10px"><strong>사람이 직접 수정 중</strong><div class="sub" style="margin-top:2px">'+esc(t.Reason||'사유 미기록')+'</div><div class="sub mono" style="margin-top:4px">'+esc(t.Workspace)+'</div><div class="why">돌려주기: <code>goalforge takeover return --work-item '+esc(d.item.ID)+' --summary "..."</code> — 게이트를 다시 실행해 손으로 고친 내용도 검증합니다.</div></div>'}
 function estimateSourceNote(d){var f=d.forecast||{};
 var forecast=f.Samples?'실행 기록 예측 '+fmtTokens(f.Expected)+' (범위 '+fmtTokens(f.Low)+'~'+fmtTokens(f.High)+', 표본 '+f.Samples+'건, 신뢰도 '+confidenceLabel(f.Confidence)+')':'예측할 실행 기록이 없습니다';
 if(d.estimate_source==='manual')return'예상 토큰은 직접 입력된 값입니다. '+forecast+'.';

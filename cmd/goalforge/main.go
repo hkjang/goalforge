@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -147,6 +148,13 @@ func run(ctx context.Context, args []string) error {
 		return activityReport(ctx, s, args[1:])
 	case "models":
 		return modelAdvice(ctx, s, args[1:])
+	case "takeover":
+		if len(args) > 1 && args[1] == "return" {
+			return takeoverReturn(ctx, s, args[2:])
+		}
+		return takeoverStart(ctx, s, args[1:])
+	case "reproduce":
+		return reproduceRun(ctx, s, args[1:])
 	case "decision":
 		if len(args) > 1 && args[1] == "add" {
 			return decisionAdd(ctx, s, args[2:])
@@ -803,6 +811,225 @@ func printRepair(plan store.RepairPlan) {
 		return
 	}
 	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
+}
+
+// takeoverStart hands a work item to a person. Stopping the run comes first:
+// handing over a workspace a provider session is still writing to produces a
+// conflict neither side can explain.
+func takeoverStart(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("takeover", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item to take over")
+	reason := f.String("reason", "", "why a person is taking this over")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	goal, err := activeGoal(ctx, s)
+	if err != nil {
+		return err
+	}
+	// Ask the running session to stop before claiming the workspace.
+	if control, controlErr := s.RequestRunControl(ctx, p.ID, "CANCEL"); controlErr == nil {
+		return fmt.Errorf("cancel requested for run %s; wait for it to end, then run takeover again", control.RunID)
+	} else if !errors.Is(controlErr, store.ErrNoRunningExecution) {
+		return controlErr
+	}
+	workspace := p.RepositoryPath
+	if p.WorktreeEnabled {
+		workspace = filepath.Join(p.RepositoryPath+".goalforge-worktrees", *workItemID)
+	}
+	takeover, err := s.TakeOverWorkItem(ctx, p.ID, goal.ID, *workItemID, *reason, workspace)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("taken over: %s work=%s\n  workspace: %s\n", takeover.ID, *workItemID, takeover.Workspace)
+	fmt.Println("  automation will not claim this item until `goalforge takeover return --work-item " + *workItemID + "` runs")
+	return nil
+}
+
+// takeoverReturn gives the item back, records what the person changed as the
+// new baseline, and re-verifies: a human edit is not exempt from the gates.
+func takeoverReturn(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("takeover return", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item to hand back")
+	summary := f.String("summary", "", "what was changed by hand")
+	skipVerify := f.Bool("skip-verify", false, "hand back without running the gates (the item returns to the backlog unverified)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	goal, err := activeGoal(ctx, s)
+	if err != nil {
+		return err
+	}
+	takeover, err := s.ActiveTakeover(ctx, p.ID, *workItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("work item %s is not currently taken over", *workItemID)
+	}
+	if err != nil {
+		return err
+	}
+	if !*skipVerify {
+		gates, gateErr := s.ListGates(ctx, p.ID)
+		if gateErr != nil {
+			return gateErr
+		}
+		if len(gates) == 0 {
+			return errors.New("no verification gates configured; use --skip-verify to hand back unverified")
+		}
+		engine, engineErr := verification.New(s, 1024*1024)
+		if engineErr != nil {
+			return engineErr
+		}
+		checks := make([]verification.Gate, 0, len(gates))
+		for _, g := range gates {
+			checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
+		}
+		results, passed, checkErr := engine.Check(ctx, takeover.Workspace, checks)
+		if checkErr != nil {
+			return checkErr
+		}
+		records := make([]store.VerificationRecord, 0, len(results))
+		for _, result := range results {
+			actual := "false"
+			if result.Status == "PASSED" {
+				actual = "true"
+			}
+			records = append(records, store.VerificationRecord{CheckType: result.Type, Status: result.Status, ActualValue: actual,
+				Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration, Required: result.Required,
+				FailureKind: result.FailureKind, RepairMode: result.RepairMode})
+			fmt.Printf("%-8s %-18s exit=%d\n", result.Status, result.Type, result.ExitCode)
+		}
+		if err = s.RecordHumanEvidence(ctx, goal.ID, *workItemID, records); err != nil {
+			return err
+		}
+		if !passed {
+			return errors.New("hand-edited changes do not pass the gates; fix them or use --skip-verify to hand back unverified")
+		}
+	}
+	returned, err := s.ReturnWorkItem(ctx, p.ID, goal.ID, *workItemID, *summary)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("returned: %s work=%s held for %s\n", returned.ID, *workItemID, returned.ReturnedAt.Sub(returned.TakenAt).Round(time.Second))
+	return nil
+}
+
+// reproduceRun writes everything needed to put a failure back in front of a
+// developer under the same conditions: the commit, the workspace, the exact
+// gate commands, and what they printed. It deliberately does not try to make
+// the model produce the same output again — that is not reproducible, and it
+// is not what investigating a failed run requires.
+func reproduceRun(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("reproduce", flag.ContinueOnError)
+	runID := f.String("run", "", "run to reproduce")
+	out := f.String("out", "", "directory to write the package to (default: print a summary)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return errors.New("--run is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	pkg, err := s.BuildReproductionPackage(ctx, p.ID, *runID)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("run %s not found in this project", *runID)
+	}
+	if err != nil {
+		return err
+	}
+	report := diagnostics.Run(ctx, diagnostics.Options{Providers: []string{pkg.Provider}, StrictCLI: false})
+	workspace := pkg.Worktree
+	if workspace == "" {
+		workspace = pkg.Repository
+	}
+	if *out == "" {
+		fmt.Printf("run %s  state=%s provider=%s model=%s\n", pkg.RunID, pkg.State, pkg.Provider, pkg.Model)
+		fmt.Printf("workspace: %s\n", workspace)
+		if pkg.BaseCommit != "" {
+			fmt.Printf("commit: %s (%s)\n", pkg.BaseCommit, pkg.Branch)
+		}
+		for _, result := range pkg.Results {
+			fmt.Printf("gate %-18s %-8s exit=%d\n", result.CheckType, result.Status, result.ExitCode)
+		}
+		if pkg.Repair.Decision != "" {
+			fmt.Printf("repair: %s — %s\n", pkg.Repair.Decision, pkg.Repair.Reason)
+		}
+		fmt.Println("\npass --out DIR to write a runnable package")
+		return nil
+	}
+	if err = os.MkdirAll(*out, 0o750); err != nil {
+		return err
+	}
+	manifest := map[string]any{"run": pkg, "environment": report, "workspace": workspace}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(filepath.Join(*out, "reproduction.json"), encoded, 0o600); err != nil {
+		return err
+	}
+	script := reproductionScript(pkg, workspace)
+	scriptPath := filepath.Join(*out, "reproduce.sh")
+	if err = os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		return err
+	}
+	var logs strings.Builder
+	for _, result := range pkg.Results {
+		logs.WriteString("=== " + result.CheckType + " " + result.Status + " (exit " + strconv.Itoa(result.ExitCode) + ")\n")
+		logs.WriteString(result.Output + "\n\n")
+	}
+	if err = os.WriteFile(filepath.Join(*out, "gate-output.log"), []byte(logs.String()), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("reproduction package written: %s\n  reproduction.json  reproduce.sh  gate-output.log\n", *out)
+	return nil
+}
+
+// reproductionScript re-runs the same gates in the same workspace at the same
+// commit. It checks the commit rather than checking it out, so it cannot
+// silently move a developer's working tree.
+func reproductionScript(pkg store.ReproductionPackage, workspace string) string {
+	var builder strings.Builder
+	builder.WriteString("#!/bin/sh\n# GoalForge reproduction for run " + pkg.RunID + "\n")
+	builder.WriteString("# Provider " + pkg.Provider + " model " + pkg.Model + " state " + pkg.State + "\n")
+	builder.WriteString("set -eu\ncd " + shellQuote(workspace) + "\n")
+	if pkg.BaseCommit != "" {
+		builder.WriteString("current=$(git rev-parse HEAD)\n")
+		builder.WriteString("if [ \"$current\" != " + shellQuote(pkg.BaseCommit) + " ]; then\n")
+		builder.WriteString("  echo \"warning: workspace is at $current, the failure was at " + pkg.BaseCommit + "\" >&2\n")
+		builder.WriteString("  echo \"run: git checkout " + pkg.BaseCommit + "\" >&2\nfi\n")
+	}
+	for _, gate := range pkg.Gates {
+		builder.WriteString("\necho '--- " + gate.Type + "'\n")
+		quoted := make([]string, 0, len(gate.Command))
+		for _, part := range gate.Command {
+			quoted = append(quoted, shellQuote(part))
+		}
+		builder.WriteString(strings.Join(quoted, " ") + " || echo \"" + gate.Type + " failed\"\n")
+	}
+	return builder.String()
+}
+
+// shellQuote wraps a value in single quotes so a path or argument containing
+// spaces or shell metacharacters cannot change what the script runs.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 // decisionAdd records why a structure was chosen and what was ruled out, so

@@ -98,6 +98,9 @@ goalforge models [--task-type CONTINUE_GOAL]  # model records, the next choice a
 goalforge verify integration               # verify the merged result on the default branch
 goalforge decision add --title T --decision "..." [--alternatives "..."] [--consequences "..."] [--supersedes DEC-1]
 goalforge decision list [--all]            # settled architecture, inherited by every later session
+goalforge reproduce --run RUN-1 [--out ./repro]   # commit, workspace, gate commands, logs, environment
+goalforge takeover --work-item WORK-1 --reason "..."        # stop automation and take the workspace
+goalforge takeover return --work-item WORK-1 --summary "..." # re-verify and hand it back
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
@@ -181,6 +184,15 @@ is requested. An approval therefore covers one reviewed change: it cannot be
 spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
+
+When automation cannot finish something, two things make handing it to a person
+cheap. `goalforge reproduce` writes the commit, the workspace, the exact gate
+commands, their output, and the environment diagnosis as a runnable package —
+it does not try to make the model produce the same output again, which is not
+reproducible and not what investigating a failure needs. `goalforge takeover`
+is more than a pause: it refuses while a run is still executing, transfers the
+workspace, stops the planner from claiming the item, and on return re-runs the
+gates so a hand edit is verified like any other change.
 
 A passing verification result is a statement about a particular tree checked by
 a particular command. When the gate changes, or work is merged into the default

@@ -33,6 +33,8 @@ type WorkItemDetail struct {
 	Forecast TokenForecast
 	// Model is the model that would run this item and why.
 	Model ModelChoice
+	// Takeover is set while a person holds the item.
+	Takeover *Takeover
 }
 
 func (s *Store) WorkItemByID(ctx context.Context, goalID, workID string) (model.WorkItem, error) {
@@ -130,6 +132,13 @@ func (s *Store) WorkItemDetails(ctx context.Context, projectID, goalID, workID s
 	detail.Model, err = s.SelectModelForTask(ctx, projectID, project.Model, project.FallbackModel, "CONTINUE_GOAL")
 	if err != nil {
 		return detail, err
+	}
+	if takeover, takeoverErr := s.ActiveTakeover(ctx, projectID, workID); takeoverErr == nil {
+		detail.Takeover = &takeover
+		detail.Blockers = append(detail.Blockers, WorkItemBlocker{Kind: "TAKEOVER",
+			Detail: fmt.Sprintf("사람이 직접 수정 중입니다 (%s, 작업 공간 %s)", takeover.Reason, takeover.Workspace)})
+	} else if !errors.Is(takeoverErr, ErrNotFound) {
+		return detail, takeoverErr
 	}
 	return detail, nil
 }

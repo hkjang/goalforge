@@ -103,6 +103,17 @@ func (s *Store) ListRelaxations(ctx context.Context, projectID string, limit int
 // recorded as current evidence so a goal can complete on the integrated
 // result, which is the only state that actually ships.
 func (s *Store) RecordIntegrationEvidence(ctx context.Context, goalID, commitSHA string, records []VerificationRecord) error {
+	return s.recordExternalEvidence(ctx, goalID, "integration@"+shortSHA(commitSHA), records)
+}
+
+// RecordHumanEvidence stores gate results from a hand-edited workspace. A
+// person's change is not exempt from verification; it just has no provider run
+// to attach the evidence to.
+func (s *Store) RecordHumanEvidence(ctx context.Context, goalID, workItemID string, records []VerificationRecord) error {
+	return s.recordExternalEvidence(ctx, goalID, "human@"+workItemID, records)
+}
+
+func (s *Store) recordExternalEvidence(ctx context.Context, goalID, source string, records []VerificationRecord) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -115,7 +126,7 @@ func (s *Store) RecordIntegrationEvidence(ctx context.Context, goalID, commitSHA
 			required = 1
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,stale,stale_reason,created_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,0,'',?)`,
-			goalID, record.CheckType, record.Status, record.ActualValue, "integration@"+shortSHA(commitSHA),
+			goalID, record.CheckType, record.Status, record.ActualValue, source,
 			record.ExitCode, record.Duration.Milliseconds(), required, record.Output, record.FailureKind, record.RepairMode, now); err != nil {
 			return err
 		}
