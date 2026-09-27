@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	store "github.com/goalforge/goalforge/internal/store/sqlite"
 	"github.com/goalforge/goalforge/internal/testscript"
 )
 
@@ -501,5 +502,96 @@ func TestImplementationSessionCannotChangeWhatJudgesIt(t *testing.T) {
 	t.Setenv("GOALFORGE_ROLE", "")
 	if !strings.Contains(runCLI(t, ctx, "approval", "list"), approvalID) {
 		t.Fatal("the pending approval should still be pending")
+	}
+}
+
+// AT-16: the database is restored into a new environment. The records have to
+// match what was taken, and anything GoalForge started outside has to be
+// settled before work resumes — resuming with an unsettled push is how a
+// restore produces a duplicate.
+func TestRestoreVerifiesRecordsAndSettlesOutsideWork(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	remote := t.TempDir()
+	gitIn(t, remote, "init", "--bare", "-q", "-b", "main")
+	gitIn(t, repo, "init", "-b", "main")
+	gitIn(t, repo, "config", "user.email", "e2e@example.invalid")
+	gitIn(t, repo, "config", "user.name", "E2E")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-m", "base")
+	gitIn(t, repo, "remote", "add", "origin", remote)
+	gitIn(t, repo, "checkout", "-q", "-b", "goalforge/W1")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("done"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-m", "feature")
+	head := gitIn(t, repo, "rev-parse", "HEAD")
+	gitIn(t, repo, "checkout", "-q", "main")
+
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	t.Setenv("GOALFORGE_DB", statePath)
+	t.Chdir(repo)
+	runCLI(t, ctx, "project", "init", "--name", "restore", "--provider", "claude", "--model", "haiku")
+	runCLI(t, ctx, "goal", "set", "--title", "g", "--objective", "o", "--criterion", "build_passed=true")
+
+	// A push that reached the remote, recorded as unresolved because the
+	// process died before the outcome was written.
+	db, err := store.Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := db.ProjectByPath(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect := store.ExternalEffect{ProjectID: project.ID, WorkItemID: "W1", Kind: store.EffectPublishBranch,
+		Target: "origin", Branch: "goalforge/W1", RequestHash: head,
+		Key: store.EffectKey(store.EffectPublishBranch, project.ID, "W1", "origin", head)}
+	if _, _, err = db.BeginEffect(ctx, effect); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "push", "-q", "origin", "goalforge/W1")
+	if err = db.SettleEffect(ctx, effect.Key, store.EffectUnknown, "worker died after pushing"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	backupPath := filepath.Join(t.TempDir(), "state.backup")
+	backupOut := runCLI(t, ctx, "backup", "--out", backupPath)
+	if !strings.Contains(backupOut, "backup written") {
+		t.Fatalf("backup:\n%s", backupOut)
+	}
+
+	// A restore must refuse to overwrite state that is already there.
+	if output, restoreErr := runCLIWithError(t, ctx, "restore", "--from", backupPath, "--to", statePath); restoreErr == nil {
+		t.Fatalf("restoring over live state must be refused:\n%s", output)
+	}
+
+	restored := filepath.Join(t.TempDir(), "restored", "state.db")
+	restoreOut := runCLI(t, ctx, "restore", "--from", backupPath, "--to", restored)
+	for _, expected := range []string{"restored and verified against the backup manifest", "이미 반영됨", "safe to resume"} {
+		if !strings.Contains(restoreOut, expected) {
+			t.Fatalf("restore output missing %q:\n%s", expected, restoreOut)
+		}
+	}
+
+	// The restored copy knows the push already happened, so resuming cannot
+	// push a second time.
+	restoredDB, err := store.Open(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restoredDB.Close()
+	settled, err := restoredDB.EffectByKey(ctx, effect.Key)
+	if err != nil || settled.State != store.EffectSucceeded {
+		t.Fatalf("the restore must settle what was left open: %+v err=%v", settled, err)
+	}
+	remaining, err := restoredDB.UnresolvedEffects(ctx, project.ID)
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("nothing should remain unresolved: %+v err=%v", remaining, err)
 	}
 }

@@ -696,3 +696,57 @@ func TestRefreshEvidenceLeavesUnidentifiedRecordsAlone(t *testing.T) {
 		t.Fatalf("legacy evidence must not be invalidated for missing identity: marked=%d err=%v", marked, err)
 	}
 }
+
+// AT-12: two branches each verified in isolation, and their combination fails.
+// That is work, not an error message — without an item nobody is assigned to
+// it and the branch stays unreleasable with no plan to change that.
+func TestIntegrationFailureFilesRepairWork(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.OpenIntegrationRepair(ctx, g.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("nothing failed yet: %v", err)
+	}
+	item, created, err := s.RecordIntegrationFailure(ctx, p.ID, g.ID, "abcdef1234567890", []string{"build_passed", "tests_passed"})
+	if err != nil || !created {
+		t.Fatalf("item=%+v created=%t err=%v", item, created, err)
+	}
+	if item.Type != "INTEGRATION_FIX" || item.Status != "APPROVED" {
+		t.Fatalf("the fix must be ready to pick up, not sitting in triage: %+v", item)
+	}
+	if !strings.Contains(item.Title, "build_passed") || !strings.Contains(item.Acceptance, "abcdef123456") {
+		t.Fatalf("the item must name what failed and where: %+v", item)
+	}
+	// A second failure on the same unresolved integration is the same problem.
+	again, createdAgain, err := s.RecordIntegrationFailure(ctx, p.ID, g.ID, "fedcba0987654321", []string{"build_passed"})
+	if err != nil || createdAgain {
+		t.Fatalf("a repeat failure must not pile up duplicates: %+v created=%t err=%v", again, createdAgain, err)
+	}
+	if again.ID != item.ID {
+		t.Fatalf("expected the same item, got %s then %s", item.ID, again.ID)
+	}
+	open, err := s.OpenIntegrationRepair(ctx, g.ID)
+	if err != nil || open.ID != item.ID {
+		t.Fatalf("open=%+v err=%v", open, err)
+	}
+	// Once it is done, a later failure files fresh work rather than reopening
+	// something that was already resolved.
+	if err = s.SetWorkItemStatus(ctx, g.ID, item.ID, "DISCARDED"); err != nil {
+		t.Fatal(err)
+	}
+	third, createdThird, err := s.RecordIntegrationFailure(ctx, p.ID, g.ID, "1111222233334444", []string{"tests_passed"})
+	if err != nil || !createdThird || third.ID == item.ID {
+		t.Fatalf("a new failure after resolution needs its own item: %+v created=%t err=%v", third, createdThird, err)
+	}
+}
