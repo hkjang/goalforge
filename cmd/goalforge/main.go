@@ -1863,7 +1863,7 @@ func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
 
 func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("approval request", flag.ContinueOnError)
-	action := f.String("action", "protected-files", "protected-files, publish-branch, or merge-branch")
+	action := f.String("action", "protected-files", "protected-files, remove-tests, publish-branch, or merge-branch")
 	reason := f.String("reason", "", "reason for approval")
 	workItemID := f.String("work-item", "", "work item whose verified commit is being approved (required for publish-branch and merge-branch)")
 	remote := f.String("remote", "origin", "git remote the publish approval applies to")
@@ -1877,6 +1877,8 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	switch *action {
 	case "protected-files", store.ApprovalProtectedFiles:
 		actionType = store.ApprovalProtectedFiles
+	case "remove-tests", store.ApprovalRemoveTests:
+		actionType = store.ApprovalRemoveTests
 	case "publish-branch", store.ApprovalPublishBranch:
 		actionType = store.ApprovalPublishBranch
 	case "merge-branch", store.ApprovalMergeBranch:

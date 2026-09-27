@@ -19,6 +19,10 @@ const (
 	// ApprovalMergeBranch gates merging a verified work branch into the
 	// protected default branch.
 	ApprovalMergeBranch = "MERGE_BRANCH"
+	// ApprovalRemoveTests gates deleting tests that already existed. Removing
+	// an obsolete test can be correct, but it is not a decision a run may make
+	// for itself while being judged by what remains.
+	ApprovalRemoveTests = "REMOVE_TESTS"
 )
 
 // ApprovalScope binds an approval to the exact change it was granted for.

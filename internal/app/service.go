@@ -366,6 +366,17 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 		}
 		executionProject.RepositoryPath = worktree.Path
 	}
+	// The gates that will judge this run are captured before it starts. A
+	// session that rewrites its own gate must not be able to certify itself.
+	gateCommands := make([]policy.GateCommand, 0, len(gates))
+	for _, g := range gates {
+		gateCommands = append(gateCommands, policy.GateCommand{Type: g.Type, Command: g.Command})
+	}
+	surfaceBefore, err := policy.CaptureSurface(executionProject.RepositoryPath,
+		policy.VerificationSurface(executionProject.RepositoryPath, gateCommands))
+	if err != nil {
+		return result, err
+	}
 	protectedBefore, err := policy.CaptureProtectedBaseline(ctx, executionProject.RepositoryPath)
 	if err != nil {
 		return result, fmt.Errorf("capture protected files: %w", err)
@@ -404,14 +415,8 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	if err != nil {
 		return result, err
 	}
-	// Deleting tests is the cheapest way to make a failing gate pass, so it is
-	// recorded for review even when the run goes on to verify.
-	if deleted := policy.DeletedTestFiles(changes); len(deleted) > 0 {
-		if relaxErr := s.store.RecordRelaxation(ctx, store.VerificationRelaxation{ProjectID: project.ID, RunID: result.Run.RunID,
-			Kind: "tests_deleted", Detail: "삭제된 테스트 파일: " + strings.Join(deleted, ", "),
-			Before: fmt.Sprintf("%d개 테스트 파일", len(deleted)), After: "삭제됨"}); relaxErr != nil {
-			return result, relaxErr
-		}
+	if err = s.enforceVerificationIntegrity(ctx, project, executionProject, result.Run.RunID, surfaceBefore, changes); err != nil {
+		return result, err
 	}
 	if drift := policy.OutOfScopeChanges(result.WorkItem.ChangeScope, changes); len(drift) > 0 {
 		details := "work item changed files outside declared scope: " + strings.Join(drift, ", ")
@@ -554,6 +559,51 @@ func (s *Service) rotateSessionForLoop(ctx context.Context, project model.Projec
 		return nil
 	}
 	return err
+}
+
+// enforceVerificationIntegrity keeps a run from certifying itself. Two things
+// make a verdict worthless: a gate the session rewrote, and the removal of the
+// tests that were supposed to fail. Neither is treated as a reason to discard
+// the run — the work may be fine — but the judgement has to come from the
+// gates that were agreed, so those are restored before verification and the
+// change is recorded for review rather than silently dropped.
+func (s *Service) enforceVerificationIntegrity(ctx context.Context, project, executionProject model.Project, runID string, before policy.SurfaceBaseline, changes []gitops.FileChange) error {
+	changedGates, err := before.Changed(executionProject.RepositoryPath)
+	if err != nil {
+		return fmt.Errorf("inspect verification files: %w", err)
+	}
+	if len(changedGates) > 0 {
+		if err = before.Restore(executionProject.RepositoryPath); err != nil {
+			details := "restore verification files after in-run modification: " + err.Error()
+			return errors.Join(errors.New(details), s.store.RecordPolicyViolation(ctx, project.ID, runID, "VERIFICATION_RESTORE_FAILED", details))
+		}
+		if err = s.store.RecordRelaxation(ctx, store.VerificationRelaxation{ProjectID: project.ID, RunID: runID,
+			Kind: "gate_modified_in_run", Detail: "실행 중 검증 게이트 파일이 수정되어 원래 내용으로 되돌렸습니다: " + strings.Join(changedGates, ", "),
+			Before: "합의된 게이트", After: "실행이 수정한 게이트 (되돌림)"}); err != nil {
+			return err
+		}
+	}
+	removed := policy.RemovedTests(changes)
+	if len(removed) == 0 {
+		return nil
+	}
+	if err = s.store.RecordRelaxation(ctx, store.VerificationRelaxation{ProjectID: project.ID, RunID: runID,
+		Kind: "tests_deleted", Detail: "삭제된 테스트 파일: " + strings.Join(removed, ", "),
+		Before: fmt.Sprintf("%d개 테스트 파일", len(removed)), After: "삭제됨"}); err != nil {
+		return err
+	}
+	// Removing tests that already existed can be right, but it is not
+	// something a run may decide for itself: without an approval the run is
+	// stopped rather than allowed to pass gates it just made easier.
+	approved, err := s.store.ConsumeApproval(ctx, project.ID, store.ApprovalRemoveTests, runID)
+	if err != nil {
+		return err
+	}
+	if approved {
+		return nil
+	}
+	details := "tests removed without approval: " + strings.Join(removed, ", ")
+	return errors.Join(errors.New(details), s.store.RecordPolicyViolation(ctx, project.ID, runID, "TESTS_REMOVED", details))
 }
 
 func (s *Service) enforceProtectedFiles(ctx context.Context, project model.Project, runID string, before policy.ProtectedBaseline) error {

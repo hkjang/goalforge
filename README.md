@@ -117,7 +117,7 @@ goalforge pr --work-item WORK-1            # a PR body carrying the goal, criter
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
-goalforge approval request --action protected-files|publish-branch|merge-branch [--work-item WORK-1] --reason "..."
+goalforge approval request --action protected-files|remove-tests|publish-branch|merge-branch [--work-item WORK-1] --reason "..."
 goalforge approval approve APR-ID
 GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
 ```
