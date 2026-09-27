@@ -19,6 +19,10 @@ Writable mappings deliberately avoid each tool's broadest permission mode
 GoalForge's own policy-checked engine either way. Run `goalforge doctor` to
 verify the installed CLI supports every flag the adapter passes.
 
+## 사용 가이드
+
+처음부터 끝까지 한 번 돌려 보는 순서는 [docs/GUIDE.md](docs/GUIDE.md) 에 있습니다.
+
 ## Quick start
 
 ```sh
