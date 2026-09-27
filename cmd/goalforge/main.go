@@ -77,7 +77,8 @@ handoff    takeover --work-item ID | takeover return --work-item ID
 evaluate   eval add | eval list | eval record | eval compare
 operate    backup --out FILE | restore --from FILE --to PATH | effects [--reconcile]
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
-           checkpoint --next-action TEXT`
+           checkpoint --next-action TEXT
+misc       version`
 
 // privilegedCommands decide whether work is acceptable or what it is allowed
 // to do. An implementation session may change the repository; it may not
@@ -122,6 +123,13 @@ func commandAuthority(args []string) (string, string) {
 func run(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return usage()
+	}
+	// Version is answered before anything opens a database or creates a
+	// directory: the first thing done with a downloaded binary is asking what
+	// it is, and that must work in a directory the user has not chosen yet.
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
+		fmt.Print(versionInfo())
+		return nil
 	}
 	dbPath := os.Getenv("GOALFORGE_DB")
 	if dbPath == "" {
