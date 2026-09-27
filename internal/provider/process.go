@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/goalforge/goalforge/internal/policy"
 	"os/exec"
 	"sync"
 
@@ -31,7 +33,10 @@ func (r *ProcessRunner) Run(ctx context.Context, request RunRequest, args []stri
 	}
 	cmd := exec.CommandContext(ctx, r.Binary, args...)
 	cmd.Dir = request.WorkDir
-	cmd.Env = append(os.Environ(), request.Environment...)
+	// An implementation session gets a named environment and the role marker,
+	// not whatever the operator happened to export: unrelated credentials are
+	// not something to hand over just because they were in scope.
+	cmd.Env = append(policy.SessionEnvironment(os.Environ(), policy.RoleImplementation), request.Environment...)
 	procctl.SetGroup(cmd)
 	cmd.Cancel = func() error {
 		return procctl.KillGroup(cmd)
