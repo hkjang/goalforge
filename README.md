@@ -86,6 +86,7 @@ pass is committed in its worktree as author `GoalForge` with
 ```sh
 goalforge approval request --action merge-branch --work-item WORK-1 --reason "..."
 goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
+goalforge effects [--reconcile]        # what was changed outside, and settle anything unresolved
 goalforge approval request --action publish-branch --work-item WORK-1 [--remote origin] --reason "..."
 goalforge publish --work-item WORK-1 [--remote origin]
 goalforge worktree gc [--force]        # remove worktrees of DONE/DISCARDED items; branches kept
@@ -190,6 +191,17 @@ Before writable AI runs, GoalForge hashes protected repository files such as
 change, or deletion blocks verification, returns the work item to the backlog,
 sets the project to `BLOCKED`, and records a policy violation. Protected-file
 approvals require an explicit request and approval and are consumed by one run.
+
+Pushing and merging change something outside this database, so a crash between
+doing one and recording it leaves the two disagreeing. Both are written to an
+effect ledger before they are attempted and settled afterwards. A failure whose
+outcome could not be determined is stored as unknown rather than failed —
+retrying a failure is safe, retrying something that may have succeeded is not —
+and the next attempt asks the remote whether the change is already there before
+doing anything. If the question cannot be answered, nothing is retried until it
+is; `goalforge effects --reconcile` settles what it can and reports what it
+cannot. There is no globally exactly-once execution being assumed here, only a
+record that makes a duplicate detectable.
 
 Merge and publish approvals are bound to the work item, the verified commit
 SHA, and the destination (default branch or remote) resolved when the approval

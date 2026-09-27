@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
  cost_usd REAL NOT NULL DEFAULT 0, interventions INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS external_effects (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL DEFAULT '',
+ work_item_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, effect_key TEXT NOT NULL UNIQUE,
+ target TEXT NOT NULL DEFAULT '', branch TEXT NOT NULL DEFAULT '', request_hash TEXT NOT NULL DEFAULT '', state TEXT NOT NULL,
+ result TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 1,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS evaluation_trials (
  id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES evaluation_cases(id), label TEXT NOT NULL,
  repetition INTEGER NOT NULL DEFAULT 1, condition_hash TEXT NOT NULL DEFAULT '',
