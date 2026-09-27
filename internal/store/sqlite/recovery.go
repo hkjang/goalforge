@@ -358,7 +358,7 @@ func (s *Store) EnterQuotaWait(ctx context.Context, q QuotaWindow, c Checkpoint,
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	_ = notify.Post(ctx, notify.Event{Project: c.ProjectID, State: "WAITING_QUOTA", Reason: "quota exhausted; resume scheduled at " + j.RunAt.UTC().Format(time.RFC3339)})
+	_ = notify.Post(ctx, notify.Event{Project: c.ProjectID, Name: s.projectName(ctx, c.ProjectID), State: "WAITING_QUOTA", Reason: "quota exhausted; resume scheduled at " + j.RunAt.UTC().Format(time.RFC3339)})
 	return s.writeContinuity(c)
 }
 
@@ -400,7 +400,7 @@ func (s *Store) BlockBeforeRun(ctx context.Context, projectID, workItemID string
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	_ = notify.Post(ctx, notify.Event{Project: projectID, State: "BLOCKED", Reason: reason})
+	_ = notify.Post(ctx, notify.Event{Project: projectID, Name: s.projectName(ctx, projectID), State: "BLOCKED", Reason: reason})
 	return nil
 }
 

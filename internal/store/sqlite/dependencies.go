@@ -142,46 +142,89 @@ func (s *Store) unmetDependencies(ctx context.Context, q queryer, workID string)
 	return result, rows.Err()
 }
 
-// checkConcurrency enforces the project's implementation WIP limit and refuses
-// to start work whose declared scope overlaps something already in progress.
-// Two sessions editing the same files in separate worktrees produce a conflict
-// that neither of them verified.
-func (s *Store) checkConcurrency(ctx context.Context, q queryer, goalID, workID string) error {
+// activeWork is one work item currently being implemented, with who holds it.
+type activeWork struct {
+	ID, Scope, Owner string
+}
+
+// activeWorkItems lists what is being implemented right now. Human-held items
+// are included: a person editing a workspace conflicts with an agent editing
+// the same files just as much as two agents would.
+func (s *Store) activeWorkItems(ctx context.Context, q queryer, goalID, excludeID string) ([]activeWork, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id,change_scope,COALESCE(owner,'AI') FROM work_items WHERE goal_id=? AND status='IN_PROGRESS' AND id<>?`, goalID, excludeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []activeWork
+	for rows.Next() {
+		var item activeWork
+		if err = rows.Scan(&item.ID, &item.Scope, &item.Owner); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+// wipLimit reads the project's implementation concurrency ceiling.
+func (s *Store) wipLimit(ctx context.Context, q queryer, goalID string) (int, error) {
 	var limit int
 	if err := q.QueryRowContext(ctx, `SELECT COALESCE(p.wip_limit,1) FROM goals g JOIN projects p ON p.id=g.project_id WHERE g.id=?`, goalID).Scan(&limit); err != nil {
-		return err
+		return 0, err
 	}
 	if limit <= 0 {
 		limit = 1
 	}
-	var scope string
-	if err := q.QueryRowContext(ctx, `SELECT change_scope FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).Scan(&scope); err != nil {
-		return err
+	return limit, nil
+}
+
+// scopeConflicts returns the active items a scope could collide with.
+func scopeConflicts(scope string, active []activeWork) []string {
+	var conflicts []string
+	for _, item := range active {
+		if policy.ScopesOverlap(scope, item.Scope) {
+			label := fmt.Sprintf("%s (%s)", item.ID, scopeLabel(item.Scope))
+			if item.Owner == OwnerHuman {
+				label += " — 사람이 수정 중"
+			}
+			conflicts = append(conflicts, label)
+		}
 	}
-	rows, err := q.QueryContext(ctx, `SELECT id,change_scope FROM work_items WHERE goal_id=? AND status='IN_PROGRESS' AND id<>?`, goalID, workID)
+	return conflicts
+}
+
+// checkConcurrency enforces the project's implementation WIP limit and refuses
+// to start work whose declared scope overlaps something already in progress.
+// Two sessions editing the same files in separate worktrees produce a conflict
+// that neither of them verified.
+//
+// Only agent-held items count toward the limit: handing one item to a person
+// is not a reason for automation to stop working on everything else, and the
+// scope check still keeps it out of that person's files.
+func (s *Store) checkConcurrency(ctx context.Context, q queryer, goalID, workID string) error {
+	limit, err := s.wipLimit(ctx, q, goalID)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
-	active := 0
-	var conflicts []string
-	for rows.Next() {
-		var otherID, otherScope string
-		if err = rows.Scan(&otherID, &otherScope); err != nil {
-			return err
-		}
-		active++
-		if policy.ScopesOverlap(scope, otherScope) {
-			conflicts = append(conflicts, fmt.Sprintf("%s (%s)", otherID, scopeLabel(otherScope)))
-		}
-	}
-	if err = rows.Err(); err != nil {
+	var scope string
+	if err = q.QueryRowContext(ctx, `SELECT change_scope FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).Scan(&scope); err != nil {
 		return err
 	}
-	if active >= limit {
-		return fmt.Errorf("implementation WIP limit reached: %d of %d items in progress", active, limit)
+	active, err := s.activeWorkItems(ctx, q, goalID, workID)
+	if err != nil {
+		return err
 	}
-	if len(conflicts) > 0 {
+	agentHeld := 0
+	for _, item := range active {
+		if item.Owner != OwnerHuman {
+			agentHeld++
+		}
+	}
+	if agentHeld >= limit {
+		return fmt.Errorf("implementation WIP limit reached: %d of %d items in progress", agentHeld, limit)
+	}
+	if conflicts := scopeConflicts(scope, active); len(conflicts) > 0 {
 		return fmt.Errorf("change scope %s overlaps work already in progress: %s", scopeLabel(scope), strings.Join(conflicts, ", "))
 	}
 	return nil

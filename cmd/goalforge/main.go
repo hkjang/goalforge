@@ -624,6 +624,21 @@ func runDoctor(ctx context.Context, s *store.Store, args []string) error {
 		return projectErr
 	}
 	report := diagnostics.Run(ctx, options)
+	// Environment checks ask whether this machine can run anything; readiness
+	// asks whether this project could ever finish, which is the question a
+	// green doctor was quietly failing to answer.
+	if projectErr == nil {
+		readiness, readinessErr := s.ReadinessInput(ctx, project.ID)
+		if readinessErr != nil {
+			return readinessErr
+		}
+		for _, check := range diagnostics.CheckReadiness(readiness) {
+			report.Checks = append(report.Checks, check)
+			if check.Level == diagnostics.LevelFail {
+				report.Failed++
+			}
+		}
+	}
 	for _, check := range report.Checks {
 		fmt.Printf("%-4s %-16s %s\n", check.Level, check.Name, check.Detail)
 	}
@@ -800,6 +815,12 @@ func continueHandler(s *store.Store, service *app.Service) scheduler.Handler {
 		case errors.Is(runErr, orchestrator.ErrWaitingQuota):
 			rescheduleAfterQuota()
 			return out, nil
+		case errors.Is(runErr, store.ErrAllCandidatesConflict):
+			// Transient: another item is being implemented in the same area.
+			// It clears when that run finishes, so wait rather than stop.
+			next := time.Now().UTC().Add(30 * time.Second)
+			out.RescheduleAt = &next
+			return out, nil
 		case errors.Is(runErr, store.ErrNotFound):
 			// Backlog has no executable work; completion criteria decide the
 			// rest, so hand control back to the user.
@@ -818,7 +839,7 @@ func continueHandler(s *store.Store, service *app.Service) scheduler.Handler {
 			plan := result.Repair
 			if !plan.Automatic() {
 				fmt.Printf("worker: repair stopped run=%s decision=%s reason=%s\n", result.Run.RunID, plan.Decision, plan.Reason)
-				_ = notify.Post(ctx, notify.Event{Project: project.ID, State: "REPAIR_REQUIRED", Reason: plan.Decision + ": " + plan.Reason})
+				_ = notify.Post(ctx, notify.Event{Project: project.ID, Name: project.Name, State: "REPAIR_REQUIRED", Reason: plan.Decision + ": " + plan.Reason})
 				return out, nil
 			}
 			fmt.Printf("worker: repair scheduled run=%s attempt=%d kind=%s\n", result.Run.RunID, plan.Attempt, plan.FailureKind)
@@ -2269,7 +2290,7 @@ func goalShow(ctx context.Context, s *store.Store) error {
 	if err != nil {
 		return fmt.Errorf("find active goal: %w", err)
 	}
-	progress, complete, err := s.GoalProgress(ctx, g)
+	detail, err := s.GoalProgressDetail(ctx, g)
 	if err != nil {
 		return err
 	}
@@ -2281,9 +2302,121 @@ func goalShow(ctx context.Context, s *store.Store) error {
 	if metrics.VerificationTotal > 0 {
 		verificationRate = float64(metrics.VerificationPassed) / float64(metrics.VerificationTotal) * 100
 	}
-	fmt.Printf("Project: %s\nGoal: %s (v%d, %s)\nState: %s\nProgress: %.1f%%\nCompletion verified: %t\nRuns: total=%d provider_success=%d failed=%d avg_seconds=%.2f\nWork: done=%d blocked=%d\nVerification: passed=%d total=%d rate=%.1f%%\nSessions: %d\nTokens: input=%d output=%d cached=%d reasoning=%d cost_usd=%.4f\nCriteria:\n", p.Name, g.Title, g.Version, g.Status, p.State, progress, complete, metrics.RunsTotal, metrics.RunsSuccessful, metrics.RunsFailed, metrics.AverageRunSeconds, metrics.WorkDone, metrics.WorkBlocked, metrics.VerificationPassed, metrics.VerificationTotal, verificationRate, metrics.SessionCount, metrics.InputTokens, metrics.OutputTokens, metrics.CachedInputTokens, metrics.ReasoningTokens, metrics.CostUSD)
-	for _, c := range g.Criteria {
-		fmt.Printf("  - %s = %s\n", c.Type, c.ExpectedValue)
+	baseline := fmt.Sprintf("%.0f/%.0f 가중치", detail.DoneWeight, detail.TotalWeight)
+	if detail.DiscardedItems > 0 {
+		baseline += fmt.Sprintf(", 폐기 %d건 기준선 제외", detail.DiscardedItems)
+	}
+	fmt.Printf("Project: %s\nGoal: %s (v%d, %s)\nState: %s\nProgress: %.1f%% (%s)\nCompletion verified: %t\nRuns: total=%d provider_success=%d failed=%d avg_seconds=%.2f\nWork: done=%d blocked=%d\nVerification: passed=%d total=%d rate=%.1f%%\nSessions: %d\nTokens: input=%d output=%d cached=%d reasoning=%d cost_usd=%.4f\n",
+		p.Name, g.Title, g.Version, g.Status, p.State, detail.Percent, baseline, detail.Complete,
+		metrics.RunsTotal, metrics.RunsSuccessful, metrics.RunsFailed, metrics.AverageRunSeconds,
+		metrics.WorkDone, metrics.WorkBlocked, metrics.VerificationPassed, metrics.VerificationTotal,
+		verificationRate, metrics.SessionCount, metrics.InputTokens, metrics.OutputTokens,
+		metrics.CachedInputTokens, metrics.ReasoningTokens, metrics.CostUSD)
+	// Criteria are shown with the evidence that decided them. Listing the
+	// thresholds alone left the CLI unable to answer the question the whole
+	// completion model exists for: is this met, and by what?
+	fmt.Println("Criteria:")
+	for _, criterion := range detail.Criteria {
+		fmt.Printf("  %-4s %-20s 기준 %-10s 측정 %-10s %s\n", criterionMark(criterion.Status), criterion.Type,
+			criterion.ExpectedValue, dashIfEmpty(criterion.ActualValue), criterionEvidence(criterion))
+	}
+	return printBlockers(ctx, s, p, g)
+}
+
+func criterionMark(status string) string {
+	switch status {
+	case "MET":
+		return "[v]"
+	case "UNMET":
+		return "[!]"
+	case "STALE":
+		return "[~]"
+	default:
+		return "[ ]"
+	}
+}
+
+func dashIfEmpty(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func criterionEvidence(status store.CriterionStatus) string {
+	switch status.Status {
+	case "STALE":
+		return "재검증 필요: " + status.StaleReason
+	case "NO_EVIDENCE":
+		return "증거 없음"
+	default:
+		evidence := "근거 " + dashIfEmpty(status.RunID)
+		if !status.MeasuredAt.IsZero() {
+			evidence += " " + status.MeasuredAt.Local().Format("01-02 15:04")
+		}
+		return evidence
+	}
+}
+
+// printBlockers answers "what is stopping this now", which the CLI previously
+// left the user to infer from a state code.
+func printBlockers(ctx context.Context, s *store.Store, p model.Project, g model.Goal) error {
+	var blockers []string
+	approvals, err := s.ListPendingApprovals(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	for _, approval := range approvals {
+		blockers = append(blockers, fmt.Sprintf("승인 대기: %s — %s (goalforge approval approve %s)", approval.ActionType, approval.Reason, approval.ID))
+	}
+	integration, err := s.IntegrationStatus(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if integration.Pending {
+		blockers = append(blockers, "통합 검증 필요: "+integration.Reason+" (goalforge verify integration)")
+	}
+	runs, err := s.ListRecentRuns(ctx, p.ID, 5)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.State != "REPAIR_REQUIRED" && run.State != "FAILED" {
+			continue
+		}
+		plan, planErr := s.RepairPlanForRun(ctx, run.ID)
+		if errors.Is(planErr, store.ErrNotFound) {
+			blockers = append(blockers, fmt.Sprintf("검증 실패: %s (goalforge reproduce --run %s)", run.ID, run.ID))
+			break
+		}
+		if planErr != nil {
+			return planErr
+		}
+		if !plan.Automatic() {
+			blockers = append(blockers, fmt.Sprintf("복구 중단: %s — %s (%s)", run.ID, plan.Reason, plan.Summary))
+		}
+		break
+	}
+	items, err := s.ListWorkItems(ctx, g.ID)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.Status != "IN_PROGRESS" {
+			continue
+		}
+		if takeover, takeoverErr := s.ActiveTakeover(ctx, p.ID, item.ID); takeoverErr == nil {
+			blockers = append(blockers, fmt.Sprintf("사람이 수정 중: %s (%s) — goalforge takeover return --work-item %s", item.ID, takeover.Reason, item.ID))
+		} else if !errors.Is(takeoverErr, store.ErrNotFound) {
+			return takeoverErr
+		}
+	}
+	if len(blockers) == 0 {
+		return nil
+	}
+	fmt.Println("Needs you:")
+	for _, blocker := range blockers {
+		fmt.Printf("  - %s\n", blocker)
 	}
 	return nil
 }

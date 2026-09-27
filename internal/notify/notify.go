@@ -23,9 +23,21 @@ const EnvWebhookURL = "GOALFORGE_WEBHOOK_URL"
 // message body; when empty it is derived from the other fields.
 type Event struct {
 	Project string `json:"project"`
-	State   string `json:"state"`
-	Reason  string `json:"reason,omitempty"`
-	Text    string `json:"text"`
+	// Name is what a person calls the project. A webhook that says
+	// "PRJ-1790493808621901102" makes the reader look it up before they can
+	// tell whether it concerns them.
+	Name   string `json:"name,omitempty"`
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	Text   string `json:"text"`
+}
+
+// label is the project as a person would refer to it.
+func (e Event) label() string {
+	if e.Name != "" {
+		return e.Name
+	}
+	return e.Project
 }
 
 // Post sends event to the configured webhook. It is best-effort: an unset
@@ -37,8 +49,14 @@ func Post(ctx context.Context, event Event) error {
 		return nil
 	}
 	event.Reason = audit.RedactString(event.Reason)
+	// The same block repeated on every worker tick trains people to ignore the
+	// channel, so an identical event stays quiet for a window. A changed
+	// reason is news and always goes through.
+	if !defaultSuppressor.allow(event.Project+"\x00"+event.State+"\x00"+event.Reason, repeatWindow()) {
+		return nil
+	}
 	if event.Text == "" {
-		event.Text = fmt.Sprintf("GoalForge %s: project %s", event.State, event.Project)
+		event.Text = fmt.Sprintf("GoalForge %s: project %s", event.State, event.label())
 		if event.Reason != "" {
 			event.Text += " — " + event.Reason
 		}

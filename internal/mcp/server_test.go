@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -82,8 +83,23 @@ func TestStdioProtocolLifecycle(t *testing.T) {
 	var tools struct {
 		Tools []toolDescriptor `json:"tools"`
 	}
-	if err := json.Unmarshal(responses["2"].Result, &tools); err != nil || len(tools.Tools) != 15 {
+	if err := json.Unmarshal(responses["2"].Result, &tools); err != nil || len(tools.Tools) < 15 {
 		t.Fatalf("tools/list=%s err=%v", responses["2"].Result, err)
+	}
+	// A hardcoded count only breaks when tools are added. What actually
+	// matters is that every advertised tool is dispatchable and that the ones
+	// an agent needs to understand a stuck project are present.
+	advertised := map[string]bool{}
+	for _, tool := range tools.Tools {
+		advertised[tool.Name] = true
+		if _, err := server.callTool(context.Background(), tool.Name, nil); errors.Is(err, errUnknownTool) {
+			t.Errorf("tool %s is advertised but not dispatched", tool.Name)
+		}
+	}
+	for _, required := range []string{"project_readiness", "work_item_detail", "run_detail", "decisions_list", "activity_report"} {
+		if !advertised[required] {
+			t.Errorf("missing tool %s", required)
+		}
 	}
 	if !strings.Contains(string(responses["3"].Result), "mcp-demo") {
 		t.Fatalf("list_projects=%s", responses["3"].Result)
