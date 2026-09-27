@@ -119,6 +119,85 @@ func TestPushBranchPublishesToLocalRemote(t *testing.T) {
 	}
 }
 
+// Git reads GIT_AUTHOR_*/GIT_COMMITTER_* ahead of user.name and user.email,
+// including the values passed with -c, so an agent harness or CI runner that
+// exports its own identity would otherwise record AI commits under a person's
+// name. Both commit-producing paths must pin GoalForge regardless.
+func TestCommitIdentityIgnoresAmbientGitEnvironment(t *testing.T) {
+	const wantIdentity = "GoalForge <goalforge@goalforge.invalid>"
+	ctx := context.Background()
+	repository := t.TempDir()
+	t.Setenv("GIT_AUTHOR_NAME", "Someone Else")
+	t.Setenv("GIT_AUTHOR_EMAIL", "someone@example.invalid")
+	t.Setenv("GIT_COMMITTER_NAME", "Someone Else")
+	t.Setenv("GIT_COMMITTER_EMAIL", "someone@example.invalid")
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repository}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	write := func(name, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repository, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Repository-local identity differs too: neither source may leak through.
+	run("init", "-b", "main")
+	run("config", "user.email", "local@example.invalid")
+	run("config", "user.name", "Local Config")
+	write("README.md", "base")
+	run("add", "README.md")
+	run("commit", "-m", "base")
+	run("checkout", "-b", "goalforge/P1-WORK-1")
+
+	write("generated.go", "package main")
+	commit, err := CommitVerified(ctx, repository, "main", "GOAL-1", "WORK-1", "RUN-1", "implement feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit.CommitSHA == "" {
+		t.Fatalf("commit=%+v", commit)
+	}
+	author, committer := identityOf(t, run)
+	if author != wantIdentity || committer != wantIdentity {
+		t.Fatalf("CommitVerified author=%q committer=%q, want both %q", author, committer, wantIdentity)
+	}
+	// The trailer contract is unchanged by the pinned identity.
+	message := run("log", "-1", "--format=%B")
+	for _, expected := range []string{"implement feature", "Goal-ID: GOAL-1", "Work-Item-ID: WORK-1", "Run-ID: RUN-1"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("missing %q in commit message %q", expected, message)
+		}
+	}
+
+	run("checkout", "main")
+	mergeMessage := "Merge verified work WORK-1\n\nGoal-ID: GOAL-1\nWork-Item-ID: WORK-1\nRun-ID: RUN-1\n"
+	sha, err := MergeVerified(ctx, repository, "main", "goalforge/P1-WORK-1", mergeMessage)
+	if err != nil || sha == "" {
+		t.Fatalf("sha=%q err=%v", sha, err)
+	}
+	author, committer = identityOf(t, run)
+	if author != wantIdentity || committer != wantIdentity {
+		t.Fatalf("MergeVerified author=%q committer=%q, want both %q", author, committer, wantIdentity)
+	}
+}
+
+// identityOf reports the author and committer of HEAD as "Name <email>".
+func identityOf(t *testing.T, run func(args ...string) string) (string, string) {
+	t.Helper()
+	identity := run("log", "-1", "--format=%an <%ae>%n%cn <%ce>")
+	lines := strings.Split(identity, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected identity output %q", identity)
+	}
+	return lines[0], lines[1]
+}
+
 func TestCommitVerifiedCreatesTrailedCommitOffProtectedBranch(t *testing.T) {
 	ctx := context.Background()
 	repository := t.TempDir()
