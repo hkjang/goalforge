@@ -731,3 +731,60 @@ func TestRunBlocksWhenItDeletesExistingTests(t *testing.T) {
 		t.Fatalf("the project should be blocked for review, got %s", current.State)
 	}
 }
+
+// AT-07: a cancel that lands while the provider is working ends the tenancy.
+// The work may have been done, but nothing after the cancel is confirmed — the
+// work item does not become DONE and no commit is recorded.
+func TestCancelDuringARunStopsItFromConfirming(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := model.Project{ID: "P1", Name: "demo", RepositoryPath: root, DefaultBranch: "main", Provider: "fake"}
+	if err = db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := db.SetGoal(ctx, project.ID, "ship", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature", ChangeScope: "**"}); err != nil {
+		t.Fatal(err)
+	}
+	gate := testscript.Write(t, root, "verify", "exit 0", "exit /b 0")
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "t@example.invalid"}, {"config", "user.name", "T"}, {"add", "-A"}, {"commit", "-m", "fixture"}} {
+		if output, gitErr := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); gitErr != nil {
+			t.Skipf("git %v: %v %s", args, gitErr, output)
+		}
+	}
+	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed", Command: []string{gate}, Timeout: 5 * time.Second, Required: true}); err != nil {
+		t.Fatal(err)
+	}
+	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
+	// The cancel arrives while the provider is mid-turn, which is the race the
+	// requirement is about.
+	fake := &fakeProvider{onStart: func(provider.RunRequest) {
+		if _, cancelErr := db.RequestRunControl(ctx, project.ID, "CANCEL"); cancelErr != nil {
+			t.Fatalf("cancel: %v", cancelErr)
+		}
+	}}
+	runner, _ := orchestrator.New(db, fake)
+	verify, _ := verification.New(db, 4096)
+	service, _ := New(db, plannerService, runner, verify, func() string { return "RUN-1" })
+	if _, err = service.Continue(ctx, project); !errors.Is(err, store.ErrStaleGeneration) {
+		t.Fatalf("a cancelled run must not confirm: %v", err)
+	}
+	items, err := db.ListWorkItems(ctx, goal.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Status == "DONE" {
+		t.Fatal("the work item was completed after the run was cancelled")
+	}
+	if _, err = db.LatestRunCommitForWork(ctx, project.ID, "W1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a cancelled run must not record a verified commit: %v", err)
+	}
+}

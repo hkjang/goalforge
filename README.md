@@ -192,6 +192,15 @@ change, or deletion blocks verification, returns the work item to the backlog,
 sets the project to `BLOCKED`, and records a policy violation. Protected-file
 approvals require an explicit request and approval and are consumed by one run.
 
+A run holds a lease with a generation. Taking over an expired lease, or
+cancelling, starts a new generation, and a worker carrying the old one can no
+longer confirm state: its work may have been correct, but something else has
+been running the project since and a late confirmation would overwrite that. A
+cancel that lands while a provider is mid-turn therefore stops the run from
+marking work done or recording a commit, rather than racing it. Pausing does
+not end the tenancy, because the work is meant to continue. A caller with no
+lease is the operator running a command directly and is not fenced.
+
 Pushing and merging change something outside this database, so a crash between
 doing one and recording it leaves the two disagreeing. Both are written to an
 effect ledger before they are attempted and settled afterwards. A failure whose
