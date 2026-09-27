@@ -93,6 +93,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "concurrency" {
 			return projectConcurrency(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "profile" {
+			return projectProfile(ctx, s, args[2:])
+		}
 	case "goal":
 		if len(args) > 1 && args[1] == "set" {
 			return goalSet(ctx, s, args[2:])
@@ -126,6 +129,13 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "integration" {
 			return verifyIntegration(ctx, s, args[2:])
 		}
+		if len(args) > 2 && args[1] == "template" && args[2] == "list" {
+			fmt.Println(strings.Join(store.GateTemplateNames(), "\n"))
+			return nil
+		}
+		if len(args) > 1 && args[1] == "template" {
+			return verifyTemplate(ctx, s, args[2:])
+		}
 	case "continue":
 		return continueGoal(ctx, s, args[1:], false)
 	case "develop":
@@ -148,6 +158,8 @@ func run(ctx context.Context, args []string) error {
 		return activityReport(ctx, s, args[1:])
 	case "models":
 		return modelAdvice(ctx, s, args[1:])
+	case "pr":
+		return prDescription(ctx, s, args[1:])
 	case "eval":
 		if len(args) > 1 && args[1] == "add" {
 			return evalAdd(ctx, s, args[2:])
@@ -824,6 +836,87 @@ func printRepair(plan store.RepairPlan) {
 		return
 	}
 	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
+}
+
+// verifyTemplate installs a starting set of gates for a kind of project. A
+// project with no gates cannot complete a goal, and choosing gates from nothing
+// is where most setups stall.
+func verifyTemplate(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("verify template", flag.ContinueOnError)
+	overwrite := f.Bool("overwrite", false, "replace gates of the same type instead of keeping them")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 1 {
+		return fmt.Errorf("verify template NAME (available: %s)", strings.Join(store.GateTemplateNames(), ", "))
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	added, skipped, err := s.ApplyGateTemplate(ctx, p.ID, f.Arg(0), *overwrite)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("gates added: %s\n", strings.Join(added, ", "))
+	if len(skipped) > 0 {
+		fmt.Printf("kept existing: %s (use --overwrite to replace)\n", strings.Join(skipped, ", "))
+	}
+	fmt.Println("review the thresholds before relying on them: a template is a starting point, not a standard")
+	return nil
+}
+
+// projectProfile applies an operating posture as a set of limits, so a choice
+// like "운영 시스템" is expressed once rather than as a dozen settings.
+func projectProfile(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("project profile", flag.ContinueOnError)
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 1 {
+		fmt.Printf("project profile NAME (available: %s)\n", strings.Join(store.PolicyProfileNames(), ", "))
+		for _, name := range store.PolicyProfileNames() {
+			profile, _ := store.LookupPolicyProfile(name)
+			fmt.Printf("  %-12s %s\n    토큰 %d, 비용 $%.0f, 하루 %d회, 동시 %d건, 자동 수정 %d회/$%.0f, auto-commit=%t\n",
+				profile.Name, profile.Description, profile.TokenLimit, profile.CostLimitUSD, profile.DailyRunLimit,
+				profile.WIPLimit, profile.Repair.MaxAttempts, profile.Repair.MaxCostUSD, profile.AutoCommit)
+		}
+		return nil
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	profile, err := s.ApplyPolicyProfile(ctx, p.ID, f.Arg(0))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("profile applied: %s — %s\n", profile.Name, profile.Description)
+	return nil
+}
+
+// prDescription emits a pull request body that carries what the change was for
+// and how it was proven, so a reviewer does not have to reconstruct it from
+// commits.
+func prDescription(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("pr", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item whose verified change to describe")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	pr, err := s.BuildPRDescription(ctx, p.ID, *workItemID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s\n\n%s", pr.Title, pr.Body)
+	return nil
 }
 
 // evalAdd registers a fixed task used to compare configurations. Comparing

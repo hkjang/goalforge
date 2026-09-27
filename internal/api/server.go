@@ -244,6 +244,10 @@ type RunDetail struct {
 	DiffTruncated bool                       `json:"diff_truncated,omitempty"`
 	DiffError     string                     `json:"diff_error,omitempty"`
 	Repair        *store.RepairPlan          `json:"repair,omitempty"`
+	// EstimatedTokens is what the work item was predicted to need, so the
+	// prediction can be judged against what the run actually used.
+	EstimatedTokens int64  `json:"estimated_tokens,omitempty"`
+	EstimateSource  string `json:"estimate_source,omitempty"`
 }
 
 // diffLimitBytes caps how much of a patch is sent to a browser; a reviewer
@@ -294,6 +298,21 @@ func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if detail.Run.WorkItemID != "" {
+		if goal, goalErr := s.goalForProject(r, projectID); goalErr == nil {
+			if item, itemErr := s.store.WorkItemByID(r.Context(), goal.ID, detail.Run.WorkItemID); itemErr == nil {
+				detail.EstimatedTokens, detail.EstimateSource = item.EstimatedTokens, "manual"
+				if item.EstimatedTokens == 0 {
+					if forecast, forecastErr := s.store.ForecastTokens(r.Context(), projectID, detail.Run.TaskType); forecastErr == nil {
+						detail.EstimatedTokens, detail.EstimateSource = forecast.Expected, "forecast"
+					}
+				}
+			} else if !errors.Is(itemErr, store.ErrNotFound) {
+				writeError(w, http.StatusInternalServerError, itemErr.Error())
+				return
+			}
+		}
 	}
 	if plan, planErr := s.store.RepairPlanForRun(r.Context(), runID); planErr == nil {
 		detail.Repair = &plan

@@ -44,6 +44,7 @@ goalforge project init --name N [--repo .] [--provider codex|claude|qwen|opencod
 goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily-tokens 250000 --daily-cost-usd 15
 goalforge project runtime --turn-timeout 30m --run-timeout 2h
 goalforge project concurrency --wip 2      # only items with disjoint change scopes run together
+goalforge project profile personal|team|production   # an operating posture as one set of limits
 goalforge project provider set --provider claude --model sonnet --reason "..."
 goalforge goal set --title T --objective O --criterion build_passed=true [--reason ...]
 goalforge goal show
@@ -51,6 +52,7 @@ goalforge milestone add --title T --weight 2
 goalforge work add --title T --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
                    [--depends-on WORK-1,WORK-2]   # every predecessor must be DONE first
 goalforge work list | work status ID --set APPROVED
+goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
 goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100]
                           [--value-pattern 'coverage:\s+([0-9.]+)%']   # measure, do not assume
 ```
@@ -105,6 +107,7 @@ goalforge eval add --name N --kind bug_fix|feature|refactor|docs --objective "..
 goalforge eval record --case EVAL-1 --label "haiku+v2" --run RUN-1
 goalforge eval compare [--case EVAL-1]     # pass rate, cost per run, manual interventions by label
 goalforge approval reject APR-1 --category code_quality --note "..."
+goalforge pr --work-item WORK-1            # a PR body carrying the goal, criteria, and evidence
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
@@ -188,6 +191,15 @@ is requested. An approval therefore covers one reviewed change: it cannot be
 spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
+
+`goalforge verify template` installs a starting set of gates for a kind of
+project without replacing thresholds someone chose deliberately, and
+`goalforge project profile` expresses an operating posture — personal, team,
+production — as the budget, concurrency, and repair limits that implement it.
+`goalforge pr` emits a pull request body carrying the goal, the work item's
+purpose and acceptance criteria, the gate results, the completion criteria it
+moves, the changed files, and the trailers linking them, so a reviewer sees
+what was achieved and how it was proven without reconstructing it from commits.
 
 Improving the automation needs a fixed yardstick, so a prompt, model, or
 policy change can be told apart from the work that happened to come up.

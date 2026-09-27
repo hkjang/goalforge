@@ -121,6 +121,7 @@ else if(name==='done'){stream.done=true;liveStatus('종료됨','실행이 '+stat
 else if(name==='error'){fail(payload.error||'스트림 오류')}}
 connect()}
 function stopLive(){if(!liveStream)return;liveStream.closed=true;if(liveStream.timer)clearTimeout(liveStream.timer);liveStream=null}
+function approvalScope(a){var sc=a.Scope||{};if(!sc.CommitSHA)return'';var bits=['작업 '+esc(sc.WorkItemID),'커밋 <code>'+shortSHA(sc.CommitSHA)+'</code>'];if(sc.SourceBranch)bits.push('브랜치 '+esc(sc.SourceBranch));if(sc.TargetRef)bits.push('적용 대상 '+esc(sc.TargetRef));if(sc.FilesChanged)bits.push('파일 '+sc.FilesChanged+'개');return'<div class="sub" style="margin-top:4px">'+bits.join(' · ')+'</div>'}
 function approvalCard(projectID,a,projectName){return'<div class="approve"><div class="row"><div><strong>'+esc(a.ActionType)+'</strong>'+(projectName?' <span class="pill">'+esc(projectName)+'</span>':'')+' — '+esc(a.Reason)+approvalScope(a)+'<div class="sub" style="margin-top:4px"><a class="plain" href="#/project/'+encodeURIComponent(projectID)+'/approval/'+encodeURIComponent(a.ID)+'">근거 보고 결정 →</a> · CLI: <code>goalforge approval approve '+esc(a.ID)+'</code></div></div><div style="display:flex;gap:6px;flex-shrink:0"><button onclick="decide(\''+esc(projectID)+'\',\''+esc(a.ID)+'\',\'approve\',\''+esc(a.ActionType)+' 승인\')">승인</button><button onclick="decide(\''+esc(projectID)+'\',\''+esc(a.ID)+'\',\'reject\',\''+esc(a.ActionType)+' 거절\')">거절</button></div></div></div>'}
 function gauge(label,used,limit,percent,detail){var p=pct(percent);return'<div class="metric"><small>'+esc(label)+'</small><b>'+esc(used)+(limit?' <small>/ '+esc(limit)+'</small>':'')+'</b><div class="bar"><span class="'+gaugeClass(p)+'" style="width:'+p+'%"></span></div><small>'+esc(detail||p.toFixed(1)+'%')+'</small></div>'}
 // stateLabel explains a machine state in the user's language; the code stays
@@ -180,10 +181,18 @@ items.forEach(function(i){html+='<div class="attn'+(i.level==='warn'?' warn':'')
 return html+'</section>'}
 // activityPanel summarizes what ran while nobody was watching, so returning
 // after a night of automated work does not mean reading run logs.
-function activityPanel(r){if(!r)return'';
+// briefingWindow summarizes since the last visit rather than an arbitrary day,
+// so coming back after a night and after a week read differently.
+function briefingWindow(){var last=parseInt(sessionStorage.getItem('goalforgeLastVisit'),10);
+if(!last)return{window:'24h',label:'최근 24시간'};
+var hours=Math.ceil((Date.now()-last)/3600000);
+if(hours<1)return{window:'1h',label:'마지막 방문 이후 (1시간 이내)'};
+if(hours>168)return{window:'168h',label:'최근 7일 (마지막 방문은 그 이전)'};
+return{window:hours+'h',label:'마지막 방문 이후 '+hours+'시간'}}
+function activityPanel(r,label){if(!r)return'';
 var active=(r.Projects||[]).filter(function(p){return p.Runs>0||p.WorkCompleted>0});
 if(!active.length&&!(r.Unresolved||[]).length)return'';
-var html='<section class="panel"><h2>최근 24시간</h2><div class="sub" style="margin-bottom:8px">실행 '+r.Runs+'회 · 검증 완료 작업 '+r.WorkCompleted+'건 · '+fmtTokens(r.Tokens)+' 토큰 · '+fmtUSD(r.CostUSD)+'</div>';
+var html='<section class="panel"><h2>'+esc(label||'최근 24시간')+'</h2><div class="sub" style="margin-bottom:8px">실행 '+r.Runs+'회 · 검증 완료 작업 '+r.WorkCompleted+'건 · '+fmtTokens(r.Tokens)+' 토큰 · '+fmtUSD(r.CostUSD)+'</div>';
 if(active.length){html+='<table><tr><th>프로젝트</th><th>실행</th><th>검증 완료</th><th>진행률</th><th>비용</th></tr>';
 active.forEach(function(p){html+='<tr><td><a class="plain" href="#/project/'+encodeURIComponent(p.ProjectID)+'">'+esc(p.Name)+'</a></td><td>'+p.Runs+'</td><td>'+p.WorkCompleted+'</td><td>'+p.ProgressPercent.toFixed(1)+'%</td><td>'+fmtUSD(p.CostUSD)+'</td></tr>'});
 html+='</table>'}
@@ -193,7 +202,9 @@ html+='</table>'}
 return html+'</section>'}
 async function renderList(){document.querySelector('#crumb').textContent='목표 중심 AI 개발 오케스트레이터';var status=document.querySelector('#status'),view=document.querySelector('#view');status.textContent='불러오는 중…';view.innerHTML='';var data=await api('/api/v1/projects');var inbox=await api('/api/v1/approvals');status.className='sub';status.textContent=data.projects.length+'개 프로젝트';
 var html=attentionCards(data.projects,inbox.approvals);
-try{html+=activityPanel(await api('/api/v1/report?since=24h'))}catch(e){}
+var since=briefingWindow();
+try{html+=activityPanel(await api('/api/v1/report?since='+since.window),since.label)}catch(e){}
+sessionStorage.setItem('goalforgeLastVisit',String(Date.now()));
 if(!data.projects.length)html+='<section class="panel"><h2>아직 프로젝트가 없습니다</h2><div class="sub">저장소에서 <code>goalforge project init --name 이름 --provider claude</code> 로 시작하고, <code>goalforge doctor</code> 로 환경을 먼저 진단하세요.</div></section>';
 html+='<div class="actions" style="margin-bottom:14px"><a class="plain" href="#/new">+ 새 프로젝트 설정</a> <span class="sub"><span class="kbd">/</span> 백로그 검색 · <span class="kbd">Esc</span> 뒤로 · <span class="kbd">r</span> 새로고침</span></div>';html+='<div id="projects">';for(var i=0;i<data.projects.length;i++){var x=data.projects[i],p=x.project,m=x.metrics,g=x.goal||{};html+='<a class="card" href="#/project/'+encodeURIComponent(p.ID)+'"><div class="row"><div><strong>'+esc(p.Name)+'</strong><div class="sub">'+esc(p.Provider)+' · '+esc(p.Model||'default')+'</div></div>'+stateChip(p.State)+'</div><h3>'+esc(g.Title||'목표 미등록')+'</h3><div class="bar"><span class="'+progressClass(x.complete)+'" style="width:'+pct(x.progress_percent)+'%"></span></div><div class="row sub"><span>진행률'+(x.pending_approvals_count?' · 승인 대기 '+x.pending_approvals_count+'건':'')+'</span><span>'+x.progress_percent.toFixed(1)+'%</span></div><div class="metrics"><div class="metric"><b>'+m.RunsTotal+'</b><small>실행</small></div><div class="metric"><b>'+m.WorkDone+'</b><small>완료 작업</small></div><div class="metric"><b>'+fmtUSD(m.CostUSD)+'</b><small>비용</small></div></div></a>'}view.innerHTML=html+'</div>'}
 var detailCache=null;
@@ -214,7 +225,7 @@ if(d.budget&&d.budget.CostLimitUSD>0)html+=gauge('비용 예산',fmtUSD(d.budget
 html+='<div class="metric"><small>완료 작업</small><b>'+m.WorkDone+'</b><small>실행 '+m.RunsTotal+'회</small></div></div>';
 html+='<section class="panel"><h2>지금 상태</h2><table>';
 html+='<tr><th style="width:110px">현재 작업</th><td>'+(current?workLink(p.ID,current)+' <span class="badge">'+esc(workLabel(current.Status))+'</span>':'<span class="sub">진행 중인 작업이 없습니다</span>')+'</td></tr>';
-html+='<tr><th>다음 작업</th><td>'+(next?workLink(p.ID,next)+' <span class="badge">'+esc(workLabel(next.Status))+'</span>':'<span class="sub">대기 중인 작업이 없습니다 — <code>goalforge ideas</code> 또는 <code>goalforge replan</code></span>')+'</td></tr>';
+html+='<tr><th>다음 작업</th><td>'+(next?workLink(p.ID,next)+' <span class="badge">'+esc(workLabel(next.Status))+'</span><div class="why">'+esc(nextReason(d,next))+'</div>':'<span class="sub">대기 중인 작업이 없습니다 — <code>goalforge ideas</code> 또는 <code>goalforge replan</code></span>')+'</td></tr>';
 html+='<tr><th>마지막 실행</th><td>'+(lastRun?'<a class="plain mono" href="#/project/'+encodeURIComponent(p.ID)+'/run/'+encodeURIComponent(lastRun.ID)+'">'+esc(lastRun.ID)+'</a> '+stateChip(lastRun.State)+' <span class="sub">'+fmtTokens(lastRun.Tokens)+' 토큰 · '+fmtUSD(lastRun.CostUSD)+'</span>':'<span class="sub">기록된 실행이 없습니다</span>')+'</td></tr>';
 html+='<tr><th>예상 비용</th><td>'+estimateNote(d)+'</td></tr></table></section>';
 html+=criteriaPanel(d);
@@ -222,6 +233,15 @@ var liveRun=null;(d.runs||[]).forEach(function(r){if(!liveRun&&r.State==='RUNNIN
 if(liveRun)html+='<section class="panel" id="livefeed"><div class="row"><h2 style="margin:0">라이브 실행</h2><div id="livestate"></div></div><div id="livescroll" style="max-height:300px;overflow:auto;margin-top:10px"><table><tbody id="livebody"></tbody></table></div><div class="why"><a class="plain" href="#/project/'+encodeURIComponent(p.ID)+'/run/'+encodeURIComponent(liveRun)+'">실행 상세 열기 →</a></div></section>';
 if(d.pending_approvals&&d.pending_approvals.length){html+='<section class="panel"><h2>승인 대기 '+d.pending_approvals.length+'건</h2>';d.pending_approvals.forEach(function(a){html+=approvalCard(p.ID,a,'')});html+='</section>'}
 return {html:html,live:liveRun}}
+// nextReason explains why this item is next and what is holding the others,
+// so the automation's ordering can be understood and corrected.
+function nextReason(d,next){var items=(d.work_items||[]).filter(function(w){return w.Status==='APPROVED'||w.Status==='BACKLOG'});
+var higher=items.filter(function(w){return w.ID!==next.ID&&(w.Priority||0)>(next.Priority||0)});
+var reason='우선순위 '+(next.Priority||0)+'로 대기 중 작업 '+items.length+'건 가운데 실행 가능한 최상위입니다';
+if(next.Status==='APPROVED')reason='승인된 작업이라 백로그보다 먼저 선택되었습니다 (우선순위 '+(next.Priority||0)+')';
+if(higher.length){var blocked=higher.filter(function(w){return (w.Dependencies||[]).length>0});
+reason+='. 더 높은 우선순위 '+higher.length+'건은 '+(blocked.length?'선행 작업이 끝나지 않아 ':'실행 조건이 맞지 않아 ')+'미뤄졌습니다'}
+return reason}
 function workLink(projectID,w){return'<a class="plain" href="#/project/'+encodeURIComponent(projectID)+'/work/'+encodeURIComponent(w.ID)+'">'+esc(w.Title)+'</a> <small class="mono sub">'+esc(w.ID)+'</small>'}
 function estimateNote(d){var pending=(d.work_items||[]).filter(function(w){return w.Status==='APPROVED'||w.Status==='BACKLOG'});var known=pending.filter(function(w){return w.EstimatedTokens>0});var total=0;known.forEach(function(w){total+=w.EstimatedTokens});
 if(!pending.length)return'<span class="sub">남은 작업이 없습니다</span>';
@@ -457,6 +477,7 @@ var html='<section class="panel"><div class="row"><div><strong style="font-size:
 var verdict=verdictOf(d);if(verdict)html+='<div class="attn'+(verdict.ok?' warn':'')+'" style="margin-top:12px;'+(verdict.ok?'background:#14301f;border-color:#215a3d':'')+'"><strong>'+esc(verdict.title)+'</strong><div class="sub" style="margin-top:2px">'+esc(verdict.detail)+'</div></div>';
 html+='</section>';
 html+='<div class="metrics"><div class="metric"><small>입력 토큰</small><b>'+fmtTokens(d.usage.InputTokens)+'</b></div><div class="metric"><small>출력 토큰</small><b>'+fmtTokens(d.usage.OutputTokens)+'</b></div><div class="metric"><small>캐시 읽기</small><b>'+fmtTokens(d.usage.CachedInputTokens)+'</b></div><div class="metric"><small>비용</small><b>'+fmtUSD(d.usage.CostUSD)+'</b></div></div>';
+html+=forecastVsActual(d);
 if(d.commit)html+='<section class="panel"><h2>검증 커밋</h2><div class="sub mono">'+shortSHA(d.commit.CommitSHA)+' · '+esc(d.commit.Branch)+' · '+d.commit.FilesCommitted+'개 파일</div><div class="why">머지·푸시는 이 커밋을 대상으로 승인해야 합니다: <code>goalforge approval request --action merge-branch --work-item '+esc(d.commit.WorkItemID)+' --reason "..."</code></div></section>';
 html+=verificationPanel(d.verifications,'검증 결과');
 if(d.file_changes&&d.file_changes.length){html+='<section class="panel"><h2>파일 변경 · '+d.file_changes.length+'건</h2><table>';d.file_changes.forEach(function(f){html+='<tr><td class="mono">'+esc(f.Path)+'</td><td><span class="pill">'+esc(f.ChangeType)+'</span></td></tr>'});html+='</table></section>'}
@@ -469,6 +490,14 @@ view.innerHTML=html}
 // gate decided it, so a reviewer does not have to read the table to find out.
 function repairLabel(decision){var m={RETRY_CODE_FIX:'자동 수정 재시도 예정',BLOCK_ENVIRONMENT:'환경 문제 — 자동 복구 불가',BLOCK_FOR_USER:'사람 판단 필요',BLOCK_ATTEMPT_LIMIT:'자동 수정 횟수 한도 도달',BLOCK_COST_LIMIT:'복구 비용 한도 도달',NOTHING_TO_REPAIR:'복구 대상 없음'};return m[decision]||decision}
 function failureLabel(kind){var m={test_failure:'테스트 실패',build_failure:'빌드 실패',threshold_not_met:'기준 미달',environment:'실행 환경 문제',dependency:'의존성 문제',auth:'인증 문제',timeout:'제한 시간 초과',misconfigured:'게이트 설정 오류',unknown:'분류되지 않음'};return m[kind]||kind}
+// forecastVsActual reports the prediction next to the outcome. A forecast
+// nobody checks never gets better.
+function forecastVsActual(d){if(!d.estimated_tokens)return'';
+var actual=(d.usage.InputTokens||0)+(d.usage.OutputTokens||0)+(d.usage.CachedInputTokens||0)+(d.usage.ReasoningTokens||0);
+if(!actual)return'';
+var delta=(actual-d.estimated_tokens)/d.estimated_tokens*100;
+var label=delta>0?'예상보다 '+delta.toFixed(0)+'% 더 사용':'예상보다 '+Math.abs(delta).toFixed(0)+'% 적게 사용';
+return'<section class="panel"><h2>예상과 실제</h2><div class="sub">예상 '+fmtTokens(d.estimated_tokens)+' 토큰 ('+(d.estimate_source==='manual'?'직접 입력':'실행 기록 예측')+') · 실제 '+fmtTokens(actual)+' 토큰 — '+label+'</div></section>'}
 // verdictOf states the run outcome in one sentence, naming the gate that
 // decided it and what the classifier concluded, so the next action is visible
 // without reading the gate table.
