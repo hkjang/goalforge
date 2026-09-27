@@ -55,6 +55,27 @@ func main() {
 	}
 }
 
+// usageText lists every command the dispatch actually accepts. It is grouped
+// rather than run together because a single line of forty commands is a list
+// nobody reads, and commands nobody can find are commands that do not exist.
+const usageText = `usage: goalforge [--db PATH] COMMAND
+
+setup      project init | project budget | project runtime | project concurrency | project profile
+           project provider set | doctor [--probe-auth]
+goal       goal set | goal show | milestone add | decision add | decision list | decision supersede
+work       work add | work list | work status ID --set STATUS
+verify     verify template NAME | verify gate add | verify record | verify integration
+run        plan [--json] | continue [--enqueue] | develop | run --until-quota | ideas | audit | replan
+           worker [--once] | pause | resume | cancel
+review     status | usage | sessions | logs | report [--since 24h] | models | evidence export --out DIR
+           reproduce --run ID --out DIR | pr --work-item ID
+ship       approval request | approval list | approval approve ID | approval reject ID
+           merge --work-item ID | publish --work-item ID | rollback | worktree gc
+handoff    takeover --work-item ID | takeover return --work-item ID
+evaluate   eval add | eval list | eval record | eval compare
+serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
+           checkpoint --next-action TEXT`
+
 func run(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return usage()
@@ -215,6 +236,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "request" {
 			return approvalRequest(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "list" {
+			return approvalList(ctx, s)
+		}
 		if len(args) > 1 && args[1] == "approve" {
 			return approvalApprove(ctx, s, args[2:])
 		}
@@ -253,7 +277,7 @@ func postgresMigrate(ctx context.Context, args []string) error {
 }
 
 func usage() error {
-	return errors.New("usage: goalforge [--db PATH] project init|project budget|project runtime|project provider set|goal set|goal show|milestone add|work add|work list|work status ID|verify gate add|ideas|audit|replan|continue|develop|run --until-quota|status|usage|sessions|checkpoint|logs|pause|resume|rollback|worktree gc|publish|merge|doctor|cancel|approval request|approval approve ID|approval reject ID|worker [--once]|serve|mcp [--addr HOST:PORT]")
+	return errors.New(usageText)
 }
 
 func serveAPI(ctx context.Context, s *store.Store, args []string) error {
@@ -1736,6 +1760,34 @@ func shortSHA(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// approvalList shows what is waiting on a decision, with the change each one
+// covers. Without it the only way to find an approval ID was the dashboard or
+// the status summary, which is a poor place to work from when approving
+// several at once.
+func approvalList(ctx context.Context, s *store.Store) error {
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	approvals, err := s.ListPendingApprovals(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(approvals) == 0 {
+		fmt.Println("no approvals waiting")
+		return nil
+	}
+	for _, approval := range approvals {
+		fmt.Printf("%s  %-22s %s\n", approval.ID, approval.ActionType, approval.Reason)
+		if approval.Scope.Scoped() {
+			fmt.Printf("    작업 %s · 커밋 %s · 적용 대상 %s · 파일 %d개\n",
+				approval.Scope.WorkItemID, shortSHA(approval.Scope.CommitSHA), approval.Scope.TargetRef, approval.Scope.FilesChanged)
+		}
+		fmt.Printf("    요청 %s\n", approval.RequestedAt.Local().Format("2006-01-02 15:04"))
+	}
+	return nil
 }
 
 func approvalApprove(ctx context.Context, s *store.Store, args []string) error {

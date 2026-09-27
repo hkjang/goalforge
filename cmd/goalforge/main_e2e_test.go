@@ -166,3 +166,173 @@ func TestCLIFullLifecycle(t *testing.T) {
 		t.Fatalf("work list output: %s", workListOut)
 	}
 }
+
+// TestCLIEvidenceAndPreviewLifecycle drives the commands added after the
+// original lifecycle test through the real dispatch: readiness diagnosis, the
+// dry-run preview, design decisions, human takeover and return, integration
+// verification, the evidence bundle, failure reproduction, and the evaluation
+// registry. The original test froze at the feature set of its day, so every
+// command added since had only unit coverage — which is exactly where the
+// wiring bugs in this codebase have hidden (flags lost to positional parsing,
+// helpers deleted by an edit elsewhere).
+func TestCLIEvidenceAndPreviewLifecycle(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	gitIn(t, repo, "init", "-b", "main")
+	gitIn(t, repo, "config", "user.email", "e2e@example.invalid")
+	gitIn(t, repo, "config", "user.name", "E2E")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "add", "README.md")
+	gitIn(t, repo, "commit", "-m", "base")
+
+	// A real provider CLI does no work for --version or --help; the fake has
+	// to behave the same, or `doctor` probing it would write into the
+	// repository it is diagnosing.
+	fake := testscript.Write(t, t.TempDir(), "claude",
+		strings.Join([]string{
+			`case "$*" in *--version*|*--help*) echo "fake 1.0 --output-format --resume --settings --permission-mode --json-schema --no-session-persistence"; exit 0;; esac`,
+			"cat >/dev/null",
+			"printf 'hello goalforge\\n' > hello.txt",
+			`printf '{"type":"system","subtype":"init","session_id":"sess-evidence"}\n'`,
+			`printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-evidence","total_cost_usd":0.002,"usage":{"input_tokens":200,"output_tokens":80}}\n'`,
+		}, "\n"),
+		strings.Join([]string{
+			`echo %* | findstr /C:"--version" >nul && (echo fake 1.0 && exit /b 0)`,
+			`echo %* | findstr /C:"--help" >nul && (echo --output-format --resume --settings --permission-mode --json-schema --no-session-persistence && exit /b 0)`,
+			"echo hello goalforge> hello.txt",
+			`echo {"type":"system","subtype":"init","session_id":"sess-evidence"}`,
+			`echo {"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-evidence","total_cost_usd":0.002,"usage":{"input_tokens":200,"output_tokens":80}}`,
+			"more > nul",
+		}, "\n"))
+	gate := testscript.Write(t, repo, "verify-gate", "grep goalforge hello.txt", "findstr goalforge hello.txt")
+	gitIn(t, repo, "add", filepath.Base(gate))
+	gitIn(t, repo, "commit", "-m", "gate")
+
+	t.Setenv("GOALFORGE_CLAUDE_BIN", fake)
+	t.Setenv("GOALFORGE_DB", filepath.Join(t.TempDir(), "state.db"))
+	t.Chdir(repo)
+
+	runCLI(t, ctx, "project", "init", "--name", "evidence", "--provider", "claude", "--model", "haiku", "--worktrees", "--auto-commit")
+
+	// Readiness must refuse a project that could never complete, before any
+	// model call is spent on it. The fake provider cannot satisfy the adapter
+	// flag check, so the readiness findings are asserted directly rather than
+	// through the overall verdict.
+	runCLI(t, ctx, "goal", "set", "--title", "greeting", "--objective", "write hello.txt",
+		"--criterion", "build_passed=true", "--criterion", "latency_p95=200")
+	noGates, err := runCLIWithError(t, ctx, "doctor")
+	if err == nil || !strings.Contains(noGates, "검증 게이트가 없어") {
+		t.Fatalf("doctor must block a project with no gates:\n%s", noGates)
+	}
+	runCLI(t, ctx, "verify", "gate", "add", "--type", "build_passed",
+		"--command-json", `["`+strings.ReplaceAll(gate, `\`, `\\`)+`"]`, "--timeout-seconds", "30")
+	unmeasurable, err := runCLIWithError(t, ctx, "doctor")
+	if err == nil || !strings.Contains(unmeasurable, "criteria coverage") || !strings.Contains(unmeasurable, "latency_p95") {
+		t.Fatalf("doctor must name the criterion nothing measures:\n%s", unmeasurable)
+	}
+	// Dropping the unmeasurable criterion is a goal change, and the readiness
+	// finding has to clear once every criterion has a gate.
+	runCLI(t, ctx, "goal", "set", "--title", "greeting", "--objective", "write hello.txt",
+		"--criterion", "build_passed=true", "--reason", "측정할 수 없는 조건 제거")
+	covered, _ := runCLIWithError(t, ctx, "doctor")
+	if !strings.Contains(covered, "OK   criteria coverage") {
+		t.Fatalf("criteria coverage should clear:\n%s", covered)
+	}
+
+	// The preview refuses before there is work, and explains itself once
+	// there is.
+	if output, err := runCLIWithError(t, ctx, "plan"); err == nil {
+		t.Fatalf("plan must refuse with no work item:\n%s", output)
+	}
+	workOut := runCLI(t, ctx, "work", "add", "--title", "create hello.txt", "--priority", "10", "--scope", "hello.txt")
+	workID := regexp.MustCompile(`WORK-\d+`).FindString(workOut)
+	planOut := runCLI(t, ctx, "plan")
+	for _, expected := range []string{workID, "다음 작업", "forecast", "model"} {
+		if !strings.Contains(planOut, expected) {
+			t.Fatalf("plan output missing %q:\n%s", expected, planOut)
+		}
+	}
+	// Previewing must not consume the work it previews.
+	if !strings.Contains(runCLI(t, ctx, "work", "list"), "BACKLOG") {
+		t.Fatalf("the preview claimed the work item:\n%s", runCLI(t, ctx, "work", "list"))
+	}
+
+	runCLI(t, ctx, "decision", "add", "--title", "단일 파일 출력",
+		"--decision", "결과는 hello.txt 하나로 쓴다", "--alternatives", "여러 파일: 검증이 복잡해짐")
+	if !strings.Contains(runCLI(t, ctx, "decision", "list"), "단일 파일 출력") {
+		t.Fatal("recorded decision is not listed")
+	}
+
+	continueOut := runCLI(t, ctx, "continue")
+	if !strings.Contains(continueOut, "passed=true") {
+		t.Fatalf("continue output:\n%s", continueOut)
+	}
+	runID := regexp.MustCompile(`RUN-\d+`).FindString(continueOut)
+
+	// Status reports the criterion with the evidence that decided it.
+	statusOut := runCLI(t, ctx, "status")
+	if !strings.Contains(statusOut, "[v]") || !strings.Contains(statusOut, "build_passed") {
+		t.Fatalf("status must show the criterion verdict:\n%s", statusOut)
+	}
+
+	// A reproduction package is assembled from a real run.
+	reproDir := filepath.Join(t.TempDir(), "repro")
+	runCLI(t, ctx, "reproduce", "--run", runID, "--out", reproDir)
+	for _, name := range []string{"reproduction.json", "reproduce.sh", "gate-output.log"} {
+		if _, err := os.Stat(filepath.Join(reproDir, name)); err != nil {
+			t.Fatalf("reproduction package missing %s: %v", name, err)
+		}
+	}
+
+	// Merging leaves the default branch unverified until integration runs,
+	// and that must be visible in status rather than only in the database.
+	runCLI(t, ctx, "approval", "request", "--action", "merge-branch", "--work-item", workID, "--reason", "e2e")
+	approvalID := regexp.MustCompile(`APR-\d+`).FindString(runCLI(t, ctx, "approval", "list"))
+	if approvalID == "" {
+		t.Fatal("no pending approval to approve")
+	}
+	runCLI(t, ctx, "approval", "approve", approvalID)
+	mergeOut := runCLI(t, ctx, "merge", "--work-item", workID)
+	if !strings.Contains(mergeOut, "integration verification required") {
+		t.Fatalf("merge must ask for integration verification:\n%s", mergeOut)
+	}
+	if !strings.Contains(runCLI(t, ctx, "status"), "통합 검증 필요") {
+		t.Fatalf("status must surface the integration gap:\n%s", runCLI(t, ctx, "status"))
+	}
+	integrationOut := runCLI(t, ctx, "verify", "integration")
+	if !strings.Contains(integrationOut, "integration verified") {
+		t.Fatalf("integration verification:\n%s", integrationOut)
+	}
+
+	// The evidence bundle is written and carries the decision and the gate.
+	evidenceDir := filepath.Join(t.TempDir(), "evidence")
+	runCLI(t, ctx, "evidence", "export", "--out", evidenceDir)
+	page, err := os.ReadFile(filepath.Join(evidenceDir, "evidence.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"greeting", "build_passed", "단일 파일 출력", "MERGE_BRANCH"} {
+		if !strings.Contains(string(page), expected) {
+			t.Fatalf("evidence bundle missing %q", expected)
+		}
+	}
+	if _, err = os.Stat(filepath.Join(evidenceDir, "evidence.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Evaluation registry and reporting round-trip through the CLI.
+	evalOut := runCLI(t, ctx, "eval", "add", "--name", "hello", "--kind", "feature", "--objective", "write hello.txt")
+	evalID := regexp.MustCompile(`EVAL-\d+`).FindString(evalOut)
+	runCLI(t, ctx, "eval", "record", "--case", evalID, "--label", "haiku", "--run", runID)
+	if !strings.Contains(runCLI(t, ctx, "eval", "compare"), "haiku") {
+		t.Fatal("evaluation comparison lost the label")
+	}
+	if !strings.Contains(runCLI(t, ctx, "report", "--since", "1h"), "runs=") {
+		t.Fatal("report produced no run summary")
+	}
+	if !strings.Contains(runCLI(t, ctx, "models"), "selected:") {
+		t.Fatal("model advice produced no selection")
+	}
+}
