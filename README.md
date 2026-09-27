@@ -91,6 +91,7 @@ goalforge rollback --work-item WORK-1 --reason "..."
 
 ```sh
 goalforge status | usage | sessions | logs [--limit 50]
+goalforge report [--since 24h] [--json]    # what ran, what stopped and why, what awaits you
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
@@ -174,6 +175,21 @@ is requested. An approval therefore covers one reviewed change: it cannot be
 spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
+
+A failed verification is classified before it is retried: test and build
+failures and unmet thresholds are repairable by a code fix, while a missing
+tool, an unreachable host, an expired credential, or a dependency that will
+not resolve are not — re-running a model against those only spends budget.
+Automatic repair is capped by attempts and by the cost already spent repairing
+the same work item (2 attempts and $5 by default), and the worker stops
+rescheduling as soon as the failure is one it cannot fix. `goalforge report`
+summarizes a window of automated work: what finished, what stopped and why,
+what is waiting on a decision, and what it cost.
+
+The dashboard's live view streams run events over Server-Sent Events with
+incremental fetches, and shows its own connection state: a feed that went quiet
+because the connection dropped must not look like a run that went quiet because
+nothing is happening.
 
 Completion is judged over in-scope work only. `DISCARDED` items leave the
 goal's baseline rather than counting as outstanding, so dropping an idea

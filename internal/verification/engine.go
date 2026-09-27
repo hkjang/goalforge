@@ -34,9 +34,12 @@ type Gate struct {
 }
 type Result struct {
 	Type, Status, Output string
-	ExitCode             int
-	Duration             time.Duration
-	Required             bool
+	// FailureKind, RepairMode, and FailureSummary explain a failure instead of
+	// leaving the caller to read the output and guess.
+	FailureKind, RepairMode, FailureSummary string
+	ExitCode                                int
+	Duration                                time.Duration
+	Required                                bool
 }
 type Report struct {
 	Results               []Result
@@ -72,8 +75,16 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 	for _, gate := range gates {
 		result, err := e.runGate(ctx, project.RepositoryPath, gate)
 		actual := measure(gate, &result)
+		record := store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual,
+			Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode,
+			Duration: result.Duration, Required: gate.Required}
+		if result.Status != "PASSED" {
+			failure := policy.ClassifyGateFailure(result.Status, result.Output)
+			record.FailureKind, record.RepairMode = string(failure.Kind), string(failure.Mode)
+			result.FailureKind, result.RepairMode, result.FailureSummary = string(failure.Kind), string(failure.Mode), failure.Summary
+		}
 		report.Results = append(report.Results, result)
-		recordErr := e.store.RecordRunVerification(ctx, store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual, Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration, Required: gate.Required})
+		recordErr := e.store.RecordRunVerification(ctx, record)
 		if recordErr != nil {
 			return report, recordErr
 		}

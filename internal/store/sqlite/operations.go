@@ -366,3 +366,18 @@ func (s *Store) RunByID(ctx context.Context, projectID, runID string) (RunView, 
 	run.EndedAt, _ = time.Parse(time.RFC3339Nano, ended)
 	return run, nil
 }
+
+// EventLogsSince returns a run's events with an ID greater than afterID, so a
+// live view can fetch what it has not seen instead of re-reading the whole run
+// on every poll.
+func (s *Store) EventLogsSince(ctx context.Context, projectID, runID string, afterID int64, limit int) ([]EventLog, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.run_id,e.provider,e.event_type,CAST(e.raw_payload AS TEXT),e.created_at FROM event_logs e JOIN runs r ON r.id=e.run_id WHERE r.project_id=? AND e.run_id=? AND e.id>? ORDER BY e.id LIMIT ?`, projectID, runID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEventLogs(rows)
+}

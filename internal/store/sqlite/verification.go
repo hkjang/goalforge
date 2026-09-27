@@ -13,9 +13,12 @@ import (
 
 type VerificationRecord struct {
 	RunID, CheckType, Status, ActualValue, Command, Output string
-	ExitCode                                               int
-	Duration                                               time.Duration
-	Required                                               bool
+	// FailureKind and RepairMode record why a gate failed and what would
+	// address it, so a failure can be routed instead of merely retried.
+	FailureKind, RepairMode string
+	ExitCode                int
+	Duration                time.Duration
+	Required                bool
 }
 
 func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord) error {
@@ -31,7 +34,7 @@ func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord)
 	if r.Required {
 		required = 1
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), r.FailureKind, r.RepairMode, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 

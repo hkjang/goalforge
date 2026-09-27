@@ -56,7 +56,7 @@ a.plain{color:var(--accent);text-decoration:none}
 <div id="status" class="sub">불러오는 중…</div><div id="view"></div></main>
 <script>
 var esc=function(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})};
-var timer=null,liveTimer=null;
+var timer=null;
 function stateClass(s){if(s==='COMPLETED'||s==='READY'||s==='RUNNING')return'st-ok';if(s==='BLOCKED'||s==='FAILED'||s==='CANCELLED'||s==='REPAIR_REQUIRED')return'st-bad';return'st-warn'}
 // gaugeClass colours resource burn: nearing a limit is a warning.
 function gaugeClass(p){return p>=97?'g-bad':p>=80?'g-warn':'g-ok'}
@@ -72,8 +72,47 @@ async function decide(projectID,approvalID,action,label){if(!confirm(label+' —
 async function decideWork(projectID,workID,status,label){if(!confirm(label+' — 계속할까요?'))return;try{await api('/api/v1/projects/'+encodeURIComponent(projectID)+'/work/'+encodeURIComponent(workID)+'/status/'+status,{method:'POST'});route()}catch(e){alert(e.message)}}
 function fmtTime(t){var d=new Date(t);if(isNaN(d))return'';return d.toLocaleString('ko-KR',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})}
 function usageChart(series){if(!series||!series.length)return'';var w=1040,h=150,pad=26,bw=Math.min(64,Math.floor((w-pad)/series.length)-10);var max=1;series.forEach(function(pt){if(pt.Tokens>max)max=pt.Tokens});var svg='<svg viewBox="0 0 '+w+' '+(h+38)+'" style="width:100%;height:auto" role="img" aria-label="일별 토큰 사용량">';series.forEach(function(pt,i){var x=pad+i*((w-pad)/series.length),bh=Math.max(2,Math.round(pt.Tokens/max*h));svg+='<rect x="'+x+'" y="'+(h-bh)+'" width="'+bw+'" height="'+bh+'" rx="4" fill="#38bdf8" opacity="0.85"></rect>';svg+='<text x="'+(x+bw/2)+'" y="'+(h-bh-6)+'" text-anchor="middle" font-size="11" fill="#9daaca">'+fmtTokens(pt.Tokens)+'</text>';svg+='<text x="'+(x+bw/2)+'" y="'+(h+14)+'" text-anchor="middle" font-size="10" fill="#9daaca">'+esc(pt.Date.slice(5))+'</text>';svg+='<text x="'+(x+bw/2)+'" y="'+(h+30)+'" text-anchor="middle" font-size="10" fill="#6d7ba0">$'+pt.CostUSD.toFixed(3)+' · '+pt.Runs+'회</text>'});return svg+'</svg>'}
-async function pollLive(projectID,runID){var panel=document.querySelector('#livefeed');if(!panel)return;try{var d=await api('/api/v1/projects/'+encodeURIComponent(projectID)+'/runs/'+encodeURIComponent(runID));var rows='';(d.events||[]).slice(-12).forEach(function(e){rows+='<tr><td style="width:110px"><span class="pill">'+esc(e.Type)+'</span></td><td class="sub mono" style="font-size:11px;word-break:break-all">'+esc(e.Raw.length>220?e.Raw.slice(0,220)+'…':e.Raw)+'</td></tr>'});panel.innerHTML='<h2>라이브 실행 · <span class="mono">'+esc(runID)+'</span> <span class="pill" style="color:var(--ok)">'+(d.run.State==='RUNNING'?'실행 중':esc(d.run.State))+'</span></h2><table>'+rows+'</table>';if(d.run.State!=='RUNNING'){clearInterval(liveTimer);liveTimer=null;route()}}catch(e){}}
-function approvalScope(a){var sc=a.Scope||{};if(!sc.CommitSHA)return'';var bits=['작업 '+esc(sc.WorkItemID),'커밋 <code>'+esc(String(sc.CommitSHA).slice(0,12))+'</code>'];if(sc.SourceBranch)bits.push('브랜치 '+esc(sc.SourceBranch));if(sc.TargetRef)bits.push('적용 대상 '+esc(sc.TargetRef));if(sc.FilesChanged)bits.push('파일 '+sc.FilesChanged+'개');return'<div class="sub" style="margin-top:4px">'+bits.join(' · ')+'</div>'}
+var liveStream=null;
+// The live feed streams events over SSE instead of re-fetching the whole run
+// every three seconds, and it shows its own connection state: a feed that has
+// gone quiet because the connection dropped must not look like a run that has
+// gone quiet because nothing is happening.
+function liveStatus(state,detail){var box=document.querySelector('#livestate');if(!box)return;
+var cls=state==='연결됨'?'st-ok':(state==='재연결 중'?'st-warn':'st-bad');
+box.innerHTML='<span class="state '+cls+'">'+esc(state)+'</span> <span class="sub">'+esc(detail||'')+'</span>'}
+function liveAppend(events){var body=document.querySelector('#livebody');if(!body)return;
+events.forEach(function(e){var row=document.createElement('tr');
+row.innerHTML='<td style="width:110px"><span class="pill">'+esc(e.Type)+'</span></td><td class="sub mono" style="font-size:11px;word-break:break-all">'+esc(e.Raw.length>300?e.Raw.slice(0,300)+'…':e.Raw)+'</td>';
+body.appendChild(row)});
+while(body.children.length>200)body.removeChild(body.firstChild);
+var wrap=document.querySelector('#livescroll');if(wrap)wrap.scrollTop=wrap.scrollHeight}
+function startLive(projectID,runID){stopLive();var stream={closed:false,after:0,attempt:0};liveStream=stream;
+function fail(message){if(stream.closed)return;stream.attempt++;
+var delay=Math.min(30000,1000*Math.pow(2,stream.attempt-1));
+liveStatus('재연결 중',message+' · '+Math.round(delay/1000)+'초 후 재시도 ('+stream.attempt+'회)');
+stream.timer=setTimeout(function(){connect()},delay)}
+async function connect(){if(stream.closed)return;liveStatus('연결 중','실행 '+runID);
+try{var token=sessionStorage.getItem('goalforgeToken')||'';var headers={'X-Requested-With':'GoalForge','Accept':'text/event-stream'};if(token)headers.Authorization='Bearer '+token;
+var response=await fetch('/api/v1/projects/'+encodeURIComponent(projectID)+'/runs/'+encodeURIComponent(runID)+'/stream?after='+stream.after,{headers:headers});
+if(!response.ok||!response.body){fail('연결 실패 (HTTP '+response.status+')');return}
+stream.attempt=0;liveStatus('연결됨','실행 '+runID);
+var reader=response.body.getReader(),decoder=new TextDecoder(),buffer='';
+while(true){var chunk=await reader.read();if(chunk.done)break;
+buffer+=decoder.decode(chunk.value,{stream:true});
+var frames=buffer.split('\n\n');buffer=frames.pop();
+frames.forEach(function(frame){handleFrame(frame)})}
+if(!stream.closed&&!stream.done)fail('연결이 끊어졌습니다')}
+catch(e){fail(esc(e.message||'네트워크 오류'))}}
+function handleFrame(frame){var name='message',data='';
+frame.split('\n').forEach(function(line){if(line.indexOf('event: ')===0)name=line.slice(7);else if(line.indexOf('data: ')===0)data+=line.slice(6)});
+if(!data)return;var payload;try{payload=JSON.parse(data)}catch(e){return}
+if(name==='events'){stream.after=payload.last_id||stream.after;liveAppend(payload.events||[]);
+liveStatus('연결됨','마지막 수신 '+new Date().toLocaleTimeString('ko-KR')+' · 상태 '+stateLabel(payload.state)+' · '+fmtTokens(payload.tokens||0)+' 토큰')}
+else if(name==='state'){liveStatus('연결됨','상태 '+stateLabel(payload.state)+' · '+new Date().toLocaleTimeString('ko-KR'))}
+else if(name==='done'){stream.done=true;liveStatus('종료됨','실행이 '+stateLabel(payload.state)+' 상태로 끝났습니다');setTimeout(route,600)}
+else if(name==='error'){fail(payload.error||'스트림 오류')}}
+connect()}
+function stopLive(){if(!liveStream)return;liveStream.closed=true;if(liveStream.timer)clearTimeout(liveStream.timer);liveStream=null}
 function approvalCard(projectID,a,projectName){return'<div class="approve"><div class="row"><div><strong>'+esc(a.ActionType)+'</strong>'+(projectName?' <span class="pill">'+esc(projectName)+'</span>':'')+' — '+esc(a.Reason)+approvalScope(a)+'<div class="sub" style="margin-top:4px"><a class="plain" href="#/project/'+encodeURIComponent(projectID)+'/approval/'+encodeURIComponent(a.ID)+'">근거 보고 결정 →</a> · CLI: <code>goalforge approval approve '+esc(a.ID)+'</code></div></div><div style="display:flex;gap:6px;flex-shrink:0"><button onclick="decide(\''+esc(projectID)+'\',\''+esc(a.ID)+'\',\'approve\',\''+esc(a.ActionType)+' 승인\')">승인</button><button onclick="decide(\''+esc(projectID)+'\',\''+esc(a.ID)+'\',\'reject\',\''+esc(a.ActionType)+' 거절\')">거절</button></div></div></div>'}
 function gauge(label,used,limit,percent,detail){var p=pct(percent);return'<div class="metric"><small>'+esc(label)+'</small><b>'+esc(used)+(limit?' <small>/ '+esc(limit)+'</small>':'')+'</b><div class="bar"><span class="'+gaugeClass(p)+'" style="width:'+p+'%"></span></div><small>'+esc(detail||p.toFixed(1)+'%')+'</small></div>'}
 // stateLabel explains a machine state in the user's language; the code stays
@@ -116,8 +155,22 @@ var b=x.budget;if(b){var ratios=[];if(b.TokenLimit>0)ratios.push(['토큰',b.Tok
 if(!items.length)return'';var html='<section class="panel"><h2>조치가 필요한 항목 · '+items.length+'건</h2>';
 items.forEach(function(i){html+='<div class="attn'+(i.level==='warn'?' warn':'')+'"><strong>'+i.title+'</strong><div class="sub" style="margin-top:4px">원인: '+i.cause+'</div><div class="sub">영향: '+i.effect+'</div><div style="margin-top:6px">'+i.action+'</div></div>'});
 return html+'</section>'}
+// activityPanel summarizes what ran while nobody was watching, so returning
+// after a night of automated work does not mean reading run logs.
+function activityPanel(r){if(!r)return'';
+var active=(r.Projects||[]).filter(function(p){return p.Runs>0||p.WorkCompleted>0});
+if(!active.length&&!(r.Unresolved||[]).length)return'';
+var html='<section class="panel"><h2>최근 24시간</h2><div class="sub" style="margin-bottom:8px">실행 '+r.Runs+'회 · 검증 완료 작업 '+r.WorkCompleted+'건 · '+fmtTokens(r.Tokens)+' 토큰 · '+fmtUSD(r.CostUSD)+'</div>';
+if(active.length){html+='<table><tr><th>프로젝트</th><th>실행</th><th>검증 완료</th><th>진행률</th><th>비용</th></tr>';
+active.forEach(function(p){html+='<tr><td><a class="plain" href="#/project/'+encodeURIComponent(p.ProjectID)+'">'+esc(p.Name)+'</a></td><td>'+p.Runs+'</td><td>'+p.WorkCompleted+'</td><td>'+p.ProgressPercent.toFixed(1)+'%</td><td>'+fmtUSD(p.CostUSD)+'</td></tr>'});
+html+='</table>'}
+if((r.Unresolved||[]).length){html+='<h2 style="margin-top:14px">미해결 '+r.Unresolved.length+'건</h2><table>';
+r.Unresolved.forEach(function(u){html+='<tr><td>'+stateChip(u.State)+'</td><td><a class="plain mono" href="#/project/'+encodeURIComponent(u.ProjectID)+'/run/'+encodeURIComponent(u.RunID)+'">'+esc(u.RunID)+'</a></td><td>'+(u.FailureKind?'<span class="badge unmet">'+esc(failureLabel(u.FailureKind))+'</span>':'')+'</td><td class="sub">'+esc(u.Reason||'')+'</td></tr>'});
+html+='</table>'}
+return html+'</section>'}
 async function renderList(){document.querySelector('#crumb').textContent='목표 중심 AI 개발 오케스트레이터';var status=document.querySelector('#status'),view=document.querySelector('#view');status.textContent='불러오는 중…';view.innerHTML='';var data=await api('/api/v1/projects');var inbox=await api('/api/v1/approvals');status.className='sub';status.textContent=data.projects.length+'개 프로젝트';
 var html=attentionCards(data.projects,inbox.approvals);
+try{html+=activityPanel(await api('/api/v1/report?since=24h'))}catch(e){}
 if(!data.projects.length)html+='<section class="panel"><h2>아직 프로젝트가 없습니다</h2><div class="sub">저장소에서 <code>goalforge project init --name 이름 --provider claude</code> 로 시작하고, <code>goalforge doctor</code> 로 환경을 먼저 진단하세요.</div></section>';
 html+='<div class="actions" style="margin-bottom:14px"><a class="plain" href="#/new">+ 새 프로젝트 설정</a> <span class="sub"><span class="kbd">/</span> 백로그 검색 · <span class="kbd">Esc</span> 뒤로 · <span class="kbd">r</span> 새로고침</span></div>';html+='<div id="projects">';for(var i=0;i<data.projects.length;i++){var x=data.projects[i],p=x.project,m=x.metrics,g=x.goal||{};html+='<a class="card" href="#/project/'+encodeURIComponent(p.ID)+'"><div class="row"><div><strong>'+esc(p.Name)+'</strong><div class="sub">'+esc(p.Provider)+' · '+esc(p.Model||'default')+'</div></div>'+stateChip(p.State)+'</div><h3>'+esc(g.Title||'목표 미등록')+'</h3><div class="bar"><span class="'+progressClass(x.complete)+'" style="width:'+pct(x.progress_percent)+'%"></span></div><div class="row sub"><span>진행률'+(x.pending_approvals_count?' · 승인 대기 '+x.pending_approvals_count+'건':'')+'</span><span>'+x.progress_percent.toFixed(1)+'%</span></div><div class="metrics"><div class="metric"><b>'+m.RunsTotal+'</b><small>실행</small></div><div class="metric"><b>'+m.WorkDone+'</b><small>완료 작업</small></div><div class="metric"><b>'+fmtUSD(m.CostUSD)+'</b><small>비용</small></div></div></a>'}view.innerHTML=html+'</div>'}
 var detailCache=null;
@@ -143,7 +196,7 @@ html+='<tr><th>마지막 실행</th><td>'+(lastRun?'<a class="plain mono" href="
 html+='<tr><th>예상 비용</th><td>'+estimateNote(d)+'</td></tr></table></section>';
 html+=criteriaPanel(d);
 var liveRun=null;(d.runs||[]).forEach(function(r){if(!liveRun&&r.State==='RUNNING')liveRun=r.ID});
-if(liveRun)html+='<section class="panel" id="livefeed"><h2>라이브 실행</h2><div class="sub">이벤트 수신 중…</div></section>';
+if(liveRun)html+='<section class="panel" id="livefeed"><div class="row"><h2 style="margin:0">라이브 실행</h2><div id="livestate"></div></div><div id="livescroll" style="max-height:300px;overflow:auto;margin-top:10px"><table><tbody id="livebody"></tbody></table></div><div class="why"><a class="plain" href="#/project/'+encodeURIComponent(p.ID)+'/run/'+encodeURIComponent(liveRun)+'">실행 상세 열기 →</a></div></section>';
 if(d.pending_approvals&&d.pending_approvals.length){html+='<section class="panel"><h2>승인 대기 '+d.pending_approvals.length+'건</h2>';d.pending_approvals.forEach(function(a){html+=approvalCard(p.ID,a,'')});html+='</section>'}
 return {html:html,live:liveRun}}
 function workLink(projectID,w){return'<a class="plain" href="#/project/'+encodeURIComponent(projectID)+'/work/'+encodeURIComponent(w.ID)+'">'+esc(w.Title)+'</a> <small class="mono sub">'+esc(w.ID)+'</small>'}
@@ -213,7 +266,7 @@ else if(tab==='cost')body=costTab(d);
 else{var o=overviewTab(d);body=o.html;live=o.live}
 view.innerHTML=goalHead(d,tab)+body;countdown();
 if(tab==='plan')loadPlan();
-if(live){pollLive(p.ID,live);liveTimer=setInterval(function(){pollLive(p.ID,live)},3000)}}
+if(live)startLive(p.ID,live)}
 // renderWork is the work item as an executable specification rather than a
 // title: why it exists, what "done" means, what blocks it, and every attempt.
 // The setup flow follows the order the decisions actually happen in:
@@ -328,7 +381,7 @@ view.innerHTML=html}
 function verificationPanel(results,title){if(!results||!results.length)return'<section class="panel"><h2>'+title+'</h2><div class="sub">기록된 검증 결과가 없습니다.</div></section>';
 var html='<section class="panel"><h2>'+title+'</h2><table><tr><th>게이트</th><th>상태</th><th>측정값</th><th>종료 코드</th><th>소요</th></tr>';
 results.forEach(function(v,i){var ok=v.Status==='PASSED';
-html+='<tr><td>'+esc(v.CheckType)+(v.Required?'':' <span class="pill">선택</span>')+'</td><td><span class="state '+(ok?'st-ok':'st-bad')+'">'+esc(v.Status)+'</span></td><td class="mono">'+esc(v.ActualValue||'-')+'</td><td>'+v.ExitCode+'</td><td class="sub">'+((v.Duration||0)/1e9).toFixed(1)+'초</td></tr>';
+html+='<tr><td>'+esc(v.CheckType)+(v.Required?'':' <span class="pill">선택</span>')+'</td><td><span class="state '+(ok?'st-ok':'st-bad')+'">'+esc(v.Status)+'</span>'+(v.FailureKind?' <span class="badge unmet">'+esc(failureLabel(v.FailureKind))+'</span>':'')+'</td><td class="mono">'+esc(v.ActualValue||'-')+'</td><td>'+v.ExitCode+'</td><td class="sub">'+((v.Duration||0)/1e9).toFixed(1)+'초</td></tr>';
 html+='<tr><td colspan="5"><details'+(ok?'':' open')+'><summary class="sub" style="cursor:pointer">출력 전체 보기</summary><pre class="diff" style="max-height:260px;white-space:pre-wrap">'+esc(v.Output||'(출력 없음)')+'</pre></details></td></tr>'});
 return html+'</table></section>'}
 function diffPanel(d){if(d.diff_error)return'<section class="panel"><h2>코드 차이</h2><div class="sub">차이를 읽을 수 없습니다: '+esc(d.diff_error)+'</div></section>';
@@ -354,11 +407,19 @@ if(d.events&&d.events.length){html+='<section class="panel"><h2>이벤트 로그
 view.innerHTML=html}
 // verdictOf states the run's outcome in one sentence, including which required
 // gate decided it, so a reviewer does not have to read the table to find out.
+function repairLabel(decision){var m={RETRY_CODE_FIX:'자동 수정 재시도 예정',BLOCK_ENVIRONMENT:'환경 문제 — 자동 복구 불가',BLOCK_FOR_USER:'사람 판단 필요',BLOCK_ATTEMPT_LIMIT:'자동 수정 횟수 한도 도달',BLOCK_COST_LIMIT:'복구 비용 한도 도달',NOTHING_TO_REPAIR:'복구 대상 없음'};return m[decision]||decision}
+function failureLabel(kind){var m={test_failure:'테스트 실패',build_failure:'빌드 실패',threshold_not_met:'기준 미달',environment:'실행 환경 문제',dependency:'의존성 문제',auth:'인증 문제',timeout:'제한 시간 초과',misconfigured:'게이트 설정 오류',unknown:'분류되지 않음'};return m[kind]||kind}
+// verdictOf states the run outcome in one sentence, naming the gate that
+// decided it and what the classifier concluded, so the next action is visible
+// without reading the gate table.
 function verdictOf(d){var results=d.verifications||[];if(!results.length)return null;
 var failed=results.filter(function(v){return v.Required&&v.Status!=='PASSED'});
-if(failed.length){var first=failed[0];return{ok:false,title:'검증 실패 — 필수 게이트 '+first.CheckType,detail:'종료 코드 '+first.ExitCode+(first.ActualValue?' · 측정값 '+first.ActualValue:'')+'. 작업은 백로그로 돌아갔고, 테스트나 기준을 완화하지 않고 원인을 수정해야 합니다.'}}
+if(failed.length){var first=failed[0];var detail='종료 코드 '+first.ExitCode+(first.ActualValue?' · 측정값 '+first.ActualValue:'')+'.';
+if(d.repair)detail+=' 원인 분류: '+failureLabel(d.repair.FailureKind)+' · '+repairLabel(d.repair.Decision)+'. '+d.repair.Reason+' '+(d.repair.Summary||'');
+else detail+=' 작업은 백로그로 돌아갔고, 테스트나 기준을 완화하지 않고 원인을 수정해야 합니다.';
+return{ok:false,title:'검증 실패 — 필수 게이트 '+first.CheckType,detail:detail}}
 return{ok:true,title:'검증 통과 — 필수 게이트 '+results.filter(function(v){return v.Required}).length+'개',detail:d.commit?'변경은 작업 브랜치에 커밋되었습니다. 기본 브랜치 반영은 승인이 필요합니다.':'변경이 커밋되지 않았습니다 (auto-commit 미설정).'}}
-async function route(){var status=document.querySelector('#status');if(timer){clearInterval(timer);timer=null}if(liveTimer){clearInterval(liveTimer);liveTimer=null}
+async function route(){var status=document.querySelector('#status');if(timer){clearInterval(timer);timer=null}stopLive();
 try{var h=location.hash;
 if(h==='#/new'){await renderSetup();return}
 var runMatch=h.match(/^#\/project\/([^\/]+)\/run\/(.+)$/);if(runMatch){await renderRun(decodeURIComponent(runMatch[1]),decodeURIComponent(runMatch[2]));return}

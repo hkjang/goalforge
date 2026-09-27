@@ -92,7 +92,10 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	server.mux.HandleFunc("GET /api/v1/projects/{id}", server.project)
 	server.mux.HandleFunc("GET /api/v1/approvals", server.pendingApprovals)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}", server.runDetail)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}/events", server.runEvents)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}/stream", server.runStream)
 	server.mux.HandleFunc("GET /api/v1/doctor", server.doctor)
+	server.mux.HandleFunc("GET /api/v1/report", server.activityReport)
 	server.mux.HandleFunc("POST /api/v1/projects", server.createProject)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/goal", server.setGoal)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/policy", server.setPolicy)
@@ -229,6 +232,7 @@ type RunDetail struct {
 	Diff          string                     `json:"diff,omitempty"`
 	DiffTruncated bool                       `json:"diff_truncated,omitempty"`
 	DiffError     string                     `json:"diff_error,omitempty"`
+	Repair        *store.RepairPlan          `json:"repair,omitempty"`
 }
 
 // diffLimitBytes caps how much of a patch is sent to a browser; a reviewer
@@ -278,6 +282,12 @@ func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if plan, planErr := s.store.RepairPlanForRun(r.Context(), runID); planErr == nil {
+		detail.Repair = &plan
+	} else if !errors.Is(planErr, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, planErr.Error())
 		return
 	}
 	if commit, commitErr := s.store.RunCommitByRun(r.Context(), runID); commitErr == nil {

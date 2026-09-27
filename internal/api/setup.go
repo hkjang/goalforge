@@ -256,3 +256,23 @@ func decodeBody(w http.ResponseWriter, r *http.Request, into any) error {
 	}
 	return nil
 }
+
+// activityReport summarizes a window of automated work for someone returning
+// to it, rather than making them reconstruct it from run logs.
+func (s *Server) activityReport(w http.ResponseWriter, r *http.Request) {
+	window := 24 * time.Hour
+	if value := strings.TrimSpace(r.URL.Query().Get("since")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil || parsed <= 0 {
+			writeError(w, http.StatusBadRequest, "since 는 5m, 24h 같은 양수 기간이어야 합니다")
+			return
+		}
+		window = parsed
+	}
+	report, err := s.store.Activity(r.Context(), time.Now().UTC().Add(-window))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}

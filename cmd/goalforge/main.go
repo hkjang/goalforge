@@ -23,6 +23,7 @@ import (
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/mcp"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/notify"
 	"github.com/goalforge/goalforge/internal/orchestrator"
 	"github.com/goalforge/goalforge/internal/planner"
 	"github.com/goalforge/goalforge/internal/policy"
@@ -136,6 +137,8 @@ func run(ctx context.Context, args []string) error {
 		return checkpointCreate(ctx, s, args[1:])
 	case "logs":
 		return logsShow(ctx, s, args[1:])
+	case "report":
+		return activityReport(ctx, s, args[1:])
 	case "cancel":
 		return cancelScheduled(ctx, s)
 	case "pause":
@@ -725,10 +728,83 @@ func continueHandler(s *store.Store, service *app.Service) scheduler.Handler {
 		if result.Verification.GoalCompleted {
 			return out, nil
 		}
+		// A failed verification is only retried when the failure is one a code
+		// fix could plausibly address and the repair limits still allow it.
+		// Rescheduling unconditionally turned a broken environment or an
+		// unfixable failure into a loop that spent budget without progress.
+		if !result.Verification.Passed {
+			plan := result.Repair
+			if !plan.Automatic() {
+				fmt.Printf("worker: repair stopped run=%s decision=%s reason=%s\n", result.Run.RunID, plan.Decision, plan.Reason)
+				_ = notify.Post(ctx, notify.Event{Project: project.ID, State: "REPAIR_REQUIRED", Reason: plan.Decision + ": " + plan.Reason})
+				return out, nil
+			}
+			fmt.Printf("worker: repair scheduled run=%s attempt=%d kind=%s\n", result.Run.RunID, plan.Attempt, plan.FailureKind)
+		}
 		next := time.Now().UTC().Add(5 * time.Second)
 		out.RescheduleAt = &next
 		return out, nil
 	}
+}
+
+// printRepair explains a failed verification: what kind of failure it was and
+// whether GoalForge will try again on its own.
+func printRepair(plan store.RepairPlan) {
+	if plan.Decision == "" || plan.Decision == store.RepairNothingToRepair {
+		return
+	}
+	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
+}
+
+// activityReport summarizes what ran while nobody was watching: what
+// finished, what stopped and why, what is waiting on a decision, and the cost.
+func activityReport(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("report", flag.ContinueOnError)
+	since := f.Duration("since", 24*time.Hour, "window to summarize")
+	asJSON := f.Bool("json", false, "emit JSON instead of text")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *since <= 0 {
+		return errors.New("--since must be positive")
+	}
+	report, err := s.Activity(ctx, time.Now().UTC().Add(-*since))
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		encoded, encodeErr := json.MarshalIndent(report, "", "  ")
+		if encodeErr != nil {
+			return encodeErr
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	fmt.Printf("GoalForge report: %s ~ %s (%s)\n", report.Since.Format(time.RFC3339), report.Until.Format(time.RFC3339), *since)
+	fmt.Printf("runs=%d work_verified=%d tokens=%d cost_usd=%.4f\n\n", report.Runs, report.WorkCompleted, report.Tokens, report.CostUSD)
+	for _, project := range report.Projects {
+		if project.Runs == 0 && project.WorkCompleted == 0 {
+			continue
+		}
+		fmt.Printf("%-20s %-16s runs=%d verified=%d progress=%.1f%% cost=$%.4f  %s\n",
+			project.Name, project.State, project.Runs, project.WorkCompleted, project.ProgressPercent, project.CostUSD, project.GoalTitle)
+	}
+	if len(report.Unresolved) > 0 {
+		fmt.Printf("\nunresolved (%d):\n", len(report.Unresolved))
+		for _, item := range report.Unresolved {
+			fmt.Printf("  %-12s %-20s %s %s\n    %s\n", item.State, item.ProjectName, item.RunID, item.FailureKind, item.Reason)
+		}
+	}
+	if len(report.Approvals) > 0 {
+		fmt.Printf("\napprovals waiting (%d):\n", len(report.Approvals))
+		for _, approval := range report.Approvals {
+			fmt.Printf("  %-20s %-22s %s  %s\n", approval.ProjectName, approval.ActionType, approval.ID, approval.Reason)
+		}
+	}
+	if len(report.Unresolved) == 0 && len(report.Approvals) == 0 {
+		fmt.Println("\nnothing is waiting on you.")
+	}
+	return nil
 }
 
 func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
@@ -1018,6 +1094,7 @@ func resumePaused(ctx context.Context, s *store.Store) error {
 		return err
 	}
 	fmt.Printf("resumed checkpoint: %s\nrun: %s state=%s resumed=%t\nverification: passed=%t goal_completed=%t progress=%.1f%%\n", result.Checkpoint.ID, result.Run.RunID, result.Run.State, result.Run.Resumed, result.Verification.Passed, result.Verification.GoalCompleted, result.Verification.Progress)
+	printRepair(result.Repair)
 	return nil
 }
 
@@ -1110,6 +1187,7 @@ func continueGoal(ctx context.Context, s *store.Store, args []string, developSel
 		return err
 	}
 	fmt.Printf("work item: %s %s\nrun: %s state=%s resumed=%t\nverification: passed=%t goal_completed=%t progress=%.1f%%\n", result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID, result.Run.State, result.Run.Resumed, result.Verification.Passed, result.Verification.GoalCompleted, result.Verification.Progress)
+	printRepair(result.Repair)
 	return nil
 }
 

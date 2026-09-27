@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/provider"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
@@ -193,5 +196,71 @@ func TestProjectActions(t *testing.T) {
 	}
 	if response := mutate(t, server, http.MethodPost, "/api/v1/projects/P-API/actions/deploy", ""); response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown action status=%d", response.Code)
+	}
+}
+
+// The live view fetches only what it has not seen; re-reading the whole run on
+// a timer was the old behaviour and does not scale past a long run.
+func TestRunEventsAreIncremental(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.StartRun(ctx, store.RunRecord{ID: "R-EV", ProjectID: "P-API", WorkItemID: "W-API", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := db.RecordProviderEvent(ctx, "P-API", provider.Event{RunID: "R-EV", Type: provider.EventCompleted,
+			TurnID: "t" + strconv.Itoa(i), Raw: json.RawMessage(`{"n":` + strconv.Itoa(i) + `}`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var first struct {
+		Events []store.EventLog `json:"events"`
+		LastID int64            `json:"last_id"`
+		State  string           `json:"state"`
+	}
+	get(t, server, "/api/v1/projects/P-API/runs/R-EV/events", &first)
+	if len(first.Events) != 3 || first.LastID == 0 || first.State == "" {
+		t.Fatalf("first page=%+v", first)
+	}
+	var second struct {
+		Events []store.EventLog `json:"events"`
+		LastID int64            `json:"last_id"`
+	}
+	get(t, server, "/api/v1/projects/P-API/runs/R-EV/events?after="+strconv.FormatInt(first.LastID, 10), &second)
+	if len(second.Events) != 0 {
+		t.Fatalf("nothing new must return nothing: %+v", second.Events)
+	}
+	if response := get(t, server, "/api/v1/projects/P-API/runs/R-GHOST/events", nil); response.Code != http.StatusNotFound {
+		t.Fatalf("unknown run status=%d", response.Code)
+	}
+}
+
+// A finished run's stream ends instead of holding a connection open forever.
+func TestRunStreamEndsOnTerminalState(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.StartRun(ctx, store.RunRecord{ID: "R-STREAM", ProjectID: "P-API", WorkItemID: "W-API", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.FinishRun(ctx, "R-STREAM", "COMPLETED", "READY"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/projects/P-API/runs/R-STREAM/stream", nil)
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(recorder, request)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not close for a finished run")
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: done") || !strings.Contains(recorder.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("body=%q content-type=%q", body, recorder.Header().Get("Content-Type"))
 	}
 }

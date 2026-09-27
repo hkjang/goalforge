@@ -210,3 +210,84 @@ func TestUnscopedConsumeRefusesScopedActions(t *testing.T) {
 		t.Fatal("merge approvals must not be consumable without a scope")
 	}
 }
+
+// Repair is decided by what failed, not by counting retries: a broken
+// environment is never retried automatically, and code-fix retries stop at the
+// attempt limit instead of spending a budget one attempt at a time.
+func TestPlanRepairRoutesByFailureKindAndStopsAtLimits(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: t.TempDir(), DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fail := func(runID, kind, mode string) RepairPlan {
+		t.Helper()
+		if _, execErr := s.db.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,state,started_at) VALUES(?,?,?,'codex','REPAIR_REQUIRED',?)`,
+			runID, p.ID, work.ID, time.Now().UTC().Format(time.RFC3339Nano)); execErr != nil {
+			t.Fatal(execErr)
+		}
+		if _, execErr := s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,required,failure_kind,repair_mode,created_at) VALUES(?,?,'build_passed','FAILED','false',1,?,?,?)`,
+			goal.ID, runID, kind, mode, time.Now().UTC().Format(time.RFC3339Nano)); execErr != nil {
+			t.Fatal(execErr)
+		}
+		plan, planErr := s.PlanRepair(ctx, runID, RepairPolicy{MaxAttempts: 2, MaxCostUSD: 5})
+		if planErr != nil {
+			t.Fatal(planErr)
+		}
+		return plan
+	}
+	if plan := fail("R-ENV", "environment", "ENVIRONMENT"); plan.Decision != RepairBlockEnv || plan.Automatic() {
+		t.Fatalf("an environment failure must not be retried: %+v", plan)
+	}
+	if plan := fail("R1", "test_failure", "CODE_FIX"); !plan.Automatic() || plan.Attempt != 1 {
+		t.Fatalf("first code-fix attempt: %+v", plan)
+	}
+	if plan := fail("R2", "build_failure", "CODE_FIX"); !plan.Automatic() || plan.Attempt != 2 {
+		t.Fatalf("second code-fix attempt: %+v", plan)
+	}
+	plan := fail("R3", "test_failure", "CODE_FIX")
+	if plan.Decision != RepairBlockAttempts || plan.Automatic() {
+		t.Fatalf("the attempt limit must stop the loop: %+v", plan)
+	}
+	if plan.Summary == "" || plan.Reason == "" {
+		t.Fatalf("a blocked repair must explain itself: %+v", plan)
+	}
+	stored, err := s.RepairPlanForRun(ctx, "R3")
+	if err != nil || stored.Decision != RepairBlockAttempts {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
+
+// A run whose required gates all passed has nothing to repair.
+func TestPlanRepairWithNoFailedGates(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: t.TempDir(), DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO runs(id,project_id,provider,state,started_at) VALUES('R0',?,'codex','FAILED',?)`, p.ID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.PlanRepair(ctx, "R0", DefaultRepairPolicy())
+	if err != nil || plan.Decision != RepairNothingToRepair {
+		t.Fatalf("plan=%+v err=%v", plan, err)
+	}
+}

@@ -27,11 +27,15 @@ type Service struct {
 	loopGuard     *planner.LoopGuard
 	newRunID      func() string
 	leaseDuration time.Duration
+	repairPolicy  store.RepairPolicy
 }
 type ContinueResult struct {
 	WorkItem     model.WorkItem
 	Run          orchestrator.Result
 	Verification verification.Report
+	// Repair is the decision about a failed verification: what failed and
+	// whether GoalForge may try again on its own.
+	Repair store.RepairPlan
 }
 type IdeasResult struct {
 	Run       orchestrator.Result
@@ -41,6 +45,7 @@ type ResumeResult struct {
 	Checkpoint   store.Checkpoint
 	Run          orchestrator.Result
 	Verification verification.Report
+	Repair       store.RepairPlan
 }
 
 func New(s *store.Store, p *planner.Service, o *orchestrator.Orchestrator, v *verification.Engine, newRunID func() string) (*Service, error) {
@@ -54,7 +59,8 @@ func New(s *store.Store, p *planner.Service, o *orchestrator.Orchestrator, v *ve
 	if err != nil {
 		return nil, err
 	}
-	return &Service{store: s, planner: p, orchestrator: o, verification: v, loopGuard: loopGuard, newRunID: newRunID, leaseDuration: 2 * time.Hour}, nil
+	return &Service{store: s, planner: p, orchestrator: o, verification: v, loopGuard: loopGuard, newRunID: newRunID,
+		leaseDuration: 2 * time.Hour, repairPolicy: store.DefaultRepairPolicy()}, nil
 }
 
 // Ideas discovers new goal-contributing work candidates (DISCOVER_IDEAS).
@@ -255,7 +261,7 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 		if changesErr != nil {
 			return result, changesErr
 		}
-		err = s.recordVerificationLoop(ctx, project, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
+		result.Repair, err = s.recordVerificationLoop(ctx, project, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
 	}
 	if err == nil && result.Verification.Passed && project.AutoCommitEnabled && result.Checkpoint.WorkItemID != "" {
 		goal, goalErr := s.store.CurrentGoal(ctx, project.ID)
@@ -404,7 +410,7 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	}
 	result.Verification, err = s.verification.Verify(ctx, result.Run.RunID, executionProject, verificationGates)
 	if err == nil {
-		err = s.recordVerificationLoop(ctx, project, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
+		result.Repair, err = s.recordVerificationLoop(ctx, project, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
 	}
 	if err == nil && result.Verification.Passed && project.AutoCommitEnabled {
 		err = s.commitVerifiedRun(ctx, project, executionProject.RepositoryPath, goal.ID, result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID)
@@ -443,9 +449,17 @@ func (s *Service) recordWorkspaceChanges(ctx context.Context, repository, runID 
 // claims without any file change (LOOP-005, answered with a session rotation
 // before any block), and same_change catches runs that keep producing an
 // identical change set (LOOP-003).
-func (s *Service) recordVerificationLoop(ctx context.Context, project model.Project, workItemID, runID string, changes []gitops.FileChange, report verification.Report) error {
+// recordVerificationLoop records loop-guard signals for a failed verification
+// and decides whether the failure may be repaired automatically. The decision
+// is made here because this is the one place that sees every failed run.
+func (s *Service) recordVerificationLoop(ctx context.Context, project model.Project, workItemID, runID string, changes []gitops.FileChange, report verification.Report) (store.RepairPlan, error) {
+	var plan store.RepairPlan
 	if report.Passed {
-		return nil
+		return plan, nil
+	}
+	plan, planErr := s.store.PlanRepair(ctx, runID, s.repairPolicy)
+	if planErr != nil {
+		return plan, planErr
 	}
 	var failed []string
 	for _, result := range report.Results {
@@ -454,26 +468,26 @@ func (s *Service) recordVerificationLoop(ctx context.Context, project model.Proj
 		}
 	}
 	if len(failed) == 0 {
-		return nil
+		return plan, nil
 	}
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(failed, "\x00"))))
 	if _, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_error", fingerprint, runID); err != nil {
-		return err
+		return plan, err
 	}
 	if workItemID != "" {
 		if _, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_work", workItemID, runID); err != nil {
-			return err
+			return plan, err
 		}
 	}
 	if len(changes) == 0 {
 		action, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "no_change", "no-change:"+workItemID, runID)
 		if err != nil {
-			return err
+			return plan, err
 		}
 		if action == planner.LoopRotateSession {
-			return s.rotateSessionForLoop(ctx, project, "no_change_loop: repeated completion claims without file changes")
+			return plan, s.rotateSessionForLoop(ctx, project, "no_change_loop: repeated completion claims without file changes")
 		}
-		return nil
+		return plan, nil
 	}
 	var parts []string
 	for _, change := range changes {
@@ -481,8 +495,11 @@ func (s *Service) recordVerificationLoop(ctx context.Context, project model.Proj
 	}
 	changeFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
 	_, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_change", changeFingerprint, runID)
-	return err
+	return plan, err
 }
+
+// SetRepairPolicy overrides the automatic-repair limits.
+func (s *Service) SetRepairPolicy(repairPolicy store.RepairPolicy) { s.repairPolicy = repairPolicy }
 
 // rotateSessionForLoop retires the active provider session so the next run
 // starts fresh instead of continuing a conversation that stopped producing
