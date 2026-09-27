@@ -47,6 +47,9 @@ goalforge project concurrency --wip 2      # only items with disjoint change sco
 goalforge project profile personal|team|production   # an operating posture as one set of limits
 goalforge project sandbox [--mode docker --image golang:1.23] [--memory-mb N] [--cpus N] [--network]
 goalforge project provider set --provider claude --model sonnet --reason "..."
+goalforge goal contract --title T --outcome "key|method|judge" --measure "p95=latency_ms<=200"
+                        [--users ...] [--exclude ...] [--reason ...] [--decider ...]
+goalforge goal contract show           # required outcomes, what is unconfirmed, what conflicts
 goalforge goal set --title T --objective O --criterion build_passed=true [--reason ...]
 goalforge goal show
 goalforge milestone add --title T --weight 2
@@ -309,6 +312,21 @@ previously failed approach may not be retried without saying what changed, and
 verification is never relaxed. Decisions are recorded rather than deleted; one
 is superseded by another, because the record of what was rejected is what stops
 it being proposed again.
+
+A goal contract states what the goal commits to in a form that can be judged:
+who it is for, what it must achieve, how each required outcome will be settled
+and by whom, what is deliberately out of scope, and the budget and deadline it
+runs under. A requirement with no method or no judge is kept and marked
+unconfirmed rather than accepted or dropped — "업계 최고 수준" is not an outcome
+until someone says what would settle it, and until then the goal cannot be
+judged met. Requirements that cannot both hold, such as one metric needing to
+be both above and below a threshold, are reported as conflicts with both sides
+intact: dropping one to resolve it is how a contract quietly becomes a
+different contract.
+
+Changing a contract creates a new version with a reason and a decider, and
+every earlier version keeps the outcomes it required. Narrowing the goal
+therefore cannot turn a missed goal into a met one after the fact.
 
 `goalforge plan` shows what the next run would do without doing any of it: the
 work item that would be chosen and why higher-priority ones were skipped, the

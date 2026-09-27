@@ -104,6 +104,20 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
  cost_usd REAL NOT NULL DEFAULT 0, interventions INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS goal_contracts (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), goal_id TEXT NOT NULL DEFAULT '',
+ version INTEGER NOT NULL, previous_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL,
+ objective TEXT NOT NULL DEFAULT '', users TEXT NOT NULL DEFAULT '', scenarios TEXT NOT NULL DEFAULT '',
+ exclusions TEXT NOT NULL DEFAULT '', stage TEXT NOT NULL DEFAULT '', budget_tokens INTEGER NOT NULL DEFAULT 0,
+ budget_usd REAL NOT NULL DEFAULT 0, deadline TEXT NOT NULL DEFAULT '', change_reason TEXT NOT NULL DEFAULT '',
+ decider TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(project_id,version)
+);
+CREATE TABLE IF NOT EXISTS contract_outcomes (
+ contract_id TEXT NOT NULL REFERENCES goal_contracts(id), outcome_key TEXT NOT NULL,
+ statement TEXT NOT NULL DEFAULT '', method TEXT NOT NULL DEFAULT '', judge TEXT NOT NULL DEFAULT '',
+ metric TEXT NOT NULL DEFAULT '', comparator TEXT NOT NULL DEFAULT '', threshold TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'UNCONFIRMED', PRIMARY KEY(contract_id,outcome_key)
+);
 CREATE TABLE IF NOT EXISTS outbox (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), kind TEXT NOT NULL,
  payload TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, published_at TEXT NOT NULL DEFAULT ''

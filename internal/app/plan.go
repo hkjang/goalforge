@@ -167,6 +167,24 @@ func BuildPlan(ctx context.Context, db *store.Store, project model.Project) (Pla
 	if err != nil {
 		return plan, err
 	}
+	// A contract with requirements nothing can settle, or requirements that
+	// contradict each other, does not stop a run — it stops the goal from ever
+	// being judged met, which is a different thing and is reported as such.
+	if contract, contractErr := db.CurrentContract(ctx, project.ID); contractErr == nil {
+		if unconfirmed := contract.Unconfirmed(); len(unconfirmed) > 0 {
+			names := make([]string, 0, len(unconfirmed))
+			for _, outcome := range unconfirmed {
+				names = append(names, outcome.Key)
+			}
+			plan.add("WARN", "contract", fmt.Sprintf("판정 방법이 없는 필수 결과 %d건 (%s) — 정해지기 전까지 목표는 완료로 판정되지 않습니다",
+				len(unconfirmed), strings.Join(names, ", ")))
+		}
+		for _, conflict := range contract.Conflicts() {
+			plan.add("WARN", "contract conflict", fmt.Sprintf("%s vs %s — %s", conflict.Left.Key, conflict.Right.Key, conflict.Detail))
+		}
+	} else if !errors.Is(contractErr, store.ErrNotFound) {
+		return plan, contractErr
+	}
 	// Readiness findings are warnings here even when doctor calls them
 	// blocking: a criterion with no gate does not stop the run, it stops the
 	// goal from ever being judged complete. Reporting them as BLOCK would make

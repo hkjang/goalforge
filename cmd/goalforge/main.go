@@ -64,7 +64,7 @@ const usageText = `usage: goalforge [--db PATH] COMMAND
 setup      project init | project budget | project runtime | project concurrency | project profile
            project sandbox [--mode docker --image IMG]
            project provider set | doctor [--probe-auth]
-goal       goal set | goal show | milestone add | decision add | decision list | decision supersede
+goal       goal set | goal show | goal contract | goal contract show | milestone add | decision add | decision list | decision supersede
 work       work add | work list | work status ID --set STATUS
 verify     verify template NAME | verify gate add | verify record | verify integration
 run        plan [--json] | continue [--enqueue] | develop | run --until-quota | ideas | audit | replan
@@ -170,6 +170,12 @@ func run(ctx context.Context, args []string) error {
 			return projectSandbox(ctx, s, args[2:])
 		}
 	case "goal":
+		if len(args) > 2 && args[1] == "contract" && args[2] == "show" {
+			return contractShow(ctx, s)
+		}
+		if len(args) > 1 && args[1] == "contract" {
+			return contractSet(ctx, s, args[2:])
+		}
 		if len(args) > 1 && args[1] == "set" {
 			return goalSet(ctx, s, args[2:])
 		}
@@ -1099,6 +1105,150 @@ func planPreview(ctx context.Context, s *store.Store, args []string) error {
 		return nil
 	}
 	return errors.New("지금은 실행할 수 없습니다. 위의 BLOCK 항목을 먼저 해결하세요")
+}
+
+// contractSet records what a goal commits to, as something that can be judged.
+// A requirement with no way to settle it is kept and marked unconfirmed rather
+// than accepted or dropped: the difference between a requirement and a wish
+// has to be visible before work starts, not discovered at completion.
+func contractSet(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("goal contract", flag.ContinueOnError)
+	title := f.String("title", "", "what the goal is")
+	objective := f.String("objective", "", "what done means")
+	users := f.String("users", "", "who it is for")
+	scenarios := f.String("scenarios", "", "what they do with it")
+	outcomes := f.String("outcome", "", "required outcomes: key|method|judge, comma separated (method may itself contain a colon, as in gate:auth_tests)")
+	measures := f.String("measure", "", "numeric outcomes: key=metric<op>threshold, e.g. p95=latency_ms<=200")
+	exclusions := f.String("exclude", "", "what is deliberately out of scope")
+	stage := f.String("stage", "", "completion stage: verified, releasable, deployed, or operating")
+	reason := f.String("reason", "", "why the contract changed (required after the first version)")
+	decider := f.String("decider", "", "who decided the change")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *title == "" {
+		return errors.New("--title is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	contract := store.GoalContract{ProjectID: p.ID, Title: *title, Objective: *objective, Users: *users,
+		Scenarios: *scenarios, Stage: *stage, ChangeReason: *reason, Decider: *decider,
+		Exclusions: splitList(*exclusions)}
+	if goal, goalErr := s.CurrentGoal(ctx, p.ID); goalErr == nil {
+		contract.GoalID = goal.ID
+	} else if !errors.Is(goalErr, store.ErrNotFound) {
+		return goalErr
+	}
+	for _, entry := range splitList(*outcomes) {
+		parts := strings.SplitN(entry, "|", 3)
+		outcome := store.RequiredOutcome{Key: parts[0], Statement: parts[0]}
+		if len(parts) > 1 {
+			outcome.Method = parts[1]
+		}
+		if len(parts) > 2 {
+			outcome.Judge = parts[2]
+		}
+		contract.Outcomes = append(contract.Outcomes, outcome)
+	}
+	for _, entry := range splitList(*measures) {
+		outcome, parseErr := parseMeasuredOutcome(entry)
+		if parseErr != nil {
+			return parseErr
+		}
+		contract.Outcomes = append(contract.Outcomes, outcome)
+	}
+	saved, err := s.SaveContract(ctx, contract)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("contract v%d saved: %s (필수 결과 %d건)\n", saved.Version, saved.Title, len(saved.Outcomes))
+	reportContract(saved)
+	return nil
+}
+
+// parseMeasuredOutcome reads key=metric<op>threshold, which is the form that
+// makes two requirements comparable enough to contradict each other.
+func parseMeasuredOutcome(entry string) (store.RequiredOutcome, error) {
+	key, expression, found := strings.Cut(entry, "=")
+	if !found {
+		return store.RequiredOutcome{}, fmt.Errorf("measured outcome %q must be key=metric<op>threshold", entry)
+	}
+	for _, operator := range []string{">=", "<=", ">", "<", "="} {
+		metric, threshold, ok := strings.Cut(expression, operator)
+		if !ok {
+			continue
+		}
+		return store.RequiredOutcome{Key: key, Statement: entry, Metric: strings.TrimSpace(metric),
+			Comparator: operator, Threshold: strings.TrimSpace(threshold),
+			Method: "gate:" + strings.TrimSpace(metric), Judge: "verification"}, nil
+	}
+	return store.RequiredOutcome{}, fmt.Errorf("measured outcome %q needs a comparator (>=, <=, >, <, =)", entry)
+}
+
+func contractShow(ctx context.Context, s *store.Store) error {
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	contract, err := s.CurrentContract(ctx, p.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		fmt.Println("no goal contract recorded; `goalforge goal contract --title ... --outcome ...`")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("contract v%d: %s\n", contract.Version, contract.Title)
+	if contract.Objective != "" {
+		fmt.Printf("  %s\n", contract.Objective)
+	}
+	if contract.Users != "" || contract.Scenarios != "" {
+		fmt.Printf("  대상: %s / 시나리오: %s\n", dashIfEmpty(contract.Users), dashIfEmpty(contract.Scenarios))
+	}
+	reportContract(contract)
+	history, err := s.ContractHistory(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(history) > 1 {
+		fmt.Println("\n버전 이력:")
+		for _, version := range history {
+			fmt.Printf("  v%d  필수 결과 %d건  %s\n", version.Version, len(version.Outcomes), dashIfEmpty(version.ChangeReason))
+		}
+		fmt.Println("  이전 버전의 필수 결과는 그대로 남습니다. 범위를 줄여도 과거 판정이 바뀌지 않습니다.")
+	}
+	return nil
+}
+
+// reportContract prints what can and cannot yet be judged. Both belong in the
+// same place: a contract that only shows its settleable half reads as more
+// complete than it is.
+func reportContract(contract store.GoalContract) {
+	fmt.Println("필수 결과:")
+	for _, outcome := range contract.Outcomes {
+		mark := "[v]"
+		detail := outcome.Method + " / " + outcome.Judge
+		if !outcome.Confirmed() {
+			mark = "[?]"
+			detail = "판정 방법 또는 판정 주체가 없어 미확정"
+		}
+		fmt.Printf("  %-4s %-16s %s\n", mark, outcome.Key, detail)
+	}
+	if unconfirmed := contract.Unconfirmed(); len(unconfirmed) > 0 {
+		fmt.Printf("\n미확정 %d건: 판정 방법과 주체를 정하기 전까지 이 목표는 완료로 판정될 수 없습니다.\n", len(unconfirmed))
+	}
+	if conflicts := contract.Conflicts(); len(conflicts) > 0 {
+		fmt.Printf("\n상충 %d건:\n", len(conflicts))
+		for _, conflict := range conflicts {
+			fmt.Printf("  %s vs %s — %s\n", conflict.Left.Key, conflict.Right.Key, conflict.Detail)
+		}
+		fmt.Println("  어느 쪽도 임의로 없애지 않았습니다. 어떤 것을 바꿀지는 사람이 결정합니다.")
+	}
+	if len(contract.Exclusions) > 0 {
+		fmt.Printf("\n제외 범위: %s\n", strings.Join(contract.Exclusions, ", "))
+	}
 }
 
 // verifyTemplate installs a starting set of gates for a kind of project. A
