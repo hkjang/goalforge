@@ -104,6 +104,11 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
  cost_usd REAL NOT NULL DEFAULT 0, interventions INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS outbox (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), kind TEXT NOT NULL,
+ payload TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, published_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(published_at, created_at);
 CREATE TABLE IF NOT EXISTS external_effects (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL DEFAULT '',
  work_item_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, effect_key TEXT NOT NULL UNIQUE,
@@ -330,6 +335,11 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	}
 	if err := s.ensureColumn(ctx, "process_leases", "generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{{"sandbox_mode", "TEXT NOT NULL DEFAULT 'none'"}, {"sandbox_image", "TEXT NOT NULL DEFAULT ''"}, {"sandbox_memory_mb", "INTEGER NOT NULL DEFAULT 2048"}, {"sandbox_cpus", "REAL NOT NULL DEFAULT 2"}, {"sandbox_processes", "INTEGER NOT NULL DEFAULT 256"}, {"sandbox_network", "INTEGER NOT NULL DEFAULT 0"}} {
+		if err := s.ensureColumn(ctx, "projects", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	for _, column := range []string{"failure_kind", "repair_mode", "stale_reason", "tree_id", "evaluator_id"} {
 		if err := s.ensureColumn(ctx, "verification_results", column, "TEXT NOT NULL DEFAULT ''"); err != nil {

@@ -128,6 +128,14 @@ func (s *Store) FinalizeCheckpoint(ctx context.Context, projectID, goalID string
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project is not checkpointing")
 	}
+	// The intent to carry on is recorded with the outcome that decided it. A
+	// crash between committing this and scheduling the follow-up would
+	// otherwise leave a goal that says "continue" with nothing that will.
+	if !complete {
+		if err = enqueueOutbox(ctx, tx, projectID, OutboxContinue, goalID); err != nil {
+			return err
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}

@@ -253,3 +253,36 @@ func (s *Store) SetWIPLimit(ctx context.Context, projectID string, limit int) er
 	}
 	return nil
 }
+
+// SandboxPolicy reads the confinement a project's verification runs under.
+func (s *Store) SandboxPolicy(ctx context.Context, projectID string) (policy.SandboxPolicy, error) {
+	result := policy.DefaultSandboxPolicy()
+	var network int
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(sandbox_mode,'none'),COALESCE(sandbox_image,''),COALESCE(sandbox_memory_mb,2048),COALESCE(sandbox_cpus,2),COALESCE(sandbox_processes,256),COALESCE(sandbox_network,0) FROM projects WHERE id=?`, projectID).
+		Scan(&result.Mode, &result.Image, &result.MemoryMB, &result.CPUs, &result.Processes, &network)
+	if errors.Is(err, sql.ErrNoRows) {
+		return result, ErrNotFound
+	}
+	result.Network = network == 1
+	return result, err
+}
+
+// SetSandboxPolicy changes it, refusing a configuration that could not run.
+func (s *Store) SetSandboxPolicy(ctx context.Context, projectID string, sandbox policy.SandboxPolicy) error {
+	if err := sandbox.Valid(); err != nil {
+		return err
+	}
+	network := 0
+	if sandbox.Network {
+		network = 1
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE projects SET sandbox_mode=?,sandbox_image=?,sandbox_memory_mb=?,sandbox_cpus=?,sandbox_processes=?,sandbox_network=? WHERE id=?`,
+		sandbox.Mode, sandbox.Image, sandbox.MemoryMB, sandbox.CPUs, sandbox.Processes, network, projectID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}

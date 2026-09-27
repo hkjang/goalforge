@@ -50,6 +50,16 @@ type Report struct {
 type Engine struct {
 	store          *store.Store
 	maxOutputBytes int
+	// sandbox bounds what a gate may consume and reach. Gates run code the
+	// session just wrote, so they are not more trusted than the session.
+	sandbox policy.SandboxPolicy
+}
+
+// WithSandbox returns an engine that runs gates under the given policy.
+func (e *Engine) WithSandbox(sandbox policy.SandboxPolicy) *Engine {
+	copied := *e
+	copied.sandbox = sandbox
+	return &copied
 }
 
 func New(s *store.Store, maxOutputBytes int) (*Engine, error) {
@@ -214,9 +224,13 @@ func (e *Engine) runGate(parent context.Context, workDir string, gate Gate) (Res
 	if err := policy.ValidateCommand(gate.Command); err != nil {
 		return result, fmt.Errorf("verification command blocked by policy: %w", err)
 	}
+	launched, err := e.sandbox.Wrap(workDir, gate.Command)
+	if err != nil {
+		return result, fmt.Errorf("prepare sandboxed verification: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(parent, gate.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, gate.Command[0], gate.Command[1:]...)
+	cmd := exec.CommandContext(ctx, launched[0], launched[1:]...)
 	cmd.Dir = workDir
 	// A gate is still work the session's change can influence, so it runs with
 	// the same reduced environment rather than the operator's.
@@ -229,7 +243,7 @@ func (e *Engine) runGate(parent context.Context, workDir string, gate Gate) (Res
 	cmd.Stdout = writer
 	cmd.Stderr = writer
 	started := time.Now()
-	err := cmd.Start()
+	err = cmd.Start()
 	if err == nil {
 		err = cmd.Wait()
 	}

@@ -62,6 +62,7 @@ func main() {
 const usageText = `usage: goalforge [--db PATH] COMMAND
 
 setup      project init | project budget | project runtime | project concurrency | project profile
+           project sandbox [--mode docker --image IMG]
            project provider set | doctor [--probe-auth]
 goal       goal set | goal show | milestone add | decision add | decision list | decision supersede
 work       work add | work list | work status ID --set STATUS
@@ -164,6 +165,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "profile" {
 			return projectProfile(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "sandbox" {
+			return projectSandbox(ctx, s, args[2:])
 		}
 	case "goal":
 		if len(args) > 1 && args[1] == "set" {
@@ -868,7 +872,20 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 	if err = worker.Handle("CONTINUE", continueHandler(s, service)); err != nil {
 		return err
 	}
-	runOnce := func() (bool, error) { return worker.RunOne(ctx, time.Now().UTC()) }
+	// Intents recorded with a state change become work here. Draining before
+	// each tick is what makes a crash between the two recoverable: the entry
+	// survived, so the follow-up happens on restart.
+	drain := func() {
+		if published, publishErr := s.PublishOutbox(ctx, ""); publishErr != nil {
+			fmt.Fprintln(os.Stderr, "worker outbox error:", publishErr)
+		} else if published > 0 {
+			fmt.Printf("worker: published %d recorded follow-up(s)\n", published)
+		}
+	}
+	runOnce := func() (bool, error) {
+		drain()
+		return worker.RunOne(ctx, time.Now().UTC())
+	}
 	if *once {
 		ran, runErr := runOnce()
 		fmt.Printf("worker: job_processed=%t\n", ran)
@@ -1109,6 +1126,47 @@ func verifyTemplate(ctx context.Context, s *store.Store, args []string) error {
 		fmt.Printf("kept existing: %s (use --overwrite to replace)\n", strings.Join(skipped, ", "))
 	}
 	fmt.Println("review the thresholds before relying on them: a template is a starting point, not a standard")
+	return nil
+}
+
+// projectSandbox sets how far a verification command may reach. Gates run code
+// the session just wrote, so they are not more trusted than the session: the
+// default is the host only because a sandbox that cannot run the project's
+// toolchain is worse than none, and only the project knows which image can.
+func projectSandbox(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("project sandbox", flag.ContinueOnError)
+	mode := f.String("mode", "", "none or docker")
+	image := f.String("image", "", "container image that can run this project's gates")
+	memory := f.Int("memory-mb", 2048, "memory ceiling")
+	cpus := f.Float64("cpus", 2, "CPU ceiling")
+	processes := f.Int("processes", 256, "process ceiling")
+	network := f.Bool("network", false, "allow the gates to reach the network")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	if *mode == "" {
+		current, policyErr := s.SandboxPolicy(ctx, p.ID)
+		if policyErr != nil {
+			return policyErr
+		}
+		fmt.Printf("sandbox: mode=%s image=%s memory=%dMB cpus=%.1f processes=%d network=%t\n",
+			current.Mode, orNone(current.Image), current.MemoryMB, current.CPUs, current.Processes, current.Network)
+		if current.Mode == policy.SandboxNone {
+			fmt.Println("  검증 명령이 호스트에서 실행됩니다. docker 모드는 작업 공간만 마운트하고 네트워크를 끊습니다:")
+			fmt.Println("  goalforge project sandbox --mode docker --image golang:1.23")
+		}
+		return nil
+	}
+	sandbox := policy.SandboxPolicy{Mode: *mode, Image: *image, MemoryMB: *memory, CPUs: *cpus, Processes: *processes, Network: *network}
+	if err = s.SetSandboxPolicy(ctx, p.ID, sandbox); err != nil {
+		return err
+	}
+	fmt.Printf("sandbox set: mode=%s image=%s memory=%dMB cpus=%.1f processes=%d network=%t\n",
+		sandbox.Mode, orNone(sandbox.Image), sandbox.MemoryMB, sandbox.CPUs, sandbox.Processes, sandbox.Network)
 	return nil
 }
 
@@ -2510,7 +2568,12 @@ func runtimeService(ctx context.Context, s *store.Store, p model.Project) (*app.
 		cleanup()
 		return nil, func() {}, err
 	}
-	service, err := app.New(s, planning, runner, verifier, nil)
+	sandbox, err := s.SandboxPolicy(ctx, p.ID)
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	service, err := app.New(s, planning, runner, verifier.WithSandbox(sandbox), nil)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
