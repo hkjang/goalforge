@@ -355,3 +355,89 @@ func TestTakeoverTransfersOwnership(t *testing.T) {
 		t.Fatalf("automation resumes after the item is handed back: %+v err=%v", claimed, err)
 	}
 }
+
+// AT-04: the outcome is committed and the process dies before the follow-up is
+// scheduled. The intent was written in the same transaction as the outcome, so
+// a restart turns it into work instead of leaving the goal stopped.
+func TestOutboxSurvivesACrashBeforeScheduling(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `UPDATE projects SET state='CHECKPOINTING' WHERE id=?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The run finished, the goal is not complete, and the process stops here.
+	if err = s.FinalizeCheckpoint(ctx, p.ID, goal.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingOutbox(ctx, p.ID)
+	if err != nil || len(pending) != 1 || pending[0].Kind != OutboxContinue {
+		t.Fatalf("the intent must be recorded with the outcome: %+v err=%v", pending, err)
+	}
+	jobs, err := s.ListSchedulerJobs(ctx, p.ID, true)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("nothing was scheduled before the crash: %+v err=%v", jobs, err)
+	}
+	// Restart: the entry becomes work.
+	published, err := s.PublishOutbox(ctx, "")
+	if err != nil || published != 1 {
+		t.Fatalf("published=%d err=%v", published, err)
+	}
+	jobs, err = s.ListSchedulerJobs(ctx, p.ID, true)
+	if err != nil || len(jobs) != 1 || jobs[0].Type != "CONTINUE" {
+		t.Fatalf("the follow-up must exist after restart: %+v err=%v", jobs, err)
+	}
+	// Publishing again — another worker, another restart — produces no second
+	// job and no second entry.
+	published, err = s.PublishOutbox(ctx, "")
+	if err != nil || published != 0 {
+		t.Fatalf("a second publish must be a no-op: published=%d err=%v", published, err)
+	}
+	jobs, err = s.ListSchedulerJobs(ctx, p.ID, true)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("duplicate follow-up scheduled: %+v", jobs)
+	}
+	if remaining, remainErr := s.PendingOutbox(ctx, p.ID); remainErr != nil || len(remaining) != 0 {
+		t.Fatalf("published entries must not stay pending: %+v err=%v", remaining, remainErr)
+	}
+}
+
+// A completed goal records no intent to continue: the outbox is for work that
+// still has somewhere to go.
+func TestCompletedGoalRecordsNoFollowUp(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `UPDATE projects SET state='CHECKPOINTING' WHERE id=?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinalizeCheckpoint(ctx, p.ID, goal.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.PendingOutbox(ctx, p.ID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+}

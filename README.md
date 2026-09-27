@@ -45,6 +45,7 @@ goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily
 goalforge project runtime --turn-timeout 30m --run-timeout 2h
 goalforge project concurrency --wip 2      # only items with disjoint change scopes run together
 goalforge project profile personal|team|production   # an operating posture as one set of limits
+goalforge project sandbox [--mode docker --image golang:1.23] [--memory-mb N] [--cpus N] [--network]
 goalforge project provider set --provider claude --model sonnet --reason "..."
 goalforge goal set --title T --objective O --criterion build_passed=true [--reason ...]
 goalforge goal show
@@ -191,6 +192,22 @@ Before writable AI runs, GoalForge hashes protected repository files such as
 change, or deletion blocks verification, returns the work item to the backlog,
 sets the project to `BLOCKED`, and records a policy violation. Protected-file
 approvals require an explicit request and approval and are consumed by one run.
+
+Verification gates run code the session just wrote, so they are not more
+trusted than the session. `project sandbox --mode docker --image IMG` runs them
+in a container with the workspace mounted and nothing else: no host filesystem,
+no network unless the project asks for it, no capabilities, a read-only root,
+and ceilings on memory, CPU, and processes. It runs as the invoking user rather
+than root, so the workspace stays writable without handing back the capability
+that lets root ignore file permissions. The default is still the host, because
+a sandbox that cannot run the project's toolchain is worse than none and only
+the project knows which image can.
+
+A goal that still has work records that intent in the same transaction as the
+outcome that decided it, and a worker turns those records into scheduled work
+when it starts and on every tick. A crash between committing the outcome and
+scheduling the follow-up therefore leaves the goal continuing on restart rather
+than silently stopped, and publishing twice produces one job.
 
 A run holds a lease with a generation. Taking over an expired lease, or
 cancelling, starts a new generation, and a worker carrying the old one can no
