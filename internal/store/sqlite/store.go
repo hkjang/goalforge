@@ -74,7 +74,9 @@ CREATE TABLE IF NOT EXISTS work_items (
  type TEXT NOT NULL, title TEXT NOT NULL, priority REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'BACKLOG',
  dependency TEXT NOT NULL DEFAULT '', risk TEXT NOT NULL DEFAULT 'medium', change_scope TEXT NOT NULL DEFAULT '',
  weight REAL NOT NULL DEFAULT 1 CHECK(weight > 0),
- estimated_tokens INTEGER NOT NULL DEFAULT 0 CHECK(estimated_tokens >= 0)
+ estimated_tokens INTEGER NOT NULL DEFAULT 0 CHECK(estimated_tokens >= 0),
+ objective TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
+ blocked_reason TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS verification_results (
  id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id TEXT NOT NULL REFERENCES goals(id), run_id TEXT,
@@ -255,6 +257,11 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	}
 	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{{"objective", "TEXT NOT NULL DEFAULT ''"}, {"acceptance", "TEXT NOT NULL DEFAULT ''"}, {"blocked_reason", "TEXT NOT NULL DEFAULT ''"}} {
+		if err := s.ensureColumn(ctx, "work_items", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	for _, column := range []struct{ name, definition string }{{"work_item_id", "TEXT NOT NULL DEFAULT ''"}, {"source_branch", "TEXT NOT NULL DEFAULT ''"}, {"target_ref", "TEXT NOT NULL DEFAULT ''"}, {"commit_sha", "TEXT NOT NULL DEFAULT ''"}, {"files_changed", "INTEGER NOT NULL DEFAULT 0"}} {
 		if err := s.ensureColumn(ctx, "approvals", column.name, column.definition); err != nil {
@@ -556,12 +563,12 @@ func (s *Store) CreateWorkItem(ctx context.Context, w model.WorkItem) (model.Wor
 	if w.MilestoneID != "" {
 		milestone = w.MilestoneID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Dependency, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens,objective,acceptance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Dependency, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens, w.Objective, w.Acceptance)
 	return w, err
 }
 
 func (s *Store) ListWorkItems(ctx context.Context, goalID string) ([]model.WorkItem, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens FROM work_items WHERE goal_id=? ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'BACKLOG' THEN 1 ELSE 2 END, priority DESC, id`, goalID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE goal_id=? ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'BACKLOG' THEN 1 ELSE 2 END, priority DESC, id`, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +576,7 @@ func (s *Store) ListWorkItems(ctx context.Context, goalID string) ([]model.WorkI
 	var result []model.WorkItem
 	for rows.Next() {
 		var w model.WorkItem
-		if err := rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens); err != nil {
+		if err := rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason); err != nil {
 			return nil, err
 		}
 		result = append(result, w)

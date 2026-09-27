@@ -41,7 +41,7 @@ func (s *Store) CreateScoredIdea(ctx context.Context, w model.WorkItem, score mo
 	if w.MilestoneID != "" {
 		milestone = w.MilestoneID
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Dependency, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens,objective,acceptance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Dependency, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens, w.Objective, w.Acceptance); err != nil {
 		return w, err
 	}
 	scope, approval := 0, 0
@@ -130,7 +130,7 @@ func (s *Store) ClaimNextWorkItem(ctx context.Context, goalID string) (model.Wor
 	if active > 0 {
 		return w, errors.New("implementation WIP limit reached")
 	}
-	err = tx.QueryRowContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.dependency,w.risk,w.change_scope,w.weight,w.estimated_tokens FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(i.approval_required,0)=0 AND (w.dependency='' OR EXISTS(SELECT 1 FROM work_items d WHERE d.id=w.dependency AND d.status='DONE')) ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT 1`, goalID).Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens)
+	err = tx.QueryRowContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.dependency,w.risk,w.change_scope,w.weight,w.estimated_tokens,w.objective,w.acceptance,w.blocked_reason FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(i.approval_required,0)=0 AND (w.dependency='' OR EXISTS(SELECT 1 FROM work_items d WHERE d.id=w.dependency AND d.status='DONE')) ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT 1`, goalID).Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, ErrNotFound
 	}

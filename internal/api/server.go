@@ -87,6 +87,11 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	server.mux.HandleFunc("GET /api/v1/projects/{id}", server.project)
 	server.mux.HandleFunc("GET /api/v1/approvals", server.pendingApprovals)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}", server.runDetail)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/work", server.workItems)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/work/{workID}", server.workItemDetail)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/plan", server.updateWorkPlan)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/approvals/{approvalID}", server.approvalDetail)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/actions/{action}", server.projectAction)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/approve", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/reject", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/status/{status}", server.setWorkStatus)
@@ -218,25 +223,35 @@ type RunDetail struct {
 	Verifications []store.VerificationRecord `json:"verifications"`
 	Commit        *store.RunCommit           `json:"commit,omitempty"`
 	Events        []store.EventLog           `json:"events"`
+	Diff          string                     `json:"diff,omitempty"`
+	DiffTruncated bool                       `json:"diff_truncated,omitempty"`
+	DiffError     string                     `json:"diff_error,omitempty"`
 }
+
+// diffLimitBytes caps how much of a patch is sent to a browser; a reviewer
+// needs the shape of a change, and an unbounded patch is a denial of service
+// against the dashboard rather than a better review.
+const diffLimitBytes = 200000
 
 func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
 	projectID, runID := r.PathValue("id"), r.PathValue("runID")
-	runs, err := s.store.ListRecentRuns(r.Context(), projectID, 1000)
+	project, err := s.store.ProjectByID(r.Context(), projectID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	detail := RunDetail{}
-	found := false
-	for _, run := range runs {
-		if run.ID == runID {
-			detail.Run, found = run, true
-			break
-		}
-	}
-	if !found {
+	detail.Run, err = s.store.RunByID(r.Context(), projectID, runID)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if prompt, promptErr := s.store.PromptForRun(r.Context(), runID); promptErr == nil {
@@ -264,6 +279,13 @@ func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if commit, commitErr := s.store.RunCommitByRun(r.Context(), runID); commitErr == nil {
 		detail.Commit = &commit
+		// The diff belongs next to the verification evidence: reviewing a
+		// change should not mean leaving for a terminal and a git client.
+		if diff, truncated, diffErr := gitops.CommitDiff(r.Context(), project.RepositoryPath, commit.CommitSHA, diffLimitBytes); diffErr == nil {
+			detail.Diff, detail.DiffTruncated = diff, truncated
+		} else {
+			detail.DiffError = diffErr.Error()
+		}
 	} else if !errors.Is(commitErr, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, commitErr.Error())
 		return

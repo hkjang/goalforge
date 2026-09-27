@@ -347,3 +347,22 @@ func (s *Store) CancelProjectJobs(ctx context.Context, projectID string) (int64,
 	}
 	return result.RowsAffected()
 }
+
+// RunByID looks one run up directly. The dashboard used to page the 1,000 most
+// recent runs and scan them, so a permanent link to an older run silently
+// stopped resolving once enough runs accumulated.
+func (s *Store) RunByID(ctx context.Context, projectID, runID string) (RunView, error) {
+	var run RunView
+	var started, ended string
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,COALESCE(r.work_item_id,''),r.task_type,r.state,r.started_at,COALESCE(r.ended_at,''),COALESCE(SUM(CASE WHEN l.token_type<>'cost_usd' THEN l.amount ELSE 0 END),0),COALESCE(SUM(l.cost),0) FROM runs r LEFT JOIN usage_ledger l ON l.run_id=r.id WHERE r.id=? AND r.project_id=? GROUP BY r.id`, runID, projectID).
+		Scan(&run.ID, &run.WorkItemID, &run.TaskType, &run.State, &started, &ended, &run.Tokens, &run.CostUSD)
+	if errors.Is(err, sql.ErrNoRows) {
+		return run, ErrNotFound
+	}
+	if err != nil {
+		return run, err
+	}
+	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+	run.EndedAt, _ = time.Parse(time.RFC3339Nano, ended)
+	return run, nil
+}

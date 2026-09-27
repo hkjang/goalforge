@@ -44,8 +44,14 @@ type Milestone struct {
 type WorkItem struct {
 	ID, GoalID, MilestoneID, Type, Title, Status, Dependency, Risk string
 	ChangeScope                                                    string
-	Priority, Weight                                               float64
-	EstimatedTokens                                                int64
+	// Objective states why the item exists and Acceptance states what has to
+	// be true for it to be done. A title alone is not a specification an
+	// execution session or a reviewer can work from.
+	Objective, Acceptance string
+	// BlockedReason explains a BLOCKED status in the user's terms.
+	BlockedReason    string
+	Priority, Weight float64
+	EstimatedTokens  int64
 }
 
 type IdeaScore struct {

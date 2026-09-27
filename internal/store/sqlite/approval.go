@@ -265,3 +265,22 @@ func (s *Store) RecordPolicyViolation(ctx context.Context, projectID, runID, pol
 	}
 	return tx.Commit()
 }
+
+// ApprovalByID reads one approval, scope included, so a reviewer can be shown
+// what the decision covers before making it.
+func (s *Store) ApprovalByID(ctx context.Context, projectID, approvalID string) (Approval, error) {
+	var approval Approval
+	var requested, approved string
+	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,action_type,reason,status,requested_at,COALESCE(approved_at,''),COALESCE(consumed_run_id,''),work_item_id,source_branch,target_ref,commit_sha,files_changed FROM approvals WHERE id=? AND project_id=?`, approvalID, projectID).
+		Scan(&approval.ID, &approval.ProjectID, &approval.ActionType, &approval.Reason, &approval.Status, &requested, &approved, &approval.ConsumedRunID,
+			&approval.Scope.WorkItemID, &approval.Scope.SourceBranch, &approval.Scope.TargetRef, &approval.Scope.CommitSHA, &approval.Scope.FilesChanged)
+	if errors.Is(err, sql.ErrNoRows) {
+		return approval, ErrNotFound
+	}
+	if err != nil {
+		return approval, err
+	}
+	approval.RequestedAt, _ = time.Parse(time.RFC3339Nano, requested)
+	approval.ApprovedAt, _ = time.Parse(time.RFC3339Nano, approved)
+	return approval, nil
+}
