@@ -22,7 +22,10 @@ type Project struct {
 	State             string
 	WorktreeEnabled   bool
 	AutoCommitEnabled bool
-	CreatedAt         time.Time
+	// WIPLimit is how many work items may be implemented at once. Above one
+	// it only applies to items whose declared change scopes are disjoint.
+	WIPLimit  int
+	CreatedAt time.Time
 }
 
 type Goal struct {
@@ -42,8 +45,12 @@ type Milestone struct {
 }
 
 type WorkItem struct {
-	ID, GoalID, MilestoneID, Type, Title, Status, Dependency, Risk string
-	ChangeScope                                                    string
+	ID, GoalID, MilestoneID, Type, Title, Status, Risk string
+	ChangeScope                                        string
+	// Dependencies are every work item that must be DONE first. One
+	// predecessor could not express "this needs both the schema and the
+	// client", which is the shape most real work has.
+	Dependencies []string
 	// Objective states why the item exists and Acceptance states what has to
 	// be true for it to be done. A title alone is not a specification an
 	// execution session or a reviewer can work from.

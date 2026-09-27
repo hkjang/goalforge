@@ -22,23 +22,30 @@ type WorkItemBlocker struct {
 // WorkItemDetail is everything needed to judge one work item: its
 // specification, what is holding it up, and the runs that have attempted it.
 type WorkItemDetail struct {
-	Item            model.WorkItem
-	Dependency      *model.WorkItem
-	Blockers        []WorkItemBlocker
-	Runs            []RunView
-	Commit          *RunCommit
-	Score           *model.IdeaScore
-	EstimateSource  string
-	PredictedTokens int64
+	Item           model.WorkItem
+	Dependencies   []model.WorkItem
+	Blockers       []WorkItemBlocker
+	Runs           []RunView
+	Commit         *RunCommit
+	Score          *model.IdeaScore
+	EstimateSource string
+	// Forecast is the token range recent runs support, with its confidence.
+	Forecast TokenForecast
+	// Model is the model that would run this item and why.
+	Model ModelChoice
 }
 
 func (s *Store) WorkItemByID(ctx context.Context, goalID, workID string) (model.WorkItem, error) {
 	var w model.WorkItem
-	err := s.db.QueryRowContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).
-		Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason)
+	err := s.db.QueryRowContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).
+		Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, ErrNotFound
 	}
+	if err != nil {
+		return w, err
+	}
+	w.Dependencies, err = s.dependenciesOf(ctx, s.db, workID)
 	return w, err
 }
 
@@ -52,15 +59,15 @@ func (s *Store) WorkItemDetails(ctx context.Context, projectID, goalID, workID s
 		return detail, err
 	}
 	detail.Item = item
-	if item.Dependency != "" {
-		dependency, depErr := s.WorkItemByID(ctx, goalID, item.Dependency)
+	for _, dependencyID := range item.Dependencies {
+		dependency, depErr := s.WorkItemByID(ctx, goalID, dependencyID)
 		switch {
 		case errors.Is(depErr, ErrNotFound):
-			detail.Blockers = append(detail.Blockers, WorkItemBlocker{Kind: "DEPENDENCY", Detail: fmt.Sprintf("선행 작업 %s 를 찾을 수 없습니다", item.Dependency)})
+			detail.Blockers = append(detail.Blockers, WorkItemBlocker{Kind: "DEPENDENCY", Detail: fmt.Sprintf("선행 작업 %s 를 찾을 수 없습니다", dependencyID)})
 		case depErr != nil:
 			return detail, depErr
 		default:
-			detail.Dependency = &dependency
+			detail.Dependencies = append(detail.Dependencies, dependency)
 			if dependency.Status != "DONE" {
 				detail.Blockers = append(detail.Blockers, WorkItemBlocker{Kind: "DEPENDENCY",
 					Detail: fmt.Sprintf("선행 작업 %s (%s) 가 아직 %s 입니다", dependency.ID, dependency.Title, dependency.Status)})
@@ -107,16 +114,22 @@ func (s *Store) WorkItemDetails(ctx context.Context, projectID, goalID, workID s
 	}
 	detail.EstimateSource = "manual"
 	if item.EstimatedTokens == 0 {
-		detail.EstimateSource = "predicted"
-		predicted, predictErr := s.EstimateWorkItemTokens(ctx, projectID)
-		switch {
-		case errors.Is(predictErr, ErrNotFound):
-			detail.EstimateSource = "none"
-		case predictErr != nil:
-			return detail, predictErr
-		default:
-			detail.PredictedTokens = predicted
-		}
+		detail.EstimateSource = "forecast"
+	}
+	detail.Forecast, err = s.ForecastTokens(ctx, projectID, "CONTINUE_GOAL")
+	if err != nil {
+		return detail, err
+	}
+	if detail.EstimateSource == "forecast" && detail.Forecast.Samples == 0 {
+		detail.EstimateSource = "none"
+	}
+	project, err := s.ProjectByID(ctx, projectID)
+	if err != nil {
+		return detail, err
+	}
+	detail.Model, err = s.SelectModelForTask(ctx, projectID, project.Model, project.FallbackModel, "CONTINUE_GOAL")
+	if err != nil {
+		return detail, err
 	}
 	return detail, nil
 }
@@ -173,7 +186,7 @@ func (s *Store) SearchWorkItems(ctx context.Context, goalID string, query WorkIt
 		limit = 200
 	}
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE `+
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE `+
 		strings.Join(conditions, " AND ")+` ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'APPROVED' THEN 1 WHEN 'BACKLOG' THEN 2 ELSE 3 END, priority DESC, id LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -182,7 +195,7 @@ func (s *Store) SearchWorkItems(ctx context.Context, goalID string, query WorkIt
 	var result []model.WorkItem
 	for rows.Next() {
 		var w model.WorkItem
-		if err = rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason); err != nil {
+		if err = rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason); err != nil {
 			return nil, err
 		}
 		result = append(result, w)
@@ -192,14 +205,16 @@ func (s *Store) SearchWorkItems(ctx context.Context, goalID string, query WorkIt
 
 // WorkItemPlan is the editable part of a work item's specification.
 type WorkItemPlan struct {
-	Title, Objective, Acceptance, ChangeScope, Dependency, Risk string
-	Priority, Weight                                            *float64
-	EstimatedTokens                                             *int64
+	Title, Objective, Acceptance, ChangeScope, Risk string
+	Dependencies                                    []string
+	Priority, Weight                                *float64
+	EstimatedTokens                                 *int64
 }
 
 // UpdateWorkItemPlan edits the specification without touching status, so
-// planning edits can never move an item through the lifecycle by accident. A
-// dependency is validated to exist and to not point at itself.
+// planning edits can never move an item through the lifecycle by accident.
+// Dependencies are validated to exist, to not point at the item itself, and to
+// not close a cycle.
 func (s *Store) UpdateWorkItemPlan(ctx context.Context, goalID, workID string, plan WorkItemPlan) (model.WorkItem, error) {
 	var updated model.WorkItem
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -213,19 +228,11 @@ func (s *Store) UpdateWorkItemPlan(ctx context.Context, goalID, workID string, p
 	} else if err != nil {
 		return updated, err
 	}
-	if plan.Dependency != "" {
-		if plan.Dependency == workID {
-			return updated, errors.New("a work item cannot depend on itself")
-		}
-		var dependency string
-		if err = tx.QueryRowContext(ctx, `SELECT id FROM work_items WHERE id=? AND goal_id=?`, plan.Dependency, goalID).Scan(&dependency); errors.Is(err, sql.ErrNoRows) {
-			return updated, fmt.Errorf("dependency %s is not a work item of this goal", plan.Dependency)
-		} else if err != nil {
-			return updated, err
-		}
+	if err = s.setDependencies(ctx, tx, goalID, workID, plan.Dependencies); err != nil {
+		return updated, err
 	}
-	assignments := []string{"objective=?", "acceptance=?", "change_scope=?", "dependency=?"}
-	args := []any{plan.Objective, plan.Acceptance, plan.ChangeScope, plan.Dependency}
+	assignments := []string{"objective=?", "acceptance=?", "change_scope=?"}
+	args := []any{plan.Objective, plan.Acceptance, plan.ChangeScope}
 	if strings.TrimSpace(plan.Title) != "" {
 		assignments = append(assignments, "title=?")
 		args = append(args, plan.Title)

@@ -16,15 +16,16 @@ import (
 // WorkItemDetailView is one work item with the context needed to act on it:
 // the specification, what is blocking it, and every run that attempted it.
 type WorkItemDetailView struct {
-	Item            model.WorkItem          `json:"item"`
-	Dependency      *model.WorkItem         `json:"dependency,omitempty"`
-	Blockers        []store.WorkItemBlocker `json:"blockers"`
-	Runs            []store.RunView         `json:"runs"`
-	Commit          *store.RunCommit        `json:"commit,omitempty"`
-	Score           *model.IdeaScore        `json:"score,omitempty"`
-	EstimateSource  string                  `json:"estimate_source"`
-	PredictedTokens int64                   `json:"predicted_tokens,omitempty"`
-	Actionable      bool                    `json:"actionable"`
+	Item           model.WorkItem          `json:"item"`
+	Dependencies   []model.WorkItem        `json:"dependencies"`
+	Blockers       []store.WorkItemBlocker `json:"blockers"`
+	Runs           []store.RunView         `json:"runs"`
+	Commit         *store.RunCommit        `json:"commit,omitempty"`
+	Score          *model.IdeaScore        `json:"score,omitempty"`
+	EstimateSource string                  `json:"estimate_source"`
+	Forecast       store.TokenForecast     `json:"forecast"`
+	Model          store.ModelChoice       `json:"model"`
+	Actionable     bool                    `json:"actionable"`
 }
 
 // goalForProject resolves the goal a work request applies to, preferring the
@@ -90,14 +91,17 @@ func (s *Server) workItemDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	view := WorkItemDetailView{Item: detail.Item, Dependency: detail.Dependency, Blockers: detail.Blockers,
+	view := WorkItemDetailView{Item: detail.Item, Dependencies: detail.Dependencies, Blockers: detail.Blockers,
 		Runs: detail.Runs, Commit: detail.Commit, Score: detail.Score,
-		EstimateSource: detail.EstimateSource, PredictedTokens: detail.PredictedTokens}
+		EstimateSource: detail.EstimateSource, Forecast: detail.Forecast, Model: detail.Model}
 	if view.Blockers == nil {
 		view.Blockers = []store.WorkItemBlocker{}
 	}
 	if view.Runs == nil {
 		view.Runs = []store.RunView{}
+	}
+	if view.Dependencies == nil {
+		view.Dependencies = []model.WorkItem{}
 	}
 	view.Actionable = len(view.Blockers) == 0
 	writeJSON(w, http.StatusOK, view)
@@ -110,7 +114,7 @@ type workPlanRequest struct {
 	Objective       string   `json:"objective"`
 	Acceptance      string   `json:"acceptance"`
 	ChangeScope     string   `json:"change_scope"`
-	Dependency      string   `json:"dependency"`
+	Dependencies    []string `json:"dependencies"`
 	Risk            string   `json:"risk"`
 	Priority        *float64 `json:"priority"`
 	Weight          *float64 `json:"weight"`
@@ -139,7 +143,7 @@ func (s *Server) updateWorkPlan(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := s.store.UpdateWorkItemPlan(r.Context(), goal.ID, r.PathValue("workID"), store.WorkItemPlan{
 		Title: request.Title, Objective: request.Objective, Acceptance: request.Acceptance,
-		ChangeScope: request.ChangeScope, Dependency: request.Dependency, Risk: request.Risk,
+		ChangeScope: request.ChangeScope, Dependencies: request.Dependencies, Risk: request.Risk,
 		Priority: request.Priority, Weight: request.Weight, EstimatedTokens: request.EstimatedTokens,
 	})
 	if errors.Is(err, store.ErrNotFound) {

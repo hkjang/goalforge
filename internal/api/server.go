@@ -33,6 +33,9 @@ type ProjectSummary struct {
 	Budget *store.ProjectBudget `json:"budget,omitempty"`
 	// PendingApprovals counts decisions waiting on the user for this project.
 	PendingApprovals int `json:"pending_approvals_count"`
+	// Integration reports whether the default branch has been verified since
+	// the last merge into it.
+	Integration store.IntegrationCheck `json:"integration"`
 }
 
 // ProgressScope states the baseline a progress percentage was computed over,
@@ -393,6 +396,9 @@ func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSum
 	if err == nil {
 		pending, pendingErr := s.store.ListPendingApprovals(ctx, project.ID)
 		summary.PendingApprovals, err = len(pending), pendingErr
+	}
+	if err == nil {
+		summary.Integration, err = s.store.IntegrationStatus(ctx, project.ID)
 	}
 	return summary, progress, err
 }

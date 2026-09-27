@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,7 +115,7 @@ func TestWorkItemDependencyAndWIPLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "W2", GoalID: g.ID, Type: "IMPLEMENT", Title: "second", Priority: 20, Dependency: first.ID})
+	second, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "W2", GoalID: g.ID, Type: "IMPLEMENT", Title: "second", Priority: 20, Dependencies: []string{first.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,5 +347,157 @@ func TestCriterionStatusSeparatesShortfallFromMissingEvidence(t *testing.T) {
 	}
 	if criteria[1].Status != "NO_EVIDENCE" || criteria[1].HasEvidence {
 		t.Fatalf("missing evidence: %+v", criteria[1])
+	}
+}
+
+// Work can depend on several predecessors, and a cycle is refused at the point
+// it would be created: a cycle is not a slow plan, it is one that never starts.
+func TestMultipleDependenciesAndCycleRejection(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "Goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "SCHEMA", GoalID: g.ID, Type: "IMPLEMENT", Title: "schema"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "CLIENT", GoalID: g.ID, Type: "IMPLEMENT", Title: "client"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	feature, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "FEATURE", GoalID: g.ID, Type: "IMPLEMENT", Title: "feature",
+		Dependencies: []string{schema.ID, client.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both predecessors must be DONE, not just one.
+	if err = s.SetWorkItemStatus(ctx, g.ID, feature.ID, "IN_PROGRESS"); err == nil {
+		t.Fatal("an item with two unfinished dependencies must not start")
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, schema.ID, "IN_PROGRESS"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, schema.ID, "DONE"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, feature.ID, "IN_PROGRESS"); err == nil {
+		t.Fatal("one satisfied dependency is not enough")
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, client.ID, "IN_PROGRESS"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, client.ID, "DONE"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, feature.ID, "IN_PROGRESS"); err != nil {
+		t.Fatalf("all dependencies done: %v", err)
+	}
+	// SCHEMA depending on FEATURE would close SCHEMA -> FEATURE -> SCHEMA.
+	if _, err = s.UpdateWorkItemPlan(ctx, g.ID, schema.ID, WorkItemPlan{Dependencies: []string{feature.ID}}); err == nil ||
+		!strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("a dependency cycle must be refused: %v", err)
+	}
+	stored, err := s.WorkItemByID(ctx, g.ID, feature.ID)
+	if err != nil || len(stored.Dependencies) != 2 {
+		t.Fatalf("dependencies=%v err=%v", stored.Dependencies, err)
+	}
+}
+
+// Above a WIP limit of one, only items whose declared scopes are disjoint may
+// run together: two sessions editing the same files in separate worktrees
+// produce a conflict neither of them verified.
+func TestConcurrentWorkRequiresDisjointScopes(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "Goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "API", GoalID: g.ID, Type: "IMPLEMENT", Title: "api", ChangeScope: "internal/api/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "STORE", GoalID: g.ID, Type: "IMPLEMENT", Title: "store", ChangeScope: "internal/store/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlapping, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "APIDOC", GoalID: g.ID, Type: "IMPLEMENT", Title: "api docs", ChangeScope: "internal/api/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, api.ID, "IN_PROGRESS"); err != nil {
+		t.Fatal(err)
+	}
+	// The default limit is one.
+	if err = s.SetWorkItemStatus(ctx, g.ID, store.ID, "IN_PROGRESS"); err == nil || !strings.Contains(err.Error(), "WIP limit") {
+		t.Fatalf("default WIP limit: %v", err)
+	}
+	if err = s.SetWIPLimit(ctx, p.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, overlapping.ID, "IN_PROGRESS"); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("overlapping scopes must be refused: %v", err)
+	}
+	if err = s.SetWorkItemStatus(ctx, g.ID, store.ID, "IN_PROGRESS"); err != nil {
+		t.Fatalf("disjoint scopes may run together: %v", err)
+	}
+	if err = s.SetWIPLimit(ctx, p.ID, 0); err == nil {
+		t.Fatal("a WIP limit below one must be refused")
+	}
+}
+
+// Merging leaves the default branch unverified until integration verification
+// runs: each item verified in its own worktree, never their combination.
+func TestIntegrationVerificationGap(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	status, err := s.IntegrationStatus(ctx, p.ID)
+	if err != nil || status.Pending {
+		t.Fatalf("nothing merged yet: %+v err=%v", status, err)
+	}
+	if err = s.MarkIntegrationPending(ctx, p.ID, "merged W1", "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if status, err = s.IntegrationStatus(ctx, p.ID); err != nil || !status.Pending || status.TargetSHA != "abc123" {
+		t.Fatalf("merge must leave the branch unverified: %+v err=%v", status, err)
+	}
+	// A failed integration check does not clear the flag.
+	if err = s.RecordIntegrationResult(ctx, p.ID, "abc123", "build_passed: FAILED", false); err != nil {
+		t.Fatal(err)
+	}
+	if status, err = s.IntegrationStatus(ctx, p.ID); err != nil || !status.Pending || status.LastPassed {
+		t.Fatalf("a failed integration check stays pending: %+v err=%v", status, err)
+	}
+	if err = s.RecordIntegrationResult(ctx, p.ID, "def456", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if status, err = s.IntegrationStatus(ctx, p.ID); err != nil || status.Pending || !status.LastPassed || status.LastSHA != "def456" {
+		t.Fatalf("a passing integration check clears it: %+v err=%v", status, err)
 	}
 }

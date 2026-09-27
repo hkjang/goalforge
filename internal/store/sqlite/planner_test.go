@@ -55,7 +55,7 @@ func TestClaimNextWorkItemHonorsApprovalDependencyAndWIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = s.CreateWorkItem(ctx, model.WorkItem{ID: "HIGH", GoalID: g.ID, Type: "IMPLEMENT", Title: "high", Priority: 100, Dependency: "DEP"})
+	_, _ = s.CreateWorkItem(ctx, model.WorkItem{ID: "HIGH", GoalID: g.ID, Type: "IMPLEMENT", Title: "high", Priority: 100, Dependencies: []string{"DEP"}})
 	_, _ = s.CreateWorkItem(ctx, model.WorkItem{ID: "DEP", GoalID: g.ID, Type: "IMPLEMENT", Title: "dependency", Priority: 1})
 	approved, err := s.CreateWorkItem(ctx, model.WorkItem{ID: "APPROVED", GoalID: g.ID, Type: "IMPLEMENT", Title: "approved", Priority: 20, Status: "APPROVED"})
 	if err != nil {

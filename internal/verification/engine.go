@@ -58,6 +58,35 @@ func New(s *store.Store, maxOutputBytes int) (*Engine, error) {
 	return &Engine{store: s, maxOutputBytes: maxOutputBytes}, nil
 }
 
+// Check executes gates against a working tree and measures their results
+// without recording anything. Integration verification uses it to test the
+// merged result on the default branch, which belongs to no single run: two
+// work items that each verified in their own worktree say nothing about
+// whether their combination works.
+func (e *Engine) Check(ctx context.Context, repositoryPath string, gates []Gate) ([]Result, bool, error) {
+	if len(gates) == 0 {
+		return nil, false, errors.New("at least one verification gate is required")
+	}
+	results := make([]Result, 0, len(gates))
+	passed := true
+	for _, gate := range gates {
+		result, err := e.runGate(ctx, repositoryPath, gate)
+		measure(gate, &result)
+		if result.Status != "PASSED" {
+			failure := policy.ClassifyGateFailure(result.Status, result.Output)
+			result.FailureKind, result.RepairMode, result.FailureSummary = string(failure.Kind), string(failure.Mode), failure.Summary
+		}
+		results = append(results, result)
+		if gate.Required && result.Status != "PASSED" {
+			passed = false
+		}
+		if err != nil && ctx.Err() != nil {
+			return results, false, err
+		}
+	}
+	return results, passed, nil
+}
+
 func (e *Engine) Verify(ctx context.Context, runID string, project model.Project, gates []Gate) (Report, error) {
 	report := Report{Passed: true}
 	if len(gates) == 0 {

@@ -43,11 +43,13 @@ goalforge project init --name N [--repo .] [--provider codex|claude|qwen|opencod
                        [--fallback-model M] [--worktrees] [--auto-commit]
 goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily-tokens 250000 --daily-cost-usd 15
 goalforge project runtime --turn-timeout 30m --run-timeout 2h
+goalforge project concurrency --wip 2      # only items with disjoint change scopes run together
 goalforge project provider set --provider claude --model sonnet --reason "..."
 goalforge goal set --title T --objective O --criterion build_passed=true [--reason ...]
 goalforge goal show
 goalforge milestone add --title T --weight 2
 goalforge work add --title T --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
+                   [--depends-on WORK-1,WORK-2]   # every predecessor must be DONE first
 goalforge work list | work status ID --set APPROVED
 goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100]
                           [--value-pattern 'coverage:\s+([0-9.]+)%']   # measure, do not assume
@@ -92,6 +94,8 @@ goalforge rollback --work-item WORK-1 --reason "..."
 ```sh
 goalforge status | usage | sessions | logs [--limit 50]
 goalforge report [--since 24h] [--json]    # what ran, what stopped and why, what awaits you
+goalforge models [--task-type CONTINUE_GOAL]  # model records, the next choice and why, cost forecast
+goalforge verify integration               # verify the merged result on the default branch
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
@@ -175,6 +179,22 @@ is requested. An approval therefore covers one reviewed change: it cannot be
 spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
+
+Work items may declare several predecessors, and a dependency that would close
+a cycle is refused where it is created. `project concurrency --wip N` raises
+how many items may be implemented at once, but items still only run together
+when their declared change scopes are disjoint: two sessions editing the same
+files in separate worktrees produce a conflict neither of them verified. For
+the same reason a merge marks the default branch as needing integration
+verification — each item verified inside its own worktree, and nothing has yet
+verified their combination — which `goalforge verify integration` clears.
+
+`goalforge models` compares the approved models by the verified success rate
+their runs actually achieved, not by whether the provider call returned, and
+selects between the configured model and the approved fallback only when the
+evidence is strong enough, always with the reason. Token forecasts are a range
+with a sample count and a stated confidence rather than a single number, and
+the estimate error against actual usage is tracked.
 
 A failed verification is classified before it is retried: test and build
 failures and unmet thresholds are repairable by a code fix, while a missing

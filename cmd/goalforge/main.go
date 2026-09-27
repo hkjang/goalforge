@@ -89,6 +89,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "runtime" {
 			return projectRuntime(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "concurrency" {
+			return projectConcurrency(ctx, s, args[2:])
+		}
 	case "goal":
 		if len(args) > 1 && args[1] == "set" {
 			return goalSet(ctx, s, args[2:])
@@ -119,6 +122,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 2 && args[1] == "gate" && args[2] == "add" {
 			return gateAdd(ctx, s, args[3:])
 		}
+		if len(args) > 1 && args[1] == "integration" {
+			return verifyIntegration(ctx, s, args[2:])
+		}
 	case "continue":
 		return continueGoal(ctx, s, args[1:], false)
 	case "develop":
@@ -139,6 +145,8 @@ func run(ctx context.Context, args []string) error {
 		return logsShow(ctx, s, args[1:])
 	case "report":
 		return activityReport(ctx, s, args[1:])
+	case "models":
+		return modelAdvice(ctx, s, args[1:])
 	case "cancel":
 		return cancelScheduled(ctx, s)
 	case "pause":
@@ -294,7 +302,11 @@ func mergeWork(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err = s.MarkIntegrationPending(ctx, project.ID, "병합 후 통합 검증이 필요합니다: "+*workItemID, sha); err != nil {
+		return err
+	}
 	fmt.Printf("merged: branch=%s into=%s commit=%s work=%s\n", commit.Branch, project.DefaultBranch, sha, *workItemID)
+	fmt.Println("integration verification required: run `goalforge verify integration` — each item verified in its own worktree, not merged together")
 	return nil
 }
 
@@ -406,6 +418,27 @@ func rollbackWork(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	fmt.Printf("rolled back: work=%s branch=%s target=%s\n", *workItemID, record.Branch, record.BaseCommit)
+	return nil
+}
+
+// projectConcurrency sets how many work items may be implemented at once.
+func projectConcurrency(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("project concurrency", flag.ContinueOnError)
+	wip := f.Int("wip", 1, "work items that may be implemented at once (disjoint change scopes only)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	if err = s.SetWIPLimit(ctx, p.ID, *wip); err != nil {
+		return err
+	}
+	fmt.Printf("concurrency set: wip_limit=%d\n", *wip)
+	if *wip > 1 {
+		fmt.Println("note: items only run together when their declared change scopes are disjoint, and a merged result still needs its own verification")
+	}
 	return nil
 }
 
@@ -754,6 +787,100 @@ func printRepair(plan store.RepairPlan) {
 		return
 	}
 	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
+}
+
+// verifyIntegration runs the project's gates against the default branch. Work
+// items verify inside isolated worktrees, so a merged result has never been
+// tested as a whole until this runs.
+func verifyIntegration(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("verify integration", flag.ContinueOnError)
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	gates, err := s.ListGates(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(gates) == 0 {
+		return errors.New("no verification gates configured")
+	}
+	engine, err := verification.New(s, 1024*1024)
+	if err != nil {
+		return err
+	}
+	checks := make([]verification.Gate, 0, len(gates))
+	for _, g := range gates {
+		checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
+	}
+	branchSHA, err := gitops.HeadCommit(ctx, p.RepositoryPath, p.DefaultBranch)
+	if err != nil {
+		return err
+	}
+	results, passed, err := engine.Check(ctx, p.RepositoryPath, checks)
+	if err != nil {
+		return err
+	}
+	var details []string
+	for _, result := range results {
+		fmt.Printf("%-8s %-20s exit=%d %s\n", result.Status, result.Type, result.ExitCode, result.FailureSummary)
+		if result.Required && result.Status != "PASSED" {
+			details = append(details, result.Type+": "+result.Status)
+		}
+	}
+	if err = s.RecordIntegrationResult(ctx, p.ID, branchSHA, strings.Join(details, "; "), passed); err != nil {
+		return err
+	}
+	if !passed {
+		return fmt.Errorf("integration verification failed on %s (%s)", p.DefaultBranch, strings.Join(details, "; "))
+	}
+	fmt.Printf("integration verified: %s at %s\n", p.DefaultBranch, branchSHA)
+	return nil
+}
+
+// modelAdvice shows how the approved models have actually performed and which
+// one would be chosen for the next run, with the reason.
+func modelAdvice(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("models", flag.ContinueOnError)
+	taskType := f.String("task-type", "CONTINUE_GOAL", "task type to compare (empty for all)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	stats, err := s.ModelStats(ctx, p.ID, *taskType)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%-24s %6s %8s %12s %10s\n", "model", "runs", "verified", "cost/run", "avg sec")
+	for _, stat := range stats {
+		fmt.Printf("%-24s %6d %7.0f%% %12.4f %10.0f\n", stat.Model, stat.Runs, stat.SuccessRate, stat.AverageCostPerRun, stat.AverageSeconds)
+	}
+	choice, err := s.SelectModelForTask(ctx, p.ID, p.Model, p.FallbackModel, *taskType)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nselected: %s (%s)\n  %s\n", choice.Model, choice.Source, choice.Reason)
+	forecast, err := s.ForecastTokens(ctx, p.ID, *taskType)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("forecast: %d tokens (range %d~%d, samples %d, confidence %s)\n  %s\n",
+		forecast.Expected, forecast.Low, forecast.High, forecast.Samples, forecast.Confidence, forecast.Basis)
+	accuracy, err := s.EstimateAccuracy(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if accuracy.Samples > 0 {
+		fmt.Printf("estimate error: %.0f%% mean absolute over %d runs (over %d / under %d)\n",
+			accuracy.MeanAbsolutePercent, accuracy.Samples, accuracy.Overestimates, accuracy.Underestimates)
+	}
+	return nil
 }
 
 // activityReport summarizes what ran while nobody was watching: what
@@ -1337,7 +1464,7 @@ func workAdd(ctx context.Context, s *store.Store, args []string) error {
 	title := f.String("title", "", "title")
 	kind := f.String("type", "IMPLEMENT", "type")
 	milestone := f.String("milestone", "", "milestone ID")
-	dependency := f.String("depends-on", "", "dependency work ID")
+	dependency := f.String("depends-on", "", "comma-separated work IDs that must be DONE first")
 	priority := f.Float64("priority", 0, "priority")
 	weight := f.Float64("weight", 1, "weight")
 	risk := f.String("risk", "medium", "risk")
@@ -1353,7 +1480,7 @@ func workAdd(ctx context.Context, s *store.Store, args []string) error {
 	if *estimatedTokens < 0 {
 		return errors.New("--estimated-tokens must be non-negative")
 	}
-	w, err := s.CreateWorkItem(ctx, model.WorkItem{GoalID: g.ID, MilestoneID: *milestone, Type: *kind, Title: *title, Priority: *priority, Dependency: *dependency, Risk: *risk, ChangeScope: *changeScope, Weight: *weight, EstimatedTokens: *estimatedTokens})
+	w, err := s.CreateWorkItem(ctx, model.WorkItem{GoalID: g.ID, MilestoneID: *milestone, Type: *kind, Title: *title, Priority: *priority, Dependencies: splitList(*dependency), Risk: *risk, ChangeScope: *changeScope, Weight: *weight, EstimatedTokens: *estimatedTokens})
 	if err != nil {
 		return err
 	}
@@ -1413,6 +1540,17 @@ func workStatus(ctx context.Context, s *store.Store, args []string) error {
 
 // splitLeadingArg pulls a leading positional argument off a command line so the
 // remaining flags parse normally.
+// splitList parses a comma-separated flag value, ignoring empty entries.
+func splitList(value string) []string {
+	var result []string
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
 func splitLeadingArg(args []string) (string, []string) {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		return args[0], args[1:]

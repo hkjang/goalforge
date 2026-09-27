@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS work_items (
  objective TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
  blocked_reason TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS integration_checks (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), pending INTEGER NOT NULL DEFAULT 0,
+ reason TEXT NOT NULL DEFAULT '', target_sha TEXT NOT NULL DEFAULT '',
+ last_passed INTEGER NOT NULL DEFAULT 0, last_sha TEXT NOT NULL DEFAULT '',
+ last_details TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS work_item_dependencies (
+ work_item_id TEXT NOT NULL REFERENCES work_items(id), depends_on_id TEXT NOT NULL REFERENCES work_items(id),
+ PRIMARY KEY(work_item_id,depends_on_id)
+);
 CREATE TABLE IF NOT EXISTS verification_results (
  id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id TEXT NOT NULL REFERENCES goals(id), run_id TEXT,
  check_type TEXT NOT NULL, status TEXT NOT NULL, actual_value TEXT NOT NULL DEFAULT '',
@@ -262,6 +272,9 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "projects", "fallback_model", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "projects", "wip_limit", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -284,6 +297,11 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 		if err := s.ensureColumn(ctx, "project_budgets", column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	// Single-predecessor rows predate the dependency table; carry them over
+	// so existing plans keep their ordering.
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO work_item_dependencies(work_item_id,depends_on_id) SELECT id,dependency FROM work_items WHERE dependency<>'' AND EXISTS(SELECT 1 FROM work_items d WHERE d.id=work_items.dependency)`); err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO provider_session_history(project_id,provider,session_id,status,last_run_id,created_at,updated_at) SELECT project_id,provider,session_id,status,last_run_id,updated_at,updated_at FROM provider_sessions`); err != nil {
 		return err
@@ -349,8 +367,11 @@ func (s *Store) CreateProject(ctx context.Context, p model.Project) error {
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.Name, p.RepositoryPath, p.DefaultBranch, p.Provider, p.Model, p.FallbackModel, p.State, p.WorktreeEnabled, p.AutoCommitEnabled, p.CreatedAt.Format(time.RFC3339Nano))
+	if p.WIPLimit <= 0 {
+		p.WIPLimit = 1
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,wip_limit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.RepositoryPath, p.DefaultBranch, p.Provider, p.Model, p.FallbackModel, p.State, p.WorktreeEnabled, p.AutoCommitEnabled, p.WIPLimit, p.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -358,8 +379,8 @@ func (s *Store) ProjectByPath(ctx context.Context, path string) (model.Project, 
 	path, _ = filepath.Abs(path)
 	var p model.Project
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects WHERE repository_path=?`, path).
-		Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,COALESCE(wip_limit,1),created_at FROM projects WHERE repository_path=?`, path).
+		Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &p.WIPLimit, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -372,7 +393,7 @@ func (s *Store) ProjectByPath(ctx context.Context, path string) (model.Project, 
 func (s *Store) ProjectByID(ctx context.Context, id string) (model.Project, error) {
 	var p model.Project
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,COALESCE(wip_limit,1),created_at FROM projects WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &p.WIPLimit, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -383,7 +404,7 @@ func (s *Store) ProjectByID(ctx context.Context, id string) (model.Project, erro
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects ORDER BY created_at,id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,COALESCE(wip_limit,1),created_at FROM projects ORDER BY created_at,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +413,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 	for rows.Next() {
 		var project model.Project
 		var created string
-		if err = rows.Scan(&project.ID, &project.Name, &project.RepositoryPath, &project.DefaultBranch, &project.Provider, &project.Model, &project.FallbackModel, &project.State, &project.WorktreeEnabled, &project.AutoCommitEnabled, &created); err != nil {
+		if err = rows.Scan(&project.ID, &project.Name, &project.RepositoryPath, &project.DefaultBranch, &project.Provider, &project.Model, &project.FallbackModel, &project.State, &project.WorktreeEnabled, &project.AutoCommitEnabled, &project.WIPLimit, &created); err != nil {
 			return nil, err
 		}
 		project.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -575,12 +596,22 @@ func (s *Store) CreateWorkItem(ctx context.Context, w model.WorkItem) (model.Wor
 	if w.MilestoneID != "" {
 		milestone = w.MilestoneID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens,objective,acceptance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Dependency, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens, w.Objective, w.Acceptance)
-	return w, err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return w, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens, w.Objective, w.Acceptance); err != nil {
+		return w, err
+	}
+	if err = s.setDependencies(ctx, tx, w.GoalID, w.ID, w.Dependencies); err != nil {
+		return w, err
+	}
+	return w, tx.Commit()
 }
 
 func (s *Store) ListWorkItems(ctx context.Context, goalID string) ([]model.WorkItem, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE goal_id=? ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'BACKLOG' THEN 1 ELSE 2 END, priority DESC, id`, goalID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE goal_id=? ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'BACKLOG' THEN 1 ELSE 2 END, priority DESC, id`, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -588,12 +619,22 @@ func (s *Store) ListWorkItems(ctx context.Context, goalID string) ([]model.WorkI
 	var result []model.WorkItem
 	for rows.Next() {
 		var w model.WorkItem
-		if err := rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason); err != nil {
+		if err := rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason); err != nil {
 			return nil, err
 		}
 		result = append(result, w)
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	dependencies, err := s.dependencyRows(ctx, goalID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range result {
+		result[i].Dependencies = dependencies[result[i].ID]
+	}
+	return result, nil
 }
 
 func (s *Store) SetWorkItemStatus(ctx context.Context, goalID, workID, status string) error {
@@ -606,28 +647,22 @@ func (s *Store) SetWorkItemStatus(ctx context.Context, goalID, workID, status st
 		return err
 	}
 	defer tx.Rollback()
-	var dependency string
-	if err := tx.QueryRowContext(ctx, `SELECT dependency FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).Scan(&dependency); errors.Is(err, sql.ErrNoRows) {
+	var exists string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
 	}
 	if status == "IN_PROGRESS" {
-		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items WHERE goal_id=? AND status='IN_PROGRESS' AND id<>?`, goalID, workID).Scan(&active); err != nil {
+		if err := s.checkConcurrency(ctx, tx, goalID, workID); err != nil {
 			return err
 		}
-		if active > 0 {
-			return errors.New("implementation WIP limit reached: another item is in progress")
+		unmet, unmetErr := s.unmetDependencies(ctx, tx, workID)
+		if unmetErr != nil {
+			return unmetErr
 		}
-		if dependency != "" {
-			var dependencyStatus string
-			if err := tx.QueryRowContext(ctx, `SELECT status FROM work_items WHERE id=? AND goal_id=?`, dependency, goalID).Scan(&dependencyStatus); err != nil {
-				return fmt.Errorf("dependency %s is unavailable: %w", dependency, err)
-			}
-			if dependencyStatus != "DONE" {
-				return fmt.Errorf("dependency %s is not done", dependency)
-			}
+		if len(unmet) > 0 {
+			return fmt.Errorf("dependencies not done: %s", strings.Join(unmet, ", "))
 		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET status=? WHERE id=? AND goal_id=?`, status, workID, goalID)

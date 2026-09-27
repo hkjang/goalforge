@@ -168,6 +168,7 @@ type policyRequest struct {
 	DailyCostLimitUSD *float64 `json:"daily_cost_limit_usd"`
 	TurnTimeout       string   `json:"turn_timeout"`
 	RunTimeout        string   `json:"run_timeout"`
+	WIPLimit          *int     `json:"wip_limit"`
 }
 
 // setPolicy configures the budget and timeouts that bound every later run.
@@ -207,6 +208,10 @@ func (s *Server) setPolicy(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "예산 한도는 음수일 수 없습니다")
 		return
 	}
+	if request.WIPLimit != nil && (*request.WIPLimit < 1 || *request.WIPLimit > 8) {
+		writeError(w, http.StatusBadRequest, "동시 구현 한도는 1에서 8 사이여야 합니다")
+		return
+	}
 	setTimeouts := request.TurnTimeout != "" || request.RunTimeout != ""
 	var policy store.RuntimePolicy
 	if setTimeouts {
@@ -237,6 +242,12 @@ func (s *Server) setPolicy(w http.ResponseWriter, r *http.Request) {
 	if setTimeouts {
 		if err = s.store.SetRuntimePolicy(r.Context(), projectID, policy); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if request.WIPLimit != nil {
+		if err = s.store.SetWIPLimit(r.Context(), projectID, *request.WIPLimit); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}

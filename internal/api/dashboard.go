@@ -151,6 +151,8 @@ function attentionCards(projects,inbox){var items=[];
 if(p.State==='REPAIR_REQUIRED')items.push({level:'bad',title:esc(p.Name)+' · 복구 필요',cause:'마지막 실행이 검증을 통과하지 못했습니다',effect:'작업이 백로그로 돌아가 목표가 진행되지 않습니다',action:link});
 else if(p.State==='BLOCKED')items.push({level:'bad',title:esc(p.Name)+' · 차단됨',cause:'정책 위반 또는 승인 필요로 실행이 멈췄습니다',effect:'사람이 판단하기 전까지 자동 실행이 재개되지 않습니다',action:link});
 else if(p.State==='QUOTA_BLOCKED')items.push({level:'warn',title:esc(p.Name)+' · 계정 한도 대기',cause:'제공자 한도에 도달했습니다',effect:'한도 리셋까지 실행이 지연됩니다',action:link});
+var integration=x.integration||{};
+if(integration.Pending)items.push({level:'warn',title:esc(p.Name)+' · 통합 검증 필요',cause:esc(integration.Reason||'병합 이후 기본 브랜치가 검증되지 않았습니다'),effect:'각 작업은 격리된 worktree 에서만 검증되어 병합 결과는 아직 확인되지 않았습니다',action:'<code>goalforge verify integration</code>'});
 var b=x.budget;if(b){var ratios=[];if(b.TokenLimit>0)ratios.push(['토큰',b.TokensUsed/b.TokenLimit*100]);if(b.CostLimitUSD>0)ratios.push(['비용',b.CostUsedUSD/b.CostLimitUSD*100]);ratios.forEach(function(r){if(r[1]>=80)items.push({level:r[1]>=97?'bad':'warn',title:esc(p.Name)+' · '+r[0]+' 예산 '+r[1].toFixed(0)+'%',cause:r[0]+' 한도의 '+r[1].toFixed(0)+'% 를 사용했습니다',effect:r[1]>=97?'한도 초과로 다음 실행이 거부될 수 있습니다':'남은 예산으로 큰 작업을 시작하기 어렵습니다',action:link})})}});
 if(!items.length)return'';var html='<section class="panel"><h2>조치가 필요한 항목 · '+items.length+'건</h2>';
 items.forEach(function(i){html+='<div class="attn'+(i.level==='warn'?' warn':'')+'"><strong>'+i.title+'</strong><div class="sub" style="margin-top:4px">원인: '+i.cause+'</div><div class="sub">영향: '+i.effect+'</div><div style="margin-top:6px">'+i.action+'</div></div>'});
@@ -336,7 +338,7 @@ html+='<section class="panel"><h2>작업 명세</h2><div class="grid2">';
 html+='<div><label for="w-objective">목적 — 왜 이 작업이 필요한가</label><textarea id="w-objective">'+esc(w.Objective||'')+'</textarea>';
 html+='<label for="w-acceptance">완료 기준 — 무엇이 참이어야 끝인가</label><textarea id="w-acceptance">'+esc(w.Acceptance||'')+'</textarea></div>';
 html+='<div><label for="w-scope">변경 범위 (glob)</label><input id="w-scope" value="'+esc(w.ChangeScope||'')+'" style="width:100%">';
-html+='<label for="w-dep">선행 작업 ID</label><input id="w-dep" value="'+esc(w.Dependency||'')+'" style="width:100%">';
+html+='<label for="w-dep">선행 작업 ID (쉼표로 구분)</label><input id="w-dep" value="'+esc((w.Dependencies||[]).join(', '))+'" style="width:100%">';
 html+='<label for="w-risk">위험도</label><select id="w-risk"><option value="low"'+(w.Risk==='low'?' selected':'')+'>low</option><option value="medium"'+(w.Risk==='medium'?' selected':'')+'>medium</option><option value="high"'+(w.Risk==='high'?' selected':'')+'>high</option></select>';
 html+='<label for="w-priority">우선순위 / 가중치 / 예상 토큰</label><div style="display:flex;gap:6px"><input id="w-priority" type="number" step="1" value="'+(w.Priority||0)+'" style="width:33%"><input id="w-weight" type="number" step="0.5" min="0.5" value="'+(w.Weight||1)+'" style="width:33%"><input id="w-tokens" type="number" step="1000" min="0" value="'+(w.EstimatedTokens||0)+'" style="width:33%"></div>';
 html+='<div class="why">'+estimateSourceNote(d)+'</div></div></div>';
@@ -345,15 +347,23 @@ if(w.Status==='BACKLOG')html+='<button onclick="decideWork(\''+esc(projectID)+'\
 if(w.Status==='BACKLOG'||w.Status==='APPROVED')html+='<button onclick="decideWork(\''+esc(projectID)+'\',\''+esc(workID)+'\',\'BLOCKED\',\'작업 보류\')">보류</button>';
 if(w.Status!=='DONE'&&w.Status!=='DISCARDED')html+='<button onclick="decideWork(\''+esc(projectID)+'\',\''+esc(workID)+'\',\'DISCARDED\',\'작업 폐기 — 목표 기준선에서 제외됩니다\')">폐기</button>';
 html+='</div><div class="why">명세 저장은 상태를 바꾸지 않습니다. 상태 변경은 위의 승인·보류·폐기 버튼으로만 이루어집니다.</div></section>';
-if(d.dependency)html+='<section class="panel"><h2>선행 작업</h2><div>'+workLink(projectID,d.dependency)+' <span class="badge">'+esc(workLabel(d.dependency.Status))+'</span></div></section>';
+if((d.dependencies||[]).length){html+='<section class="panel"><h2>선행 작업 '+d.dependencies.length+'건</h2><table>';d.dependencies.forEach(function(dep){html+='<tr><td>'+workLink(projectID,dep)+'</td><td><span class="badge'+(dep.Status==='DONE'?' met':' unmet')+'">'+esc(workLabel(dep.Status))+'</span></td></tr>'});html+='</table></section>'}
+html+=modelNote(d);
 if(d.score){var sc=d.score;html+='<section class="panel"><h2>선정 점수</h2><div class="sub">우선순위 점수 '+sc.PriorityScore.toFixed(1)+' · 목표 기여 '+sc.GoalContribution.toFixed(0)+' · 사용자 가치 '+sc.UserValue.toFixed(0)+' · 운영 필요 '+sc.OperationalNeed.toFixed(0)+' · 실현 가능성 '+sc.Feasibility.toFixed(0)+' · 위험 감소 '+sc.RiskReduction.toFixed(0)+' · 난이도 '+sc.Difficulty.toFixed(0)+(sc.ScopeExpansion?' · 범위 확장 제안':'')+'</div></section>'}
 if(d.commit)html+='<section class="panel"><h2>검증된 커밋</h2><div class="sub mono">'+shortSHA(d.commit.CommitSHA)+' · '+esc(d.commit.Branch)+' · '+d.commit.FilesCommitted+'개 파일</div><div class="actions"><a class="plain" href="#/project/'+encodeURIComponent(projectID)+'/run/'+encodeURIComponent(d.commit.RunID)+'">변경 검토 →</a></div></section>';
 if(d.runs&&d.runs.length){html+='<section class="panel"><h2>실행 이력 · '+d.runs.length+'회</h2><table><tr><th>실행</th><th>유형</th><th>토큰</th><th>비용</th><th>상태</th><th>시각</th></tr>';d.runs.forEach(function(r){html+='<tr><td class="mono"><a class="plain" href="#/project/'+encodeURIComponent(projectID)+'/run/'+encodeURIComponent(r.ID)+'">'+esc(r.ID)+'</a></td><td>'+esc(r.TaskType||'-')+'</td><td>'+fmtTokens(r.Tokens)+'</td><td>'+fmtUSD(r.CostUSD)+'</td><td>'+stateChip(r.State)+'</td><td class="sub">'+fmtTime(r.StartedAt)+'</td></tr>'});html+='</table></section>'}
 else html+='<section class="panel"><h2>실행 이력</h2><div class="sub">아직 실행된 적이 없습니다.</div></section>';
 view.innerHTML=html}
 function blockerLabel(kind){var m={DEPENDENCY:'선행 작업 미완료',WIP_LIMIT:'동시 구현 제한',APPROVAL:'승인 필요',STATUS:'현재 상태'};return m[kind]||kind}
-function estimateSourceNote(d){if(d.estimate_source==='manual')return'예상 토큰은 직접 입력된 값입니다.';if(d.estimate_source==='predicted')return'예상 토큰이 0 이라 최근 실행 평균으로 '+fmtTokens(d.predicted_tokens)+' 로 추정됩니다.';return'예상 토큰이 없고 추정할 실행 이력도 없습니다.'}
-async function saveWorkPlan(projectID,workID){var body={objective:document.querySelector('#w-objective').value,acceptance:document.querySelector('#w-acceptance').value,change_scope:document.querySelector('#w-scope').value,dependency:document.querySelector('#w-dep').value.trim(),risk:document.querySelector('#w-risk').value,priority:parseFloat(document.querySelector('#w-priority').value)||0,weight:parseFloat(document.querySelector('#w-weight').value)||1,estimated_tokens:parseInt(document.querySelector('#w-tokens').value,10)||0};
+function confidenceLabel(c){var m={high:'높음',medium:'보통',low:'낮음',none:'없음'};return m[c]||c}
+function estimateSourceNote(d){var f=d.forecast||{};
+var forecast=f.Samples?'실행 기록 예측 '+fmtTokens(f.Expected)+' (범위 '+fmtTokens(f.Low)+'~'+fmtTokens(f.High)+', 표본 '+f.Samples+'건, 신뢰도 '+confidenceLabel(f.Confidence)+')':'예측할 실행 기록이 없습니다';
+if(d.estimate_source==='manual')return'예상 토큰은 직접 입력된 값입니다. '+forecast+'.';
+return'예상 토큰이 0 이라 기록으로 추정합니다: '+forecast+'.'}
+function modelNote(d){var m=d.model||{};if(!m.Reason)return'';
+return'<section class="panel"><h2>실행 모델</h2><div><strong>'+esc(m.Model||'제공자 기본값')+'</strong> <span class="badge">'+esc(m.Source==='history'?'기록 기반 선택':'설정값')+'</span></div><div class="sub" style="margin-top:4px">'+esc(m.Reason)+'</div>'+
+((m.Considered||[]).length?'<table style="margin-top:8px"><tr><th>모델</th><th>실행</th><th>검증 통과율</th><th>평균 비용</th><th>평균 소요</th></tr>'+m.Considered.map(function(c){return'<tr><td class="mono">'+esc(c.Model)+'</td><td>'+c.Runs+'</td><td>'+c.SuccessRate.toFixed(0)+'%</td><td>'+fmtUSD(c.AverageCostPerRun)+'</td><td>'+c.AverageSeconds.toFixed(0)+'초</td></tr>'}).join('')+'</table>':'')+'</section>'}
+async function saveWorkPlan(projectID,workID){var body={objective:document.querySelector('#w-objective').value,acceptance:document.querySelector('#w-acceptance').value,change_scope:document.querySelector('#w-scope').value,dependencies:document.querySelector('#w-dep').value.split(',').map(function(v){return v.trim()}).filter(Boolean),risk:document.querySelector('#w-risk').value,priority:parseFloat(document.querySelector('#w-priority').value)||0,weight:parseFloat(document.querySelector('#w-weight').value)||1,estimated_tokens:parseInt(document.querySelector('#w-tokens').value,10)||0};
 try{await api('/api/v1/projects/'+encodeURIComponent(projectID)+'/work/'+encodeURIComponent(workID)+'/plan',{method:'POST',body:JSON.stringify(body)});route()}catch(e){alert(e.message)}}
 // renderApproval is the reviewed decision: the exact commit, the files, the
 // gates that decided it, the destination, and the way back.

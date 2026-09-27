@@ -87,7 +87,7 @@ func TestWorkItemDetailAndPlanEditing(t *testing.T) {
 		t.Fatal(err)
 	}
 	response := mutate(t, server, http.MethodPost, "/api/v1/projects/P-API/work/W-API/plan",
-		`{"objective":"세션 저장소를 교체한다","acceptance":"재시작 후 세션이 살아있다","dependency":"W-DEP","estimated_tokens":12000,"risk":"high"}`)
+		`{"objective":"세션 저장소를 교체한다","acceptance":"재시작 후 세션이 살아있다","dependencies":["W-DEP"],"estimated_tokens":12000,"risk":"high"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("plan update status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -109,10 +109,10 @@ func TestWorkItemDetailAndPlanEditing(t *testing.T) {
 		t.Fatalf("estimate source=%s", detail.EstimateSource)
 	}
 	// A dependency has to exist, and an item cannot depend on itself.
-	if response := mutate(t, server, http.MethodPost, "/api/v1/projects/P-API/work/W-API/plan", `{"dependency":"W-API"}`); response.Code != http.StatusBadRequest {
+	if response := mutate(t, server, http.MethodPost, "/api/v1/projects/P-API/work/W-API/plan", `{"dependencies":["W-API"]}`); response.Code != http.StatusBadRequest {
 		t.Fatalf("self dependency must be rejected: %d", response.Code)
 	}
-	if response := mutate(t, server, http.MethodPost, "/api/v1/projects/P-API/work/W-API/plan", `{"dependency":"W-GHOST"}`); response.Code != http.StatusBadRequest {
+	if response := mutate(t, server, http.MethodPost, "/api/v1/projects/P-API/work/W-API/plan", `{"dependencies":["W-GHOST"]}`); response.Code != http.StatusBadRequest {
 		t.Fatalf("unknown dependency must be rejected: %d", response.Code)
 	}
 }
