@@ -43,11 +43,13 @@ func TestApprovalInboxAndDecisions(t *testing.T) {
 	server, db := apiFixture(t, "")
 	defer db.Close()
 	ctx := context.Background()
-	first, err := db.RequestApproval(ctx, "P-API", store.ApprovalMergeBranch, "merge test")
+	mergeScope := store.ApprovalScope{WorkItemID: "W1", SourceBranch: "goalforge/W1", TargetRef: "main", CommitSHA: "abc123def456789", FilesChanged: 2}
+	publishScope := store.ApprovalScope{WorkItemID: "W1", SourceBranch: "goalforge/W1", TargetRef: "origin", CommitSHA: "abc123def456789", FilesChanged: 2}
+	first, err := db.RequestScopedApproval(ctx, "P-API", store.ApprovalMergeBranch, "merge test", mergeScope)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := db.RequestApproval(ctx, "P-API", store.ApprovalPublishBranch, "publish test")
+	second, err := db.RequestScopedApproval(ctx, "P-API", store.ApprovalPublishBranch, "publish test", publishScope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +64,10 @@ func TestApprovalInboxAndDecisions(t *testing.T) {
 	}
 	if len(inbox.Approvals) != 2 || inbox.Approvals[0].ProjectName != "dashboard" {
 		t.Fatalf("inbox=%+v", inbox)
+	}
+	// The inbox carries what is being approved, not just the action type.
+	if inbox.Approvals[0].Scope.CommitSHA != "abc123def456789" || inbox.Approvals[0].Scope.WorkItemID != "W1" {
+		t.Fatalf("scope missing from inbox: %+v", inbox.Approvals[0])
 	}
 	// Mutations without the CSRF header are rejected even without a token.
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/projects/P-API/approvals/"+first.ID+"/approve", nil)
@@ -87,11 +93,11 @@ func TestApprovalInboxAndDecisions(t *testing.T) {
 	if response := post("/api/v1/projects/P-API/approvals/" + first.ID + "/approve"); response.Code != http.StatusConflict {
 		t.Fatalf("second approve must conflict: %d", response.Code)
 	}
-	approved, err := db.ConsumeApproval(ctx, "P-API", store.ApprovalMergeBranch, "run-1")
+	approved, err := db.ConsumeScopedApproval(ctx, "P-API", store.ApprovalMergeBranch, "run-1", mergeScope)
 	if err != nil || !approved {
 		t.Fatalf("approved=%t err=%v", approved, err)
 	}
-	rejected, err := db.ConsumeApproval(ctx, "P-API", store.ApprovalPublishBranch, "run-2")
+	rejected, err := db.ConsumeScopedApproval(ctx, "P-API", store.ApprovalPublishBranch, "run-2", publishScope)
 	if err != nil || rejected {
 		t.Fatalf("rejected approval must not be consumable: %t err=%v", rejected, err)
 	}

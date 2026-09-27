@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,12 +25,21 @@ type Gate struct {
 	Timeout      time.Duration
 	Required     bool
 	SuccessValue string
+	// ValuePattern is a regular expression with one capture group that
+	// extracts the measured value from the gate's output. Without it a
+	// passing gate can only record its own configured SuccessValue, which
+	// proves the command exited zero but never proves a number such as
+	// coverage or latency.
+	ValuePattern string
 }
 type Result struct {
 	Type, Status, Output string
-	ExitCode             int
-	Duration             time.Duration
-	Required             bool
+	// FailureKind, RepairMode, and FailureSummary explain a failure instead of
+	// leaving the caller to read the output and guess.
+	FailureKind, RepairMode, FailureSummary string
+	ExitCode                                int
+	Duration                                time.Duration
+	Required                                bool
 }
 type Report struct {
 	Results               []Result
@@ -47,6 +58,35 @@ func New(s *store.Store, maxOutputBytes int) (*Engine, error) {
 	return &Engine{store: s, maxOutputBytes: maxOutputBytes}, nil
 }
 
+// Check executes gates against a working tree and measures their results
+// without recording anything. Integration verification uses it to test the
+// merged result on the default branch, which belongs to no single run: two
+// work items that each verified in their own worktree say nothing about
+// whether their combination works.
+func (e *Engine) Check(ctx context.Context, repositoryPath string, gates []Gate) ([]Result, bool, error) {
+	if len(gates) == 0 {
+		return nil, false, errors.New("at least one verification gate is required")
+	}
+	results := make([]Result, 0, len(gates))
+	passed := true
+	for _, gate := range gates {
+		result, err := e.runGate(ctx, repositoryPath, gate)
+		measure(gate, &result)
+		if result.Status != "PASSED" {
+			failure := policy.ClassifyGateFailure(result.Status, result.Output)
+			result.FailureKind, result.RepairMode, result.FailureSummary = string(failure.Kind), string(failure.Mode), failure.Summary
+		}
+		results = append(results, result)
+		if gate.Required && result.Status != "PASSED" {
+			passed = false
+		}
+		if err != nil && ctx.Err() != nil {
+			return results, false, err
+		}
+	}
+	return results, passed, nil
+}
+
 func (e *Engine) Verify(ctx context.Context, runID string, project model.Project, gates []Gate) (Report, error) {
 	report := Report{Passed: true}
 	if len(gates) == 0 {
@@ -63,15 +103,17 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 	}
 	for _, gate := range gates {
 		result, err := e.runGate(ctx, project.RepositoryPath, gate)
-		report.Results = append(report.Results, result)
-		actual := "false"
-		if result.Status == "PASSED" {
-			actual = gate.SuccessValue
-			if actual == "" {
-				actual = "true"
-			}
+		actual := measure(gate, &result)
+		record := store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual,
+			Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode,
+			Duration: result.Duration, Required: gate.Required}
+		if result.Status != "PASSED" {
+			failure := policy.ClassifyGateFailure(result.Status, result.Output)
+			record.FailureKind, record.RepairMode = string(failure.Kind), string(failure.Mode)
+			result.FailureKind, result.RepairMode, result.FailureSummary = string(failure.Kind), string(failure.Mode), failure.Summary
 		}
-		recordErr := e.store.RecordRunVerification(ctx, store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual, Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration, Required: gate.Required})
+		report.Results = append(report.Results, result)
+		recordErr := e.store.RecordRunVerification(ctx, record)
 		if recordErr != nil {
 			return report, recordErr
 		}
@@ -97,6 +139,55 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 		return report, err
 	}
 	return report, nil
+}
+
+// measure derives the value recorded as evidence for a gate. A gate without
+// a value pattern keeps its boolean meaning. A gate with one must produce a
+// measurement that clears SuccessValue: a command that exits zero while
+// reporting 71% coverage against an 85% threshold is a failure, and an
+// unparseable output is not evidence, so neither is allowed to pass.
+func measure(gate Gate, result *Result) string {
+	if result.Status != "PASSED" {
+		return "false"
+	}
+	if gate.ValuePattern == "" {
+		if gate.SuccessValue == "" {
+			return "true"
+		}
+		return gate.SuccessValue
+	}
+	pattern, err := regexp.Compile(gate.ValuePattern)
+	if err != nil {
+		result.Status = "FAILED"
+		result.Output += fmt.Sprintf("\n[gate %s: value pattern is invalid: %v]", gate.Type, err)
+		return ""
+	}
+	match := pattern.FindStringSubmatch(result.Output)
+	if len(match) < 2 {
+		result.Status = "FAILED"
+		result.Output += fmt.Sprintf("\n[gate %s: value pattern matched no measurement in the output]", gate.Type)
+		return ""
+	}
+	actual := strings.TrimSpace(match[1])
+	threshold, thresholdErr := strconv.ParseFloat(gate.SuccessValue, 64)
+	if thresholdErr == nil {
+		measured, measuredErr := strconv.ParseFloat(actual, 64)
+		if measuredErr != nil {
+			result.Status = "FAILED"
+			result.Output += fmt.Sprintf("\n[gate %s: measured %q is not a number]", gate.Type, actual)
+			return actual
+		}
+		if measured < threshold {
+			result.Status = "FAILED"
+			result.Output += fmt.Sprintf("\n[gate %s: measured %s is below the threshold %s]", gate.Type, actual, gate.SuccessValue)
+		}
+		return actual
+	}
+	if gate.SuccessValue != "" && actual != gate.SuccessValue {
+		result.Status = "FAILED"
+		result.Output += fmt.Sprintf("\n[gate %s: measured %q does not equal the required %q]", gate.Type, actual, gate.SuccessValue)
+	}
+	return actual
 }
 
 func (e *Engine) runGate(parent context.Context, workDir string, gate Gate) (Result, error) {

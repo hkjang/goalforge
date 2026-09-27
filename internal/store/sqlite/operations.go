@@ -66,27 +66,65 @@ func (s *Store) ProjectMetrics(ctx context.Context, projectID string) (ProjectMe
 }
 
 // CriterionStatus reports whether a completion criterion is satisfied by the
-// latest verification evidence.
+// latest verification evidence. Status separates "measured and short of the
+// threshold" (UNMET) from "never measured" (NO_EVIDENCE); the two need
+// different actions from the user, and collapsing both into a false boolean
+// hid the difference.
 type CriterionStatus struct {
 	Type, ExpectedValue, ActualValue string
-	Satisfied                        bool
+	// Status is MET, UNMET, STALE, or NO_EVIDENCE.
+	Status string
+	// StaleReason explains why evidence that once passed no longer counts.
+	StaleReason string
+	// CheckStatus is the raw gate outcome behind the evidence (PASSED,
+	// FAILED, TIMEOUT) and is empty when there is no evidence.
+	CheckStatus string
+	RunID       string
+	MeasuredAt  time.Time
+	HasEvidence bool
+	Satisfied   bool
 }
 
 func (s *Store) CriteriaStatus(ctx context.Context, goal model.Goal) ([]CriterionStatus, error) {
 	result := make([]CriterionStatus, 0, len(goal.Criteria))
 	for _, criterion := range goal.Criteria {
-		entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue}
-		var actual, status string
-		err := s.db.QueryRowContext(ctx, `SELECT actual_value,status FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goal.ID, criterion.Type).Scan(&actual, &status)
-		if err == nil {
-			entry.ActualValue = actual
-			entry.Satisfied = status == "PASSED" && criterionMet(criterion.ExpectedValue, actual)
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		entry, err := s.criterionStatus(ctx, goal.ID, criterion)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, entry)
 	}
 	return result, nil
+}
+
+func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion model.Criterion) (CriterionStatus, error) {
+	entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue, Status: "NO_EVIDENCE"}
+	var measured string
+	var stale int
+	err := s.db.QueryRowContext(ctx, `SELECT actual_value,status,COALESCE(run_id,''),created_at,COALESCE(stale,0),COALESCE(stale_reason,'') FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goalID, criterion.Type).
+		Scan(&entry.ActualValue, &entry.CheckStatus, &entry.RunID, &measured, &stale, &entry.StaleReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return entry, nil
+	}
+	if err != nil {
+		return entry, err
+	}
+	entry.HasEvidence = true
+	entry.MeasuredAt, _ = time.Parse(time.RFC3339Nano, measured)
+	// Stale evidence is not current evidence: the tree or the check it was
+	// measured against has changed since, so it cannot satisfy the criterion
+	// until it has been re-run.
+	if stale == 1 {
+		entry.Status, entry.Satisfied = "STALE", false
+		return entry, nil
+	}
+	entry.Satisfied = entry.CheckStatus == "PASSED" && criterionMet(criterion.ExpectedValue, entry.ActualValue)
+	if entry.Satisfied {
+		entry.Status = "MET"
+	} else {
+		entry.Status = "UNMET"
+	}
+	return entry, nil
 }
 
 // RunView is a run summarized for operational displays.
@@ -318,4 +356,38 @@ func (s *Store) CancelProjectJobs(ctx context.Context, projectID string) (int64,
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// RunByID looks one run up directly. The dashboard used to page the 1,000 most
+// recent runs and scan them, so a permanent link to an older run silently
+// stopped resolving once enough runs accumulated.
+func (s *Store) RunByID(ctx context.Context, projectID, runID string) (RunView, error) {
+	var run RunView
+	var started, ended string
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,COALESCE(r.work_item_id,''),r.task_type,r.state,r.started_at,COALESCE(r.ended_at,''),COALESCE(SUM(CASE WHEN l.token_type<>'cost_usd' THEN l.amount ELSE 0 END),0),COALESCE(SUM(l.cost),0) FROM runs r LEFT JOIN usage_ledger l ON l.run_id=r.id WHERE r.id=? AND r.project_id=? GROUP BY r.id`, runID, projectID).
+		Scan(&run.ID, &run.WorkItemID, &run.TaskType, &run.State, &started, &ended, &run.Tokens, &run.CostUSD)
+	if errors.Is(err, sql.ErrNoRows) {
+		return run, ErrNotFound
+	}
+	if err != nil {
+		return run, err
+	}
+	run.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+	run.EndedAt, _ = time.Parse(time.RFC3339Nano, ended)
+	return run, nil
+}
+
+// EventLogsSince returns a run's events with an ID greater than afterID, so a
+// live view can fetch what it has not seen instead of re-reading the whole run
+// on every poll.
+func (s *Store) EventLogsSince(ctx context.Context, projectID, runID string, afterID int64, limit int) ([]EventLog, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.run_id,e.provider,e.event_type,CAST(e.raw_payload AS TEXT),e.created_at FROM event_logs e JOIN runs r ON r.id=e.run_id WHERE r.project_id=? AND e.run_id=? AND e.id>? ORDER BY e.id LIMIT ?`, projectID, runID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEventLogs(rows)
 }

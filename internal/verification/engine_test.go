@@ -116,3 +116,35 @@ func TestVerificationBlocksDangerousExecutable(t *testing.T) {
 		t.Fatalf("report=%+v", report)
 	}
 }
+
+// A gate with a value pattern records what it measured, and a measurement
+// below the threshold fails even though the command exited zero. Before this
+// the engine recorded the gate's own SuccessValue, so a coverage criterion
+// was satisfied by configuration rather than by evidence.
+func TestGateMeasuresValueAgainstThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, pattern, success, wantStatus, wantValue string
+	}{
+		{"above threshold", "total: (statements) 91.4%", `\(statements\)\s+([0-9.]+)%`, "85", "PASSED", "91.4"},
+		{"below threshold", "total: (statements) 71.4%", `\(statements\)\s+([0-9.]+)%`, "85", "FAILED", "71.4"},
+		{"no measurement in output", "nothing to report", `coverage:\s+([0-9.]+)`, "85", "FAILED", ""},
+		{"not a number", "coverage: unknown", `coverage:\s+(\S+)`, "85", "FAILED", "unknown"},
+		{"boolean gate keeps its meaning", "done", "", "true", "PASSED", "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := Result{Type: "coverage", Status: "PASSED", Output: tc.output}
+			actual := measure(Gate{Type: "coverage", SuccessValue: tc.success, ValuePattern: tc.pattern}, &result)
+			if result.Status != tc.wantStatus || actual != tc.wantValue {
+				t.Fatalf("status=%s value=%q want status=%s value=%q", result.Status, actual, tc.wantStatus, tc.wantValue)
+			}
+		})
+	}
+}
+
+// A failing gate is never credited with a measurement.
+func TestMeasureIgnoresFailedGates(t *testing.T) {
+	result := Result{Type: "coverage", Status: "FAILED", Output: "total: (statements) 91.4%"}
+	if actual := measure(Gate{Type: "coverage", SuccessValue: "85", ValuePattern: `([0-9.]+)%`}, &result); actual != "false" {
+		t.Fatalf("actual=%q", actual)
+	}
+}

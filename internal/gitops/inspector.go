@@ -135,3 +135,12 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// HeadCommit returns the commit a ref currently points at, used to record what
+// an integration verification actually tested.
+func HeadCommit(ctx context.Context, repository, ref string) (string, error) {
+	if ref == "" {
+		ref = "HEAD"
+	}
+	return gitOutput(ctx, repository, "rev-parse", ref)
+}

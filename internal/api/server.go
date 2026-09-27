@@ -26,7 +26,29 @@ type ProjectSummary struct {
 	Goal     *model.Goal          `json:"goal,omitempty"`
 	Progress float64              `json:"progress_percent"`
 	Complete bool                 `json:"complete"`
+	Scope    ProgressScope        `json:"progress_scope"`
 	Metrics  store.ProjectMetrics `json:"metrics"`
+	// Budget is included in the list so the home view can say which projects
+	// are near a limit without opening each one.
+	Budget *store.ProjectBudget `json:"budget,omitempty"`
+	// PendingApprovals counts decisions waiting on the user for this project.
+	PendingApprovals int `json:"pending_approvals_count"`
+	// Integration reports whether the default branch has been verified since
+	// the last merge into it.
+	Integration store.IntegrationCheck `json:"integration"`
+}
+
+// ProgressScope states the baseline a progress percentage was computed over,
+// so a client can explain the number instead of only showing it: discarded
+// work has left the baseline, and criteria can be unmet independently of it.
+type ProgressScope struct {
+	TotalWeight     float64 `json:"total_weight"`
+	DoneWeight      float64 `json:"done_weight"`
+	DiscardedWeight float64 `json:"discarded_weight"`
+	TotalItems      int     `json:"total_items"`
+	DoneItems       int     `json:"done_items"`
+	DiscardedItems  int     `json:"discarded_items"`
+	CriteriaMet     bool    `json:"criteria_met"`
 }
 
 type ProjectDetail struct {
@@ -42,11 +64,15 @@ type ProjectDetail struct {
 	Approvals  []ApprovalView             `json:"pending_approvals"`
 	IdeaScores map[string]model.IdeaScore `json:"idea_scores"`
 	Series     []store.DailyUsagePoint    `json:"usage_series"`
+	// Relaxations are changes that made passing easier rather than making the
+	// result better; they are shown, not blocked.
+	Relaxations []store.VerificationRelaxation `json:"relaxations"`
 }
 
 type ApprovalView struct {
 	ID, ActionType, Reason string
 	RequestedAt            time.Time
+	Scope                  store.ApprovalScope
 }
 
 type QuotaView struct {
@@ -72,6 +98,20 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	server.mux.HandleFunc("GET /api/v1/projects/{id}", server.project)
 	server.mux.HandleFunc("GET /api/v1/approvals", server.pendingApprovals)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}", server.runDetail)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}/events", server.runEvents)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/runs/{runID}/stream", server.runStream)
+	server.mux.HandleFunc("GET /api/v1/doctor", server.doctor)
+	server.mux.HandleFunc("GET /api/v1/report", server.activityReport)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/decisions", server.listDecisions)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/decisions", server.recordDecision)
+	server.mux.HandleFunc("POST /api/v1/projects", server.createProject)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/goal", server.setGoal)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/policy", server.setPolicy)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/work", server.workItems)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/work/{workID}", server.workItemDetail)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/plan", server.updateWorkPlan)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/approvals/{approvalID}", server.approvalDetail)
+	server.mux.HandleFunc("POST /api/v1/projects/{id}/actions/{action}", server.projectAction)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/approve", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/reject", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/status/{status}", server.setWorkStatus)
@@ -109,7 +149,7 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]ProjectSummary, 0, len(projects))
 	for _, project := range projects {
-		summary, summaryErr := s.summary(r.Context(), project)
+		summary, _, summaryErr := s.summary(r.Context(), project)
 		if summaryErr != nil {
 			writeError(w, http.StatusInternalServerError, summaryErr.Error())
 			return
@@ -129,17 +169,15 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	summary, err := s.summary(r.Context(), project)
+	summary, progress, err := s.summary(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	detail := ProjectDetail{ProjectSummary: summary}
 	if summary.Goal != nil {
+		detail.Criteria = progress.Criteria
 		detail.WorkItems, err = s.store.ListWorkItems(r.Context(), summary.Goal.ID)
-		if err == nil {
-			detail.Criteria, err = s.store.CriteriaStatus(r.Context(), *summary.Goal)
-		}
 		if err == nil {
 			detail.IdeaScores, err = s.store.IdeaScoresForGoal(r.Context(), summary.Goal.ID)
 		}
@@ -151,10 +189,13 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 		detail.Series, err = s.store.DailyUsageSeries(r.Context(), project.ID, 14)
 	}
 	if err == nil {
+		detail.Relaxations, err = s.store.ListRelaxations(r.Context(), project.ID, 20)
+	}
+	if err == nil {
 		var pending []store.Approval
 		pending, err = s.store.ListPendingApprovals(r.Context(), project.ID)
 		for _, approval := range pending {
-			detail.Approvals = append(detail.Approvals, ApprovalView{ID: approval.ID, ActionType: approval.ActionType, Reason: approval.Reason, RequestedAt: approval.RequestedAt})
+			detail.Approvals = append(detail.Approvals, ApprovalView{ID: approval.ID, ActionType: approval.ActionType, Reason: approval.Reason, RequestedAt: approval.RequestedAt, Scope: approval.Scope})
 		}
 	}
 	if err == nil {
@@ -174,13 +215,7 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 			detail.Jobs = append(detail.Jobs, JobView{ID: job.ID, Type: job.Type, Status: job.Status, LastError: job.LastError, RunAt: job.RunAt, Attempts: job.Attempts})
 		}
 	}
-	if err == nil {
-		if budget, budgetErr := s.store.ProjectBudgetUsage(r.Context(), project.ID); budgetErr == nil {
-			detail.Budget = &budget
-		} else if !errors.Is(budgetErr, store.ErrNotFound) {
-			err = budgetErr
-		}
-	}
+	detail.Budget = summary.Budget
 	if err == nil {
 		if _, daily, dailyErr := s.store.ProjectDailyUsage(r.Context(), project.ID, time.Now().UTC()); dailyErr == nil {
 			detail.Daily = &daily
@@ -205,25 +240,40 @@ type RunDetail struct {
 	Verifications []store.VerificationRecord `json:"verifications"`
 	Commit        *store.RunCommit           `json:"commit,omitempty"`
 	Events        []store.EventLog           `json:"events"`
+	Diff          string                     `json:"diff,omitempty"`
+	DiffTruncated bool                       `json:"diff_truncated,omitempty"`
+	DiffError     string                     `json:"diff_error,omitempty"`
+	Repair        *store.RepairPlan          `json:"repair,omitempty"`
+	// EstimatedTokens is what the work item was predicted to need, so the
+	// prediction can be judged against what the run actually used.
+	EstimatedTokens int64  `json:"estimated_tokens,omitempty"`
+	EstimateSource  string `json:"estimate_source,omitempty"`
 }
+
+// diffLimitBytes caps how much of a patch is sent to a browser; a reviewer
+// needs the shape of a change, and an unbounded patch is a denial of service
+// against the dashboard rather than a better review.
+const diffLimitBytes = 200000
 
 func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
 	projectID, runID := r.PathValue("id"), r.PathValue("runID")
-	runs, err := s.store.ListRecentRuns(r.Context(), projectID, 1000)
+	project, err := s.store.ProjectByID(r.Context(), projectID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	detail := RunDetail{}
-	found := false
-	for _, run := range runs {
-		if run.ID == runID {
-			detail.Run, found = run, true
-			break
-		}
-	}
-	if !found {
+	detail.Run, err = s.store.RunByID(r.Context(), projectID, runID)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if prompt, promptErr := s.store.PromptForRun(r.Context(), runID); promptErr == nil {
@@ -249,8 +299,36 @@ func (s *Server) runDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if detail.Run.WorkItemID != "" {
+		if goal, goalErr := s.goalForProject(r, projectID); goalErr == nil {
+			if item, itemErr := s.store.WorkItemByID(r.Context(), goal.ID, detail.Run.WorkItemID); itemErr == nil {
+				detail.EstimatedTokens, detail.EstimateSource = item.EstimatedTokens, "manual"
+				if item.EstimatedTokens == 0 {
+					if forecast, forecastErr := s.store.ForecastTokens(r.Context(), projectID, detail.Run.TaskType); forecastErr == nil {
+						detail.EstimatedTokens, detail.EstimateSource = forecast.Expected, "forecast"
+					}
+				}
+			} else if !errors.Is(itemErr, store.ErrNotFound) {
+				writeError(w, http.StatusInternalServerError, itemErr.Error())
+				return
+			}
+		}
+	}
+	if plan, planErr := s.store.RepairPlanForRun(r.Context(), runID); planErr == nil {
+		detail.Repair = &plan
+	} else if !errors.Is(planErr, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, planErr.Error())
+		return
+	}
 	if commit, commitErr := s.store.RunCommitByRun(r.Context(), runID); commitErr == nil {
 		detail.Commit = &commit
+		// The diff belongs next to the verification evidence: reviewing a
+		// change should not mean leaving for a terminal and a git client.
+		if diff, truncated, diffErr := gitops.CommitDiff(r.Context(), project.RepositoryPath, commit.CommitSHA, diffLimitBytes); diffErr == nil {
+			detail.Diff, detail.DiffTruncated = diff, truncated
+		} else {
+			detail.DiffError = diffErr.Error()
+		}
 	} else if !errors.Is(commitErr, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, commitErr.Error())
 		return
@@ -273,7 +351,11 @@ func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request) {
 	projectID, approvalID := r.PathValue("id"), r.PathValue("approvalID")
 	var err error
 	if strings.HasSuffix(r.URL.Path, "/reject") {
-		err = s.store.RejectApproval(r.Context(), projectID, approvalID)
+		// The reason is optional so a rejection is never blocked, but it is
+		// accepted here because a rejection with a recorded cause is the only
+		// kind that says anything about where automation keeps failing.
+		category, note := r.URL.Query().Get("category"), r.URL.Query().Get("note")
+		err = s.store.RejectApprovalWithReason(r.Context(), projectID, approvalID, category, note)
 	} else {
 		err = s.store.Approve(r.Context(), projectID, approvalID)
 	}
@@ -313,8 +395,9 @@ func statusForPath(path string) string {
 	return "APPROVED"
 }
 
-func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSummary, error) {
+func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSummary, store.ProgressDetail, error) {
 	summary := ProjectSummary{Project: project}
+	var progress store.ProgressDetail
 	goal, err := s.store.CurrentGoal(ctx, project.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		// A completed project has no ACTIVE goal; show the last goal so the
@@ -323,14 +406,32 @@ func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSum
 	}
 	if err == nil {
 		summary.Goal = &goal
-		summary.Progress, summary.Complete, err = s.store.GoalProgress(ctx, goal)
+		progress, err = s.store.GoalProgressDetail(ctx, goal)
+		summary.Progress, summary.Complete = progress.Percent, progress.Complete
+		summary.Scope = ProgressScope{TotalWeight: progress.TotalWeight, DoneWeight: progress.DoneWeight,
+			DiscardedWeight: progress.DiscardedWeight, TotalItems: progress.TotalItems, DoneItems: progress.DoneItems,
+			DiscardedItems: progress.DiscardedItems, CriteriaMet: progress.CriteriaMet}
 	} else if errors.Is(err, store.ErrNotFound) {
 		err = nil
 	}
 	if err == nil {
 		summary.Metrics, err = s.store.ProjectMetrics(ctx, project.ID)
 	}
-	return summary, err
+	if err == nil {
+		if budget, budgetErr := s.store.ProjectBudgetUsage(ctx, project.ID); budgetErr == nil {
+			summary.Budget = &budget
+		} else if !errors.Is(budgetErr, store.ErrNotFound) {
+			err = budgetErr
+		}
+	}
+	if err == nil {
+		pending, pendingErr := s.store.ListPendingApprovals(ctx, project.ID)
+		summary.PendingApprovals, err = len(pending), pendingErr
+	}
+	if err == nil {
+		summary.Integration, err = s.store.IntegrationStatus(ctx, project.ID)
+	}
+	return summary, progress, err
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

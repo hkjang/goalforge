@@ -13,15 +13,18 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/api"
 	"github.com/goalforge/goalforge/internal/app"
+	"github.com/goalforge/goalforge/internal/diagnostics"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/mcp"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/notify"
 	"github.com/goalforge/goalforge/internal/orchestrator"
 	"github.com/goalforge/goalforge/internal/planner"
 	"github.com/goalforge/goalforge/internal/policy"
@@ -87,6 +90,12 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "runtime" {
 			return projectRuntime(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "concurrency" {
+			return projectConcurrency(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "profile" {
+			return projectProfile(ctx, s, args[2:])
+		}
 	case "goal":
 		if len(args) > 1 && args[1] == "set" {
 			return goalSet(ctx, s, args[2:])
@@ -117,6 +126,16 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 2 && args[1] == "gate" && args[2] == "add" {
 			return gateAdd(ctx, s, args[3:])
 		}
+		if len(args) > 1 && args[1] == "integration" {
+			return verifyIntegration(ctx, s, args[2:])
+		}
+		if len(args) > 2 && args[1] == "template" && args[2] == "list" {
+			fmt.Println(strings.Join(store.GateTemplateNames(), "\n"))
+			return nil
+		}
+		if len(args) > 1 && args[1] == "template" {
+			return verifyTemplate(ctx, s, args[2:])
+		}
 	case "continue":
 		return continueGoal(ctx, s, args[1:], false)
 	case "develop":
@@ -135,6 +154,42 @@ func run(ctx context.Context, args []string) error {
 		return checkpointCreate(ctx, s, args[1:])
 	case "logs":
 		return logsShow(ctx, s, args[1:])
+	case "report":
+		return activityReport(ctx, s, args[1:])
+	case "models":
+		return modelAdvice(ctx, s, args[1:])
+	case "pr":
+		return prDescription(ctx, s, args[1:])
+	case "eval":
+		if len(args) > 1 && args[1] == "add" {
+			return evalAdd(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "list" {
+			return evalList(ctx, s)
+		}
+		if len(args) > 1 && args[1] == "record" {
+			return evalRecord(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "compare" {
+			return evalCompare(ctx, s, args[2:])
+		}
+	case "takeover":
+		if len(args) > 1 && args[1] == "return" {
+			return takeoverReturn(ctx, s, args[2:])
+		}
+		return takeoverStart(ctx, s, args[1:])
+	case "reproduce":
+		return reproduceRun(ctx, s, args[1:])
+	case "decision":
+		if len(args) > 1 && args[1] == "add" {
+			return decisionAdd(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "list" {
+			return decisionList(ctx, s, args[2:])
+		}
+		if len(args) > 2 && args[1] == "supersede" {
+			return decisionSupersede(ctx, s, args[2:])
+		}
 	case "cancel":
 		return cancelScheduled(ctx, s)
 	case "pause":
@@ -276,19 +331,31 @@ func mergeWork(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	approved, err := s.ConsumeApproval(ctx, project.ID, store.ApprovalMergeBranch, "merge:"+*workItemID)
+	scope := store.ApprovalScope{WorkItemID: *workItemID, SourceBranch: commit.Branch, TargetRef: project.DefaultBranch, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+	approved, err := s.ConsumeScopedApproval(ctx, project.ID, store.ApprovalMergeBranch, "merge:"+*workItemID, scope)
 	if err != nil {
 		return err
 	}
 	if !approved {
-		return fmt.Errorf("merging into %s requires approval: run `goalforge approval request --action merge-branch --reason ...` and approve it first", project.DefaultBranch)
+		return fmt.Errorf("merging %s into %s requires approval of that commit: run `goalforge approval request --action merge-branch --work-item %s --reason ...` and approve it first",
+			shortSHA(commit.CommitSHA), project.DefaultBranch, *workItemID)
 	}
 	message := "Merge verified work " + *workItemID + "\n\nGoal-ID: " + commit.GoalID + "\nWork-Item-ID: " + commit.WorkItemID + "\nRun-ID: " + commit.RunID + "\n"
 	sha, err := gitops.MergeVerified(ctx, project.RepositoryPath, project.DefaultBranch, commit.Branch, message)
 	if err != nil {
 		return err
 	}
+	if err = s.MarkIntegrationPending(ctx, project.ID, "병합 후 통합 검증이 필요합니다: "+*workItemID, sha); err != nil {
+		return err
+	}
+	// Evidence gathered inside a worktree says nothing about the branch the
+	// change was just merged into, so it stops counting until integration
+	// verification runs.
+	if _, err = s.InvalidateProjectEvidence(ctx, project.ID, store.StaleCodeChanged); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
 	fmt.Printf("merged: branch=%s into=%s commit=%s work=%s\n", commit.Branch, project.DefaultBranch, sha, *workItemID)
+	fmt.Println("integration verification required: run `goalforge verify integration` — each item verified in its own worktree, not merged together")
 	return nil
 }
 
@@ -316,12 +383,14 @@ func publishWork(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	approved, err := s.ConsumeApproval(ctx, project.ID, store.ApprovalPublishBranch, "publish:"+*workItemID)
+	scope := store.ApprovalScope{WorkItemID: *workItemID, SourceBranch: commit.Branch, TargetRef: *remote, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+	approved, err := s.ConsumeScopedApproval(ctx, project.ID, store.ApprovalPublishBranch, "publish:"+*workItemID, scope)
 	if err != nil {
 		return err
 	}
 	if !approved {
-		return fmt.Errorf("publishing requires approval: run `goalforge approval request --action %s --reason ...` and approve it first", store.ApprovalPublishBranch)
+		return fmt.Errorf("publishing %s to %s requires approval of that commit: run `goalforge approval request --action publish-branch --work-item %s --remote %s --reason ...` and approve it first",
+			shortSHA(commit.CommitSHA), *remote, *workItemID, *remote)
 	}
 	if err = gitops.PushBranch(ctx, project.RepositoryPath, *remote, commit.Branch); err != nil {
 		return err
@@ -398,6 +467,27 @@ func rollbackWork(ctx context.Context, s *store.Store, args []string) error {
 		return err
 	}
 	fmt.Printf("rolled back: work=%s branch=%s target=%s\n", *workItemID, record.Branch, record.BaseCommit)
+	return nil
+}
+
+// projectConcurrency sets how many work items may be implemented at once.
+func projectConcurrency(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("project concurrency", flag.ContinueOnError)
+	wip := f.Int("wip", 1, "work items that may be implemented at once (disjoint change scopes only)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	if err = s.SetWIPLimit(ctx, p.ID, *wip); err != nil {
+		return err
+	}
+	fmt.Printf("concurrency set: wip_limit=%d\n", *wip)
+	if *wip > 1 {
+		fmt.Println("note: items only run together when their declared change scopes are disjoint, and a merged result still needs its own verification")
+	}
 	return nil
 }
 
@@ -505,36 +595,11 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 	return fmt.Errorf("maximum consecutive run limit reached: %d", *maxRuns)
 }
 
-// requiredProviderFlags are the CLI flags each adapter passes; a provider
-// binary whose help output lacks one would fail on every run, so doctor
-// verifies them up front.
-var requiredProviderFlags = map[string][]string{
-	"claude":   {"--output-format", "--resume", "--settings", "--permission-mode", "--json-schema", "--no-session-persistence"},
-	"codex":    {"--json", "--sandbox", "--output-schema"},
-	"qwen":     {"--output-format", "--resume", "--approval-mode", "--model"},
-	"opencode": {"run", "--format", "--session", "--agent", "--model"},
-}
+func providerBinary(providerName string) string { return diagnostics.Binary(providerName) }
 
-var supportedProviders = []string{"codex", "claude", "qwen", "opencode"}
+func isSupportedProvider(name string) bool { return diagnostics.IsSupported(name) }
 
-func providerBinary(providerName string) string {
-	overrides := map[string]string{"claude": "GOALFORGE_CLAUDE_BIN", "codex": "GOALFORGE_CODEX_BIN", "qwen": "GOALFORGE_QWEN_BIN", "opencode": "GOALFORGE_OPENCODE_BIN"}
-	if env, ok := overrides[providerName]; ok {
-		if bin := os.Getenv(env); bin != "" {
-			return bin
-		}
-	}
-	return providerName
-}
-
-func isSupportedProvider(name string) bool {
-	for _, candidate := range supportedProviders {
-		if candidate == name {
-			return true
-		}
-	}
-	return false
-}
+var supportedProviders = diagnostics.Supported
 
 // runDoctor diagnoses the failure modes that otherwise only surface mid-run:
 // missing tools, unauthenticated or incompatible provider CLIs, and an
@@ -545,77 +610,25 @@ func runDoctor(ctx context.Context, s *store.Store, args []string) error {
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	failed := 0
-	report := func(level, name, detail string) {
-		if level == "FAIL" {
-			failed++
-		}
-		fmt.Printf("%-4s %-16s %s\n", level, name, detail)
-	}
-	if output, err := exec.CommandContext(ctx, "git", "--version").Output(); err != nil {
-		report("FAIL", "git", "git is required but not found: "+err.Error())
-	} else {
-		report("OK", "git", strings.TrimSpace(string(output)))
-	}
-	report("OK", "database", "state store opened")
-	providers := supportedProviders
-	// Without a registered project every provider is optional: only the
-	// provider a project actually uses can block readiness.
-	missingLevel := "WARN"
+	options := diagnostics.Options{ProbeAuth: *probeAuth}
 	cwd, _ := os.Getwd()
 	project, projectErr := s.ProjectByPath(ctx, cwd)
-	if projectErr == nil {
-		report("OK", "project", fmt.Sprintf("%s provider=%s model=%s state=%s", project.Name, project.Provider, project.Model, project.State))
-		providers = []string{project.Provider}
-		missingLevel = "FAIL"
-	} else if errors.Is(projectErr, store.ErrNotFound) {
-		report("WARN", "project", "no project registered for this directory (goalforge project init)")
-	} else {
+	switch {
+	case projectErr == nil:
+		options.ProjectLevel, options.StrictCLI = diagnostics.LevelOK, true
+		options.Providers = []string{project.Provider}
+		options.ProjectNote = fmt.Sprintf("%s provider=%s model=%s state=%s", project.Name, project.Provider, project.Model, project.State)
+	case errors.Is(projectErr, store.ErrNotFound):
+		options.ProjectNote = "no project registered for this directory (goalforge project init)"
+	default:
 		return projectErr
 	}
-	for _, name := range providers {
-		binary := providerBinary(name)
-		resolved, err := exec.LookPath(binary)
-		if err != nil {
-			report(missingLevel, name+" cli", fmt.Sprintf("%s not found in PATH", binary))
-			continue
-		}
-		version := "version unknown"
-		if output, versionErr := exec.CommandContext(ctx, resolved, "--version").Output(); versionErr == nil {
-			version = strings.TrimSpace(strings.Split(string(output), "\n")[0])
-		}
-		report("OK", name+" cli", resolved+" ("+version+")")
-		if help, helpErr := exec.CommandContext(ctx, resolved, "--help").CombinedOutput(); helpErr == nil {
-			var missing []string
-			for _, flagName := range requiredProviderFlags[name] {
-				if !strings.Contains(string(help), flagName) {
-					missing = append(missing, flagName)
-				}
-			}
-			if len(missing) > 0 {
-				report("FAIL", name+" flags", "CLI does not support required flags: "+strings.Join(missing, ", "))
-			} else {
-				report("OK", name+" flags", "all adapter flags supported")
-			}
-		} else {
-			report("WARN", name+" flags", "could not read CLI help to verify flag support")
-		}
-		if *probeAuth && name == "claude" {
-			probe := exec.CommandContext(ctx, resolved, "-p", "--output-format", "json", "--model", "haiku")
-			probe.Stdin = strings.NewReader("reply with the single word ok")
-			output, probeErr := probe.CombinedOutput()
-			switch {
-			case strings.Contains(string(output), "\"is_error\":true") || strings.Contains(string(output), "401"):
-				report("FAIL", name+" auth", "authentication failed; run `claude /login` in a terminal")
-			case probeErr != nil:
-				report("FAIL", name+" auth", "probe failed: "+probeErr.Error())
-			default:
-				report("OK", name+" auth", "authenticated")
-			}
-		}
+	report := diagnostics.Run(ctx, options)
+	for _, check := range report.Checks {
+		fmt.Printf("%-4s %-16s %s\n", check.Level, check.Name, check.Detail)
 	}
-	if failed > 0 {
-		return fmt.Errorf("doctor found %d blocking problem(s)", failed)
+	if !report.Ready() {
+		return fmt.Errorf("doctor found %d blocking problem(s)", report.Failed)
 	}
 	fmt.Println("doctor: environment looks ready")
 	return nil
@@ -797,10 +810,703 @@ func continueHandler(s *store.Store, service *app.Service) scheduler.Handler {
 		if result.Verification.GoalCompleted {
 			return out, nil
 		}
+		// A failed verification is only retried when the failure is one a code
+		// fix could plausibly address and the repair limits still allow it.
+		// Rescheduling unconditionally turned a broken environment or an
+		// unfixable failure into a loop that spent budget without progress.
+		if !result.Verification.Passed {
+			plan := result.Repair
+			if !plan.Automatic() {
+				fmt.Printf("worker: repair stopped run=%s decision=%s reason=%s\n", result.Run.RunID, plan.Decision, plan.Reason)
+				_ = notify.Post(ctx, notify.Event{Project: project.ID, State: "REPAIR_REQUIRED", Reason: plan.Decision + ": " + plan.Reason})
+				return out, nil
+			}
+			fmt.Printf("worker: repair scheduled run=%s attempt=%d kind=%s\n", result.Run.RunID, plan.Attempt, plan.FailureKind)
+		}
 		next := time.Now().UTC().Add(5 * time.Second)
 		out.RescheduleAt = &next
 		return out, nil
 	}
+}
+
+// printRepair explains a failed verification: what kind of failure it was and
+// whether GoalForge will try again on its own.
+func printRepair(plan store.RepairPlan) {
+	if plan.Decision == "" || plan.Decision == store.RepairNothingToRepair {
+		return
+	}
+	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
+}
+
+// verifyTemplate installs a starting set of gates for a kind of project. A
+// project with no gates cannot complete a goal, and choosing gates from nothing
+// is where most setups stall.
+func verifyTemplate(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("verify template", flag.ContinueOnError)
+	overwrite := f.Bool("overwrite", false, "replace gates of the same type instead of keeping them")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 1 {
+		return fmt.Errorf("verify template NAME (available: %s)", strings.Join(store.GateTemplateNames(), ", "))
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	added, skipped, err := s.ApplyGateTemplate(ctx, p.ID, f.Arg(0), *overwrite)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("gates added: %s\n", strings.Join(added, ", "))
+	if len(skipped) > 0 {
+		fmt.Printf("kept existing: %s (use --overwrite to replace)\n", strings.Join(skipped, ", "))
+	}
+	fmt.Println("review the thresholds before relying on them: a template is a starting point, not a standard")
+	return nil
+}
+
+// projectProfile applies an operating posture as a set of limits, so a choice
+// like "운영 시스템" is expressed once rather than as a dozen settings.
+func projectProfile(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("project profile", flag.ContinueOnError)
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 1 {
+		fmt.Printf("project profile NAME (available: %s)\n", strings.Join(store.PolicyProfileNames(), ", "))
+		for _, name := range store.PolicyProfileNames() {
+			profile, _ := store.LookupPolicyProfile(name)
+			fmt.Printf("  %-12s %s\n    토큰 %d, 비용 $%.0f, 하루 %d회, 동시 %d건, 자동 수정 %d회/$%.0f, auto-commit=%t\n",
+				profile.Name, profile.Description, profile.TokenLimit, profile.CostLimitUSD, profile.DailyRunLimit,
+				profile.WIPLimit, profile.Repair.MaxAttempts, profile.Repair.MaxCostUSD, profile.AutoCommit)
+		}
+		return nil
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	profile, err := s.ApplyPolicyProfile(ctx, p.ID, f.Arg(0))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("profile applied: %s — %s\n", profile.Name, profile.Description)
+	return nil
+}
+
+// prDescription emits a pull request body that carries what the change was for
+// and how it was proven, so a reviewer does not have to reconstruct it from
+// commits.
+func prDescription(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("pr", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item whose verified change to describe")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	pr, err := s.BuildPRDescription(ctx, p.ID, *workItemID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s\n\n%s", pr.Title, pr.Body)
+	return nil
+}
+
+// evalAdd registers a fixed task used to compare configurations. Comparing
+// before and after on whatever work happened to come up measures the work, not
+// the change.
+func evalAdd(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval add", flag.ContinueOnError)
+	name := f.String("name", "", "case name")
+	kind := f.String("kind", "", "bug_fix, feature, refactor, or docs")
+	title := f.String("goal", "", "goal title the case works toward")
+	objective := f.String("objective", "", "what the case asks for")
+	notes := f.String("notes", "", "how to judge the result")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	evaluation, err := s.AddEvaluationCase(ctx, store.EvaluationCase{ProjectID: p.ID, Name: *name, Kind: *kind,
+		Repository: p.RepositoryPath, GoalTitle: *title, GoalObjective: *objective, Notes: *notes})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("evaluation case added: %s %s (%s)\n", evaluation.ID, evaluation.Name, evaluation.Kind)
+	return nil
+}
+
+func evalList(ctx context.Context, s *store.Store) error {
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	cases, err := s.ListEvaluationCases(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(cases) == 0 {
+		fmt.Println("no evaluation cases; add one with `goalforge eval add --name ... --kind bug_fix`")
+		return nil
+	}
+	for _, evaluation := range cases {
+		fmt.Printf("%-22s %-10s %s\n  %s\n", evaluation.ID, evaluation.Kind, evaluation.Name, evaluation.GoalObjective)
+	}
+	return nil
+}
+
+func evalRecord(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval record", flag.ContinueOnError)
+	caseID := f.String("case", "", "evaluation case ID")
+	label := f.String("label", "", "configuration label being measured")
+	runID := f.String("run", "", "run that executed the case")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *caseID == "" || *label == "" || *runID == "" {
+		return errors.New("--case, --label, and --run are required")
+	}
+	if _, err := currentProject(ctx, s); err != nil {
+		return err
+	}
+	result, err := s.RecordEvaluationResult(ctx, *caseID, *label, *runID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("recorded: %s passed=%t tokens=%d cost=$%.4f interventions=%d config=%s\n",
+		result.ID, result.Passed, result.Tokens, result.CostUSD, result.Interventions, result.ConfigVersion)
+	return nil
+}
+
+func evalCompare(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval compare", flag.ContinueOnError)
+	caseID := f.String("case", "", "restrict to one case")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	summaries, err := s.CompareEvaluations(ctx, p.ID, *caseID)
+	if err != nil {
+		return err
+	}
+	if len(summaries) == 0 {
+		fmt.Println("no evaluation results recorded")
+		return nil
+	}
+	fmt.Printf("%-24s %6s %9s %12s %14s %10s\n", "label", "runs", "pass", "cost/run", "interventions", "avg sec")
+	for _, summary := range summaries {
+		fmt.Printf("%-24s %6d %8.0f%% %12.4f %14.1f %10.0f\n",
+			summary.Label, summary.Runs, summary.PassRate, summary.AverageCostUSD, summary.AverageInterventions, summary.AverageSeconds)
+	}
+	rejections, err := s.RejectionStats(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(rejections) > 0 {
+		fmt.Println("\nrejections by reason:")
+		for _, stat := range rejections {
+			fmt.Printf("  %-26s %d\n", stat.Category, stat.Count)
+			for _, example := range stat.Examples {
+				fmt.Printf("    - %s\n", example)
+			}
+		}
+	}
+	return nil
+}
+
+// takeoverStart hands a work item to a person. Stopping the run comes first:
+// handing over a workspace a provider session is still writing to produces a
+// conflict neither side can explain.
+func takeoverStart(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("takeover", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item to take over")
+	reason := f.String("reason", "", "why a person is taking this over")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	goal, err := activeGoal(ctx, s)
+	if err != nil {
+		return err
+	}
+	// Ask the running session to stop before claiming the workspace.
+	if control, controlErr := s.RequestRunControl(ctx, p.ID, "CANCEL"); controlErr == nil {
+		return fmt.Errorf("cancel requested for run %s; wait for it to end, then run takeover again", control.RunID)
+	} else if !errors.Is(controlErr, store.ErrNoRunningExecution) {
+		return controlErr
+	}
+	workspace := p.RepositoryPath
+	if p.WorktreeEnabled {
+		workspace = filepath.Join(p.RepositoryPath+".goalforge-worktrees", *workItemID)
+	}
+	takeover, err := s.TakeOverWorkItem(ctx, p.ID, goal.ID, *workItemID, *reason, workspace)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("taken over: %s work=%s\n  workspace: %s\n", takeover.ID, *workItemID, takeover.Workspace)
+	fmt.Println("  automation will not claim this item until `goalforge takeover return --work-item " + *workItemID + "` runs")
+	return nil
+}
+
+// takeoverReturn gives the item back, records what the person changed as the
+// new baseline, and re-verifies: a human edit is not exempt from the gates.
+func takeoverReturn(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("takeover return", flag.ContinueOnError)
+	workItemID := f.String("work-item", "", "work item to hand back")
+	summary := f.String("summary", "", "what was changed by hand")
+	skipVerify := f.Bool("skip-verify", false, "hand back without running the gates (the item returns to the backlog unverified)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *workItemID == "" {
+		return errors.New("--work-item is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	goal, err := activeGoal(ctx, s)
+	if err != nil {
+		return err
+	}
+	takeover, err := s.ActiveTakeover(ctx, p.ID, *workItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("work item %s is not currently taken over", *workItemID)
+	}
+	if err != nil {
+		return err
+	}
+	if !*skipVerify {
+		gates, gateErr := s.ListGates(ctx, p.ID)
+		if gateErr != nil {
+			return gateErr
+		}
+		if len(gates) == 0 {
+			return errors.New("no verification gates configured; use --skip-verify to hand back unverified")
+		}
+		engine, engineErr := verification.New(s, 1024*1024)
+		if engineErr != nil {
+			return engineErr
+		}
+		checks := make([]verification.Gate, 0, len(gates))
+		for _, g := range gates {
+			checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
+		}
+		results, passed, checkErr := engine.Check(ctx, takeover.Workspace, checks)
+		if checkErr != nil {
+			return checkErr
+		}
+		records := make([]store.VerificationRecord, 0, len(results))
+		for _, result := range results {
+			actual := "false"
+			if result.Status == "PASSED" {
+				actual = "true"
+			}
+			records = append(records, store.VerificationRecord{CheckType: result.Type, Status: result.Status, ActualValue: actual,
+				Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration, Required: result.Required,
+				FailureKind: result.FailureKind, RepairMode: result.RepairMode})
+			fmt.Printf("%-8s %-18s exit=%d\n", result.Status, result.Type, result.ExitCode)
+		}
+		if err = s.RecordHumanEvidence(ctx, goal.ID, *workItemID, records); err != nil {
+			return err
+		}
+		if !passed {
+			return errors.New("hand-edited changes do not pass the gates; fix them or use --skip-verify to hand back unverified")
+		}
+	}
+	returned, err := s.ReturnWorkItem(ctx, p.ID, goal.ID, *workItemID, *summary)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("returned: %s work=%s held for %s\n", returned.ID, *workItemID, returned.ReturnedAt.Sub(returned.TakenAt).Round(time.Second))
+	return nil
+}
+
+// reproduceRun writes everything needed to put a failure back in front of a
+// developer under the same conditions: the commit, the workspace, the exact
+// gate commands, and what they printed. It deliberately does not try to make
+// the model produce the same output again — that is not reproducible, and it
+// is not what investigating a failed run requires.
+func reproduceRun(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("reproduce", flag.ContinueOnError)
+	runID := f.String("run", "", "run to reproduce")
+	out := f.String("out", "", "directory to write the package to (default: print a summary)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *runID == "" {
+		return errors.New("--run is required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	pkg, err := s.BuildReproductionPackage(ctx, p.ID, *runID)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("run %s not found in this project", *runID)
+	}
+	if err != nil {
+		return err
+	}
+	report := diagnostics.Run(ctx, diagnostics.Options{Providers: []string{pkg.Provider}, StrictCLI: false})
+	workspace := pkg.Worktree
+	if workspace == "" {
+		workspace = pkg.Repository
+	}
+	if *out == "" {
+		fmt.Printf("run %s  state=%s provider=%s model=%s\n", pkg.RunID, pkg.State, pkg.Provider, pkg.Model)
+		fmt.Printf("workspace: %s\n", workspace)
+		if pkg.BaseCommit != "" {
+			fmt.Printf("commit: %s (%s)\n", pkg.BaseCommit, pkg.Branch)
+		}
+		for _, result := range pkg.Results {
+			fmt.Printf("gate %-18s %-8s exit=%d\n", result.CheckType, result.Status, result.ExitCode)
+		}
+		if pkg.Repair.Decision != "" {
+			fmt.Printf("repair: %s — %s\n", pkg.Repair.Decision, pkg.Repair.Reason)
+		}
+		fmt.Println("\npass --out DIR to write a runnable package")
+		return nil
+	}
+	if err = os.MkdirAll(*out, 0o750); err != nil {
+		return err
+	}
+	manifest := map[string]any{"run": pkg, "environment": report, "workspace": workspace}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(filepath.Join(*out, "reproduction.json"), encoded, 0o600); err != nil {
+		return err
+	}
+	script := reproductionScript(pkg, workspace)
+	scriptPath := filepath.Join(*out, "reproduce.sh")
+	if err = os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		return err
+	}
+	var logs strings.Builder
+	for _, result := range pkg.Results {
+		logs.WriteString("=== " + result.CheckType + " " + result.Status + " (exit " + strconv.Itoa(result.ExitCode) + ")\n")
+		logs.WriteString(result.Output + "\n\n")
+	}
+	if err = os.WriteFile(filepath.Join(*out, "gate-output.log"), []byte(logs.String()), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("reproduction package written: %s\n  reproduction.json  reproduce.sh  gate-output.log\n", *out)
+	return nil
+}
+
+// reproductionScript re-runs the same gates in the same workspace at the same
+// commit. It checks the commit rather than checking it out, so it cannot
+// silently move a developer's working tree.
+func reproductionScript(pkg store.ReproductionPackage, workspace string) string {
+	var builder strings.Builder
+	builder.WriteString("#!/bin/sh\n# GoalForge reproduction for run " + pkg.RunID + "\n")
+	builder.WriteString("# Provider " + pkg.Provider + " model " + pkg.Model + " state " + pkg.State + "\n")
+	builder.WriteString("set -eu\ncd " + shellQuote(workspace) + "\n")
+	if pkg.BaseCommit != "" {
+		builder.WriteString("current=$(git rev-parse HEAD)\n")
+		builder.WriteString("if [ \"$current\" != " + shellQuote(pkg.BaseCommit) + " ]; then\n")
+		builder.WriteString("  echo \"warning: workspace is at $current, the failure was at " + pkg.BaseCommit + "\" >&2\n")
+		builder.WriteString("  echo \"run: git checkout " + pkg.BaseCommit + "\" >&2\nfi\n")
+	}
+	for _, gate := range pkg.Gates {
+		builder.WriteString("\necho '--- " + gate.Type + "'\n")
+		quoted := make([]string, 0, len(gate.Command))
+		for _, part := range gate.Command {
+			quoted = append(quoted, shellQuote(part))
+		}
+		builder.WriteString(strings.Join(quoted, " ") + " || echo \"" + gate.Type + " failed\"\n")
+	}
+	return builder.String()
+}
+
+// shellQuote wraps a value in single quotes so a path or argument containing
+// spaces or shell metacharacters cannot change what the script runs.
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+// decisionAdd records why a structure was chosen and what was ruled out, so
+// later sessions inherit the reasoning instead of re-deriving it or quietly
+// reversing it.
+func decisionAdd(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("decision add", flag.ContinueOnError)
+	title := f.String("title", "", "short name for the decision")
+	decision := f.String("decision", "", "what was decided")
+	context_ := f.String("context", "", "what problem forced the decision")
+	alternatives := f.String("alternatives", "", "what was considered and rejected, and why")
+	consequences := f.String("consequences", "", "what this commits the project to")
+	workItem := f.String("work-item", "", "work item the decision came out of")
+	supersedes := f.String("supersedes", "", "decision ID this replaces")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *title == "" || *decision == "" {
+		return errors.New("--title and --decision are required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	goalID := ""
+	if goal, goalErr := s.CurrentGoal(ctx, p.ID); goalErr == nil {
+		goalID = goal.ID
+	} else if !errors.Is(goalErr, store.ErrNotFound) {
+		return goalErr
+	}
+	baseCommit, _ := gitops.HeadCommit(ctx, p.RepositoryPath, p.DefaultBranch)
+	record, err := s.RecordDecision(ctx, store.DesignDecision{ProjectID: p.ID, GoalID: goalID, WorkItem: *workItem,
+		Title: *title, Context: *context_, Decision: *decision, Alternatives: *alternatives,
+		Consequences: *consequences, BaseCommit: baseCommit})
+	if err != nil {
+		return err
+	}
+	if *supersedes != "" {
+		if err = s.SupersedeDecision(ctx, p.ID, *supersedes, record.ID); err != nil {
+			return fmt.Errorf("record %s but could not supersede %s: %w", record.ID, *supersedes, err)
+		}
+		fmt.Printf("decision recorded: %s (supersedes %s)\n", record.ID, *supersedes)
+		return nil
+	}
+	fmt.Printf("decision recorded: %s\n", record.ID)
+	return nil
+}
+
+func decisionList(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("decision list", flag.ContinueOnError)
+	all := f.Bool("all", false, "include superseded decisions")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	decisions, err := s.ListDecisions(ctx, p.ID, *all)
+	if err != nil {
+		return err
+	}
+	if len(decisions) == 0 {
+		fmt.Println("no design decisions recorded")
+		return nil
+	}
+	for _, decision := range decisions {
+		fmt.Printf("%s  %-10s %s\n  %s\n", decision.ID, decision.Status, decision.Title, decision.Decision)
+		if decision.Alternatives != "" {
+			fmt.Printf("  제외: %s\n", decision.Alternatives)
+		}
+		if decision.SupersededBy != "" {
+			fmt.Printf("  대체됨: %s\n", decision.SupersededBy)
+		}
+	}
+	return nil
+}
+
+func decisionSupersede(ctx context.Context, s *store.Store, args []string) error {
+	if len(args) != 2 {
+		return errors.New("decision supersede requires the old and the new decision ID")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	if err = s.SupersedeDecision(ctx, p.ID, args[0], args[1]); err != nil {
+		return err
+	}
+	fmt.Printf("decision %s superseded by %s\n", args[0], args[1])
+	return nil
+}
+
+// verifyIntegration runs the project's gates against the default branch. Work
+// items verify inside isolated worktrees, so a merged result has never been
+// tested as a whole until this runs.
+func verifyIntegration(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("verify integration", flag.ContinueOnError)
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	gates, err := s.ListGates(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(gates) == 0 {
+		return errors.New("no verification gates configured")
+	}
+	engine, err := verification.New(s, 1024*1024)
+	if err != nil {
+		return err
+	}
+	checks := make([]verification.Gate, 0, len(gates))
+	for _, g := range gates {
+		checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
+	}
+	branchSHA, err := gitops.HeadCommit(ctx, p.RepositoryPath, p.DefaultBranch)
+	if err != nil {
+		return err
+	}
+	results, passed, err := engine.Check(ctx, p.RepositoryPath, checks)
+	if err != nil {
+		return err
+	}
+	var details []string
+	for _, result := range results {
+		fmt.Printf("%-8s %-20s exit=%d %s\n", result.Status, result.Type, result.ExitCode, result.FailureSummary)
+		if result.Required && result.Status != "PASSED" {
+			details = append(details, result.Type+": "+result.Status)
+		}
+	}
+	if err = s.RecordIntegrationResult(ctx, p.ID, branchSHA, strings.Join(details, "; "), passed); err != nil {
+		return err
+	}
+	// The integration run is what proves the criteria on the branch that
+	// ships, so its results become the current evidence.
+	if goal, goalErr := s.CurrentGoal(ctx, p.ID); goalErr == nil {
+		records := make([]store.VerificationRecord, 0, len(results))
+		for _, result := range results {
+			actual := "false"
+			if result.Status == "PASSED" {
+				actual = "true"
+			}
+			for _, g := range gates {
+				if g.Type == result.Type && result.Status == "PASSED" && g.SuccessValue != "" {
+					actual = g.SuccessValue
+				}
+			}
+			records = append(records, store.VerificationRecord{CheckType: result.Type, Status: result.Status,
+				ActualValue: actual, Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration,
+				Required: result.Required, FailureKind: result.FailureKind, RepairMode: result.RepairMode})
+		}
+		if err = s.RecordIntegrationEvidence(ctx, goal.ID, branchSHA, records); err != nil {
+			return err
+		}
+	} else if !errors.Is(goalErr, store.ErrNotFound) {
+		return goalErr
+	}
+	if !passed {
+		return fmt.Errorf("integration verification failed on %s (%s)", p.DefaultBranch, strings.Join(details, "; "))
+	}
+	fmt.Printf("integration verified: %s at %s\n", p.DefaultBranch, branchSHA)
+	return nil
+}
+
+// modelAdvice shows how the approved models have actually performed and which
+// one would be chosen for the next run, with the reason.
+func modelAdvice(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("models", flag.ContinueOnError)
+	taskType := f.String("task-type", "CONTINUE_GOAL", "task type to compare (empty for all)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	stats, err := s.ModelStats(ctx, p.ID, *taskType)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%-24s %6s %8s %12s %10s\n", "model", "runs", "verified", "cost/run", "avg sec")
+	for _, stat := range stats {
+		fmt.Printf("%-24s %6d %7.0f%% %12.4f %10.0f\n", stat.Model, stat.Runs, stat.SuccessRate, stat.AverageCostPerRun, stat.AverageSeconds)
+	}
+	choice, err := s.SelectModelForTask(ctx, p.ID, p.Model, p.FallbackModel, *taskType)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\nselected: %s (%s)\n  %s\n", choice.Model, choice.Source, choice.Reason)
+	forecast, err := s.ForecastTokens(ctx, p.ID, *taskType)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("forecast: %d tokens (range %d~%d, samples %d, confidence %s)\n  %s\n",
+		forecast.Expected, forecast.Low, forecast.High, forecast.Samples, forecast.Confidence, forecast.Basis)
+	accuracy, err := s.EstimateAccuracy(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if accuracy.Samples > 0 {
+		fmt.Printf("estimate error: %.0f%% mean absolute over %d runs (over %d / under %d)\n",
+			accuracy.MeanAbsolutePercent, accuracy.Samples, accuracy.Overestimates, accuracy.Underestimates)
+	}
+	return nil
+}
+
+// activityReport summarizes what ran while nobody was watching: what
+// finished, what stopped and why, what is waiting on a decision, and the cost.
+func activityReport(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("report", flag.ContinueOnError)
+	since := f.Duration("since", 24*time.Hour, "window to summarize")
+	asJSON := f.Bool("json", false, "emit JSON instead of text")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *since <= 0 {
+		return errors.New("--since must be positive")
+	}
+	report, err := s.Activity(ctx, time.Now().UTC().Add(-*since))
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		encoded, encodeErr := json.MarshalIndent(report, "", "  ")
+		if encodeErr != nil {
+			return encodeErr
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	fmt.Printf("GoalForge report: %s ~ %s (%s)\n", report.Since.Format(time.RFC3339), report.Until.Format(time.RFC3339), *since)
+	fmt.Printf("runs=%d work_verified=%d tokens=%d cost_usd=%.4f\n", report.Runs, report.WorkCompleted, report.Tokens, report.CostUSD)
+	effect := report.Effect
+	fmt.Printf("rework=%.0f%% (%d verified / %d needing repair) blocked_for_user=%d takeovers=%d approvals=%d median_approval_wait=%s\n\n",
+		effect.ReworkRate, effect.VerifiedRuns, effect.RepairRuns, effect.BlockedForUser, effect.Takeovers, effect.ApprovalsNeeded,
+		(time.Duration(effect.MedianApprovalWaitSeconds) * time.Second).Round(time.Second))
+	for _, project := range report.Projects {
+		if project.Runs == 0 && project.WorkCompleted == 0 {
+			continue
+		}
+		fmt.Printf("%-20s %-16s runs=%d verified=%d progress=%.1f%% cost=$%.4f  %s\n",
+			project.Name, project.State, project.Runs, project.WorkCompleted, project.ProgressPercent, project.CostUSD, project.GoalTitle)
+	}
+	if len(report.Unresolved) > 0 {
+		fmt.Printf("\nunresolved (%d):\n", len(report.Unresolved))
+		for _, item := range report.Unresolved {
+			fmt.Printf("  %-12s %-20s %s %s\n    %s\n", item.State, item.ProjectName, item.RunID, item.FailureKind, item.Reason)
+		}
+	}
+	if len(report.Approvals) > 0 {
+		fmt.Printf("\napprovals waiting (%d):\n", len(report.Approvals))
+		for _, approval := range report.Approvals {
+			fmt.Printf("  %-20s %-22s %s  %s\n", approval.ProjectName, approval.ActionType, approval.ID, approval.Reason)
+		}
+	}
+	if len(report.Unresolved) == 0 && len(report.Approvals) == 0 {
+		fmt.Println("\nnothing is waiting on you.")
+	}
+	return nil
 }
 
 func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
@@ -826,6 +1532,8 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("approval request", flag.ContinueOnError)
 	action := f.String("action", "protected-files", "protected-files, publish-branch, or merge-branch")
 	reason := f.String("reason", "", "reason for approval")
+	workItemID := f.String("work-item", "", "work item whose verified commit is being approved (required for publish-branch and merge-branch)")
+	remote := f.String("remote", "origin", "git remote the publish approval applies to")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -847,12 +1555,58 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	approval, err := s.RequestApproval(ctx, p.ID, actionType, *reason)
+	scope, err := approvalScope(ctx, s, p, actionType, *workItemID, *remote)
 	if err != nil {
 		return err
 	}
+	approval, err := s.RequestScopedApproval(ctx, p.ID, actionType, *reason, scope)
+	if err != nil {
+		return err
+	}
+	if approval.Scope.Scoped() {
+		fmt.Printf("approval requested: %s action=%s work=%s commit=%s branch=%s target=%s files=%d\n",
+			approval.ID, approval.ActionType, scope.WorkItemID, shortSHA(scope.CommitSHA), scope.SourceBranch, scope.TargetRef, scope.FilesChanged)
+		return nil
+	}
 	fmt.Printf("approval requested: %s action=%s\n", approval.ID, approval.ActionType)
 	return nil
+}
+
+// approvalScope resolves what a publish or merge approval actually covers, so
+// the reviewer approves a named commit instead of an action type. Resolving it
+// at request time is also what makes a later commit detectable as a change the
+// approval no longer covers.
+func approvalScope(ctx context.Context, s *store.Store, p model.Project, actionType, workItemID, remote string) (store.ApprovalScope, error) {
+	if actionType != store.ApprovalMergeBranch && actionType != store.ApprovalPublishBranch {
+		if workItemID != "" {
+			return store.ApprovalScope{}, fmt.Errorf("--work-item does not apply to %s approvals", actionType)
+		}
+		return store.ApprovalScope{}, nil
+	}
+	if workItemID == "" {
+		return store.ApprovalScope{}, fmt.Errorf("--work-item is required for %s approvals so the approval names the commit being approved", actionType)
+	}
+	commit, err := s.LatestRunCommitForWork(ctx, p.ID, workItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.ApprovalScope{}, fmt.Errorf("work item %s has no verified commit yet; only verified work can be approved", workItemID)
+	}
+	if err != nil {
+		return store.ApprovalScope{}, err
+	}
+	scope := store.ApprovalScope{WorkItemID: workItemID, SourceBranch: commit.Branch, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+	if actionType == store.ApprovalMergeBranch {
+		scope.TargetRef = p.DefaultBranch
+	} else {
+		scope.TargetRef = remote
+	}
+	return scope, nil
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 func approvalApprove(ctx context.Context, s *store.Store, args []string) error {
@@ -871,17 +1625,30 @@ func approvalApprove(ctx context.Context, s *store.Store, args []string) error {
 }
 
 func approvalReject(ctx context.Context, s *store.Store, args []string) error {
-	if len(args) != 1 {
+	f := flag.NewFlagSet("approval reject", flag.ContinueOnError)
+	category := f.String("category", "", "why it was turned down: "+strings.Join(store.RejectionCategories, ", "))
+	note := f.String("note", "", "what specifically was wrong")
+	approvalID, rest := splitLeadingArg(args)
+	if err := f.Parse(rest); err != nil {
+		return err
+	}
+	if approvalID == "" && f.NArg() == 1 {
+		approvalID = f.Arg(0)
+	}
+	if approvalID == "" {
 		return errors.New("approval reject requires an approval ID")
 	}
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return err
 	}
-	if err = s.RejectApproval(ctx, p.ID, args[0]); err != nil {
+	if err = s.RejectApprovalWithReason(ctx, p.ID, approvalID, *category, *note); err != nil {
 		return err
 	}
-	fmt.Printf("approval rejected: %s\n", args[0])
+	fmt.Printf("approval rejected: %s\n", approvalID)
+	if *category == "" {
+		fmt.Println("  tip: --category records why, which is what turns one rejection into a signal about where automation is weak")
+	}
 	return nil
 }
 
@@ -1042,6 +1809,7 @@ func resumePaused(ctx context.Context, s *store.Store) error {
 		return err
 	}
 	fmt.Printf("resumed checkpoint: %s\nrun: %s state=%s resumed=%t\nverification: passed=%t goal_completed=%t progress=%.1f%%\n", result.Checkpoint.ID, result.Run.RunID, result.Run.State, result.Run.Resumed, result.Verification.Passed, result.Verification.GoalCompleted, result.Verification.Progress)
+	printRepair(result.Repair)
 	return nil
 }
 
@@ -1075,7 +1843,8 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	commandJSON := f.String("command-json", "", "JSON command array")
 	timeout := f.Int("timeout-seconds", 300, "timeout seconds")
 	optional := f.Bool("optional", false, "non-blocking gate")
-	success := f.String("success-value", "true", "criterion value on success")
+	success := f.String("success-value", "true", "criterion value on success (numeric values become a minimum threshold)")
+	valuePattern := f.String("value-pattern", "", "regular expression with one capture group extracting the measured value from the gate output")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -1090,8 +1859,12 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err = s.UpsertGate(ctx, p.ID, store.GateConfig{Type: *kind, Command: command, Timeout: time.Duration(*timeout) * time.Second, Required: !*optional, SuccessValue: *success}); err != nil {
+	if err = s.UpsertGate(ctx, p.ID, store.GateConfig{Type: *kind, Command: command, Timeout: time.Duration(*timeout) * time.Second, Required: !*optional, SuccessValue: *success, ValuePattern: *valuePattern}); err != nil {
 		return err
+	}
+	if *valuePattern != "" {
+		fmt.Printf("verification gate configured: %s %v measured=%s threshold=%s\n", *kind, command, *valuePattern, *success)
+		return nil
 	}
 	fmt.Printf("verification gate configured: %s %v\n", *kind, command)
 	return nil
@@ -1129,6 +1902,7 @@ func continueGoal(ctx context.Context, s *store.Store, args []string, developSel
 		return err
 	}
 	fmt.Printf("work item: %s %s\nrun: %s state=%s resumed=%t\nverification: passed=%t goal_completed=%t progress=%.1f%%\n", result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID, result.Run.State, result.Run.Resumed, result.Verification.Passed, result.Verification.GoalCompleted, result.Verification.Progress)
+	printRepair(result.Repair)
 	return nil
 }
 
@@ -1278,7 +2052,7 @@ func workAdd(ctx context.Context, s *store.Store, args []string) error {
 	title := f.String("title", "", "title")
 	kind := f.String("type", "IMPLEMENT", "type")
 	milestone := f.String("milestone", "", "milestone ID")
-	dependency := f.String("depends-on", "", "dependency work ID")
+	dependency := f.String("depends-on", "", "comma-separated work IDs that must be DONE first")
 	priority := f.Float64("priority", 0, "priority")
 	weight := f.Float64("weight", 1, "weight")
 	risk := f.String("risk", "medium", "risk")
@@ -1294,7 +2068,7 @@ func workAdd(ctx context.Context, s *store.Store, args []string) error {
 	if *estimatedTokens < 0 {
 		return errors.New("--estimated-tokens must be non-negative")
 	}
-	w, err := s.CreateWorkItem(ctx, model.WorkItem{GoalID: g.ID, MilestoneID: *milestone, Type: *kind, Title: *title, Priority: *priority, Dependency: *dependency, Risk: *risk, ChangeScope: *changeScope, Weight: *weight, EstimatedTokens: *estimatedTokens})
+	w, err := s.CreateWorkItem(ctx, model.WorkItem{GoalID: g.ID, MilestoneID: *milestone, Type: *kind, Title: *title, Priority: *priority, Dependencies: splitList(*dependency), Risk: *risk, ChangeScope: *changeScope, Weight: *weight, EstimatedTokens: *estimatedTokens})
 	if err != nil {
 		return err
 	}
@@ -1328,21 +2102,48 @@ func workList(ctx context.Context, s *store.Store) error {
 func workStatus(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("work status", flag.ContinueOnError)
 	status := f.String("set", "", "new status")
-	if err := f.Parse(args); err != nil {
+	// The documented form puts the ID first, and Go's flag package stops
+	// parsing at the first non-flag argument, so the ID is taken out before
+	// the flags are parsed instead of being silently ignored.
+	workID, rest := splitLeadingArg(args)
+	if err := f.Parse(rest); err != nil {
 		return err
 	}
-	if f.NArg() != 1 || *status == "" {
+	if workID == "" && f.NArg() == 1 {
+		workID = f.Arg(0)
+	}
+	if workID == "" || *status == "" {
 		return errors.New("work status requires ID and --set STATUS")
 	}
 	g, err := activeGoal(ctx, s)
 	if err != nil {
 		return err
 	}
-	if err := s.SetWorkItemStatus(ctx, g.ID, f.Arg(0), strings.ToUpper(*status)); err != nil {
+	if err := s.SetWorkItemStatus(ctx, g.ID, workID, strings.ToUpper(*status)); err != nil {
 		return err
 	}
-	fmt.Printf("work item updated: %s %s\n", f.Arg(0), strings.ToUpper(*status))
+	fmt.Printf("work item updated: %s %s\n", workID, strings.ToUpper(*status))
 	return nil
+}
+
+// splitLeadingArg pulls a leading positional argument off a command line so the
+// remaining flags parse normally.
+// splitList parses a comma-separated flag value, ignoring empty entries.
+func splitList(value string) []string {
+	var result []string
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func splitLeadingArg(args []string) (string, []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
 }
 
 func verifyRecord(ctx context.Context, s *store.Store, args []string) error {

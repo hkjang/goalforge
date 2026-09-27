@@ -27,11 +27,15 @@ type Service struct {
 	loopGuard     *planner.LoopGuard
 	newRunID      func() string
 	leaseDuration time.Duration
+	repairPolicy  store.RepairPolicy
 }
 type ContinueResult struct {
 	WorkItem     model.WorkItem
 	Run          orchestrator.Result
 	Verification verification.Report
+	// Repair is the decision about a failed verification: what failed and
+	// whether GoalForge may try again on its own.
+	Repair store.RepairPlan
 }
 type IdeasResult struct {
 	Run       orchestrator.Result
@@ -41,6 +45,7 @@ type ResumeResult struct {
 	Checkpoint   store.Checkpoint
 	Run          orchestrator.Result
 	Verification verification.Report
+	Repair       store.RepairPlan
 }
 
 func New(s *store.Store, p *planner.Service, o *orchestrator.Orchestrator, v *verification.Engine, newRunID func() string) (*Service, error) {
@@ -54,7 +59,8 @@ func New(s *store.Store, p *planner.Service, o *orchestrator.Orchestrator, v *ve
 	if err != nil {
 		return nil, err
 	}
-	return &Service{store: s, planner: p, orchestrator: o, verification: v, loopGuard: loopGuard, newRunID: newRunID, leaseDuration: 2 * time.Hour}, nil
+	return &Service{store: s, planner: p, orchestrator: o, verification: v, loopGuard: loopGuard, newRunID: newRunID,
+		leaseDuration: 2 * time.Hour, repairPolicy: store.DefaultRepairPolicy()}, nil
 }
 
 // Ideas discovers new goal-contributing work candidates (DISCOVER_IDEAS).
@@ -255,7 +261,7 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 		if changesErr != nil {
 			return result, changesErr
 		}
-		err = s.recordVerificationLoop(ctx, project, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
+		result.Repair, err = s.recordVerificationLoop(ctx, project, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
 	}
 	if err == nil && result.Verification.Passed && project.AutoCommitEnabled && result.Checkpoint.WorkItemID != "" {
 		goal, goalErr := s.store.CurrentGoal(ctx, project.ID)
@@ -275,7 +281,7 @@ func requiredGates(gates []store.GateConfig) ([]verification.Gate, error) {
 	result := make([]verification.Gate, 0, len(gates))
 	for _, g := range gates {
 		required = required || g.Required
-		result = append(result, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue})
+		result = append(result, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
 	}
 	if !required {
 		return nil, errors.New("at least one required verification gate must be configured")
@@ -379,6 +385,13 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 		}
 	}
 	rendered := prompt.Execution(goal, result.WorkItem, prompt.Budget{TokenLimit: budget.TokenLimit, TokensUsed: budget.TokensUsed, CostLimitUSD: budget.CostLimitUSD, CostUsedUSD: budget.CostUsedUSD})
+	// The assembled context is what keeps a fresh session from re-deriving
+	// settled decisions and repeating fixes that have already failed.
+	contextPackage, err := s.store.BuildContextPackage(ctx, project, goal, result.WorkItem)
+	if err != nil {
+		return result, err
+	}
+	rendered = prompt.WithContext(rendered, contextSections(contextPackage))
 	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.WorkItem.ID, Prompt: rendered, PromptTemplate: "work_item_execution", TaskType: taskType, Project: executionProject, WorkspaceWrite: true, EstimatedTokens: estimatedTokens})
 	auditErr := s.recordWorkspaceChanges(ctx, executionProject.RepositoryPath, runID, workspaceBefore)
 	if err != nil || auditErr != nil {
@@ -391,6 +404,15 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	if err != nil {
 		return result, err
 	}
+	// Deleting tests is the cheapest way to make a failing gate pass, so it is
+	// recorded for review even when the run goes on to verify.
+	if deleted := policy.DeletedTestFiles(changes); len(deleted) > 0 {
+		if relaxErr := s.store.RecordRelaxation(ctx, store.VerificationRelaxation{ProjectID: project.ID, RunID: result.Run.RunID,
+			Kind: "tests_deleted", Detail: "삭제된 테스트 파일: " + strings.Join(deleted, ", "),
+			Before: fmt.Sprintf("%d개 테스트 파일", len(deleted)), After: "삭제됨"}); relaxErr != nil {
+			return result, relaxErr
+		}
+	}
 	if drift := policy.OutOfScopeChanges(result.WorkItem.ChangeScope, changes); len(drift) > 0 {
 		details := "work item changed files outside declared scope: " + strings.Join(drift, ", ")
 		if recordErr := s.store.RecordPolicyViolation(ctx, project.ID, result.Run.RunID, "GOAL_DRIFT", details); recordErr != nil {
@@ -400,16 +422,37 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	}
 	verificationGates := make([]verification.Gate, 0, len(gates))
 	for _, g := range gates {
-		verificationGates = append(verificationGates, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue})
+		verificationGates = append(verificationGates, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
 	}
 	result.Verification, err = s.verification.Verify(ctx, result.Run.RunID, executionProject, verificationGates)
 	if err == nil {
-		err = s.recordVerificationLoop(ctx, project, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
+		result.Repair, err = s.recordVerificationLoop(ctx, project, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
 	}
 	if err == nil && result.Verification.Passed && project.AutoCommitEnabled {
 		err = s.commitVerifiedRun(ctx, project, executionProject.RepositoryPath, goal.ID, result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID)
 	}
 	return result, err
+}
+
+// contextSections converts an assembled context package into prompt sections.
+func contextSections(pkg store.ContextPackage) []prompt.ContextSection {
+	section := func(heading string, items []store.ContextItem) prompt.ContextSection {
+		lines := make([]prompt.ContextLine, 0, len(items))
+		for _, item := range items {
+			line := prompt.ContextLine{Title: item.Title, Body: item.Body, Source: item.Source}
+			if !item.AsOf.IsZero() {
+				line.AsOf = item.AsOf.Format("2006-01-02")
+			}
+			lines = append(lines, line)
+		}
+		return prompt.ContextSection{Heading: heading, Items: lines}
+	}
+	return []prompt.ContextSection{
+		section("이미 내려진 설계 결정", pkg.Decisions),
+		section("변경 제약", pkg.Constraints),
+		section("이 작업의 이전 실패", pkg.PastFailures),
+		section("검증 방법", pkg.Verification),
+	}
 }
 
 // commitVerifiedRun commits a verified run's changes with Goal/Work/Run
@@ -443,9 +486,17 @@ func (s *Service) recordWorkspaceChanges(ctx context.Context, repository, runID 
 // claims without any file change (LOOP-005, answered with a session rotation
 // before any block), and same_change catches runs that keep producing an
 // identical change set (LOOP-003).
-func (s *Service) recordVerificationLoop(ctx context.Context, project model.Project, workItemID, runID string, changes []gitops.FileChange, report verification.Report) error {
+// recordVerificationLoop records loop-guard signals for a failed verification
+// and decides whether the failure may be repaired automatically. The decision
+// is made here because this is the one place that sees every failed run.
+func (s *Service) recordVerificationLoop(ctx context.Context, project model.Project, workItemID, runID string, changes []gitops.FileChange, report verification.Report) (store.RepairPlan, error) {
+	var plan store.RepairPlan
 	if report.Passed {
-		return nil
+		return plan, nil
+	}
+	plan, planErr := s.store.PlanRepair(ctx, runID, s.repairPolicy)
+	if planErr != nil {
+		return plan, planErr
 	}
 	var failed []string
 	for _, result := range report.Results {
@@ -454,26 +505,26 @@ func (s *Service) recordVerificationLoop(ctx context.Context, project model.Proj
 		}
 	}
 	if len(failed) == 0 {
-		return nil
+		return plan, nil
 	}
 	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(failed, "\x00"))))
 	if _, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_error", fingerprint, runID); err != nil {
-		return err
+		return plan, err
 	}
 	if workItemID != "" {
 		if _, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_work", workItemID, runID); err != nil {
-			return err
+			return plan, err
 		}
 	}
 	if len(changes) == 0 {
 		action, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "no_change", "no-change:"+workItemID, runID)
 		if err != nil {
-			return err
+			return plan, err
 		}
 		if action == planner.LoopRotateSession {
-			return s.rotateSessionForLoop(ctx, project, "no_change_loop: repeated completion claims without file changes")
+			return plan, s.rotateSessionForLoop(ctx, project, "no_change_loop: repeated completion claims without file changes")
 		}
-		return nil
+		return plan, nil
 	}
 	var parts []string
 	for _, change := range changes {
@@ -481,8 +532,11 @@ func (s *Service) recordVerificationLoop(ctx context.Context, project model.Proj
 	}
 	changeFingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(parts, "\x00"))))
 	_, _, err := s.loopGuard.Record(ctx, project.ID, workItemID, "same_change", changeFingerprint, runID)
-	return err
+	return plan, err
 }
+
+// SetRepairPolicy overrides the automatic-repair limits.
+func (s *Service) SetRepairPolicy(repairPolicy store.RepairPolicy) { s.repairPolicy = repairPolicy }
 
 // rotateSessionForLoop retires the active provider session so the next run
 // starts fresh instead of continuing a conversation that stopped producing

@@ -74,13 +74,63 @@ CREATE TABLE IF NOT EXISTS work_items (
  type TEXT NOT NULL, title TEXT NOT NULL, priority REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'BACKLOG',
  dependency TEXT NOT NULL DEFAULT '', risk TEXT NOT NULL DEFAULT 'medium', change_scope TEXT NOT NULL DEFAULT '',
  weight REAL NOT NULL DEFAULT 1 CHECK(weight > 0),
- estimated_tokens INTEGER NOT NULL DEFAULT 0 CHECK(estimated_tokens >= 0)
+ estimated_tokens INTEGER NOT NULL DEFAULT 0 CHECK(estimated_tokens >= 0),
+ objective TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
+ blocked_reason TEXT NOT NULL DEFAULT '', owner TEXT NOT NULL DEFAULT 'AI'
+);
+CREATE TABLE IF NOT EXISTS design_decisions (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), goal_id TEXT NOT NULL DEFAULT '',
+ work_item_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, context TEXT NOT NULL DEFAULT '',
+ decision TEXT NOT NULL, alternatives TEXT NOT NULL DEFAULT '', consequences TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'ACCEPTED', superseded_by TEXT NOT NULL DEFAULT '',
+ base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS integration_checks (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), pending INTEGER NOT NULL DEFAULT 0,
+ reason TEXT NOT NULL DEFAULT '', target_sha TEXT NOT NULL DEFAULT '',
+ last_passed INTEGER NOT NULL DEFAULT 0, last_sha TEXT NOT NULL DEFAULT '',
+ last_details TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS evaluation_cases (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, kind TEXT NOT NULL,
+ repository TEXT NOT NULL DEFAULT '', goal_title TEXT NOT NULL DEFAULT '', goal_objective TEXT NOT NULL DEFAULT '',
+ notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(project_id,name)
+);
+CREATE TABLE IF NOT EXISTS evaluation_results (
+ id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES evaluation_cases(id), label TEXT NOT NULL,
+ run_id TEXT NOT NULL, project_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+ config_version TEXT NOT NULL DEFAULT '', passed INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
+ cost_usd REAL NOT NULL DEFAULT 0, interventions INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS takeovers (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), work_item_id TEXT NOT NULL,
+ reason TEXT NOT NULL DEFAULT '', workspace TEXT NOT NULL DEFAULT '', stopped_run_id TEXT NOT NULL DEFAULT '',
+ taken_at TEXT NOT NULL, returned_at TEXT NOT NULL DEFAULT '', return_summary TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS work_item_dependencies (
+ work_item_id TEXT NOT NULL REFERENCES work_items(id), depends_on_id TEXT NOT NULL REFERENCES work_items(id),
+ PRIMARY KEY(work_item_id,depends_on_id)
 );
 CREATE TABLE IF NOT EXISTS verification_results (
  id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id TEXT NOT NULL REFERENCES goals(id), run_id TEXT,
  check_type TEXT NOT NULL, status TEXT NOT NULL, actual_value TEXT NOT NULL DEFAULT '',
  command TEXT NOT NULL DEFAULT '', exit_code INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0,
- required INTEGER NOT NULL DEFAULT 1, output TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+ required INTEGER NOT NULL DEFAULT 1, output TEXT NOT NULL DEFAULT '',
+ failure_kind TEXT NOT NULL DEFAULT '', repair_mode TEXT NOT NULL DEFAULT '',
+ stale INTEGER NOT NULL DEFAULT 0, stale_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS verification_relaxations (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL DEFAULT '',
+ kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', before_value TEXT NOT NULL DEFAULT '',
+ after_value TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS repair_attempts (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), work_item_id TEXT NOT NULL,
+ run_id TEXT NOT NULL, failure_kind TEXT NOT NULL, repair_mode TEXT NOT NULL, decision TEXT NOT NULL,
+ reason TEXT NOT NULL DEFAULT '', attempt INTEGER NOT NULL DEFAULT 1, cost_usd REAL NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS provider_sessions (
  project_id TEXT NOT NULL REFERENCES projects(id), provider TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -144,7 +194,11 @@ CREATE TABLE IF NOT EXISTS run_file_changes (
 CREATE TABLE IF NOT EXISTS approvals (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), action_type TEXT NOT NULL,
  reason TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('PENDING','APPROVED','CONSUMED','REJECTED')),
- requested_at TEXT NOT NULL, approved_at TEXT, consumed_run_id TEXT
+ requested_at TEXT NOT NULL, approved_at TEXT, consumed_run_id TEXT,
+ work_item_id TEXT NOT NULL DEFAULT '', source_branch TEXT NOT NULL DEFAULT '',
+ rejection_category TEXT NOT NULL DEFAULT '', rejection_note TEXT NOT NULL DEFAULT '',
+ target_ref TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '',
+ files_changed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS policy_violations (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL REFERENCES runs(id),
@@ -214,7 +268,7 @@ CREATE TABLE IF NOT EXISTS loop_signals (
 CREATE TABLE IF NOT EXISTS verification_gates (
  project_id TEXT NOT NULL REFERENCES projects(id), check_type TEXT NOT NULL,
  command_json TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, required INTEGER NOT NULL DEFAULT 1,
- success_value TEXT NOT NULL DEFAULT 'true', created_at TEXT NOT NULL,
+ success_value TEXT NOT NULL DEFAULT 'true', value_pattern TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
  PRIMARY KEY(project_id,check_type)
 );
 CREATE INDEX IF NOT EXISTS idx_goals_project_version ON goals(project_id, version DESC);
@@ -247,13 +301,45 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "runs", "task_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "runs", "config_version", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "projects", "fallback_model", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	if err := s.ensureColumn(ctx, "projects", "wip_limit", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	for _, column := range []string{"failure_kind", "repair_mode", "stale_reason"} {
+		if err := s.ensureColumn(ctx, "verification_results", column, "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	if err := s.ensureColumn(ctx, "verification_results", "stale", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, definition string }{{"objective", "TEXT NOT NULL DEFAULT ''"}, {"acceptance", "TEXT NOT NULL DEFAULT ''"}, {"blocked_reason", "TEXT NOT NULL DEFAULT ''"}, {"owner", "TEXT NOT NULL DEFAULT 'AI'"}} {
+		if err := s.ensureColumn(ctx, "work_items", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct{ name, definition string }{{"rejection_category", "TEXT NOT NULL DEFAULT ''"}, {"rejection_note", "TEXT NOT NULL DEFAULT ''"}, {"work_item_id", "TEXT NOT NULL DEFAULT ''"}, {"source_branch", "TEXT NOT NULL DEFAULT ''"}, {"target_ref", "TEXT NOT NULL DEFAULT ''"}, {"commit_sha", "TEXT NOT NULL DEFAULT ''"}, {"files_changed", "INTEGER NOT NULL DEFAULT 0"}} {
+		if err := s.ensureColumn(ctx, "approvals", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	for _, column := range []struct{ name, definition string }{{"daily_run_limit", "INTEGER NOT NULL DEFAULT 0"}, {"daily_token_limit", "INTEGER NOT NULL DEFAULT 0"}, {"daily_cost_limit_usd", "REAL NOT NULL DEFAULT 0"}} {
 		if err := s.ensureColumn(ctx, "project_budgets", column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	// Single-predecessor rows predate the dependency table; carry them over
+	// so existing plans keep their ordering.
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO work_item_dependencies(work_item_id,depends_on_id) SELECT id,dependency FROM work_items WHERE dependency<>'' AND EXISTS(SELECT 1 FROM work_items d WHERE d.id=work_items.dependency)`); err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO provider_session_history(project_id,provider,session_id,status,last_run_id,created_at,updated_at) SELECT project_id,provider,session_id,status,last_run_id,updated_at,updated_at FROM provider_sessions`); err != nil {
 		return err
@@ -319,8 +405,11 @@ func (s *Store) CreateProject(ctx context.Context, p model.Project) error {
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		p.ID, p.Name, p.RepositoryPath, p.DefaultBranch, p.Provider, p.Model, p.FallbackModel, p.State, p.WorktreeEnabled, p.AutoCommitEnabled, p.CreatedAt.Format(time.RFC3339Nano))
+	if p.WIPLimit <= 0 {
+		p.WIPLimit = 1
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO projects(id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,wip_limit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.RepositoryPath, p.DefaultBranch, p.Provider, p.Model, p.FallbackModel, p.State, p.WorktreeEnabled, p.AutoCommitEnabled, p.WIPLimit, p.CreatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -328,8 +417,8 @@ func (s *Store) ProjectByPath(ctx context.Context, path string) (model.Project, 
 	path, _ = filepath.Abs(path)
 	var p model.Project
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects WHERE repository_path=?`, path).
-		Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,COALESCE(wip_limit,1),created_at FROM projects WHERE repository_path=?`, path).
+		Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &p.WIPLimit, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -342,7 +431,7 @@ func (s *Store) ProjectByPath(ctx context.Context, path string) (model.Project, 
 func (s *Store) ProjectByID(ctx context.Context, id string) (model.Project, error) {
 	var p model.Project
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,COALESCE(wip_limit,1),created_at FROM projects WHERE id=?`, id).Scan(&p.ID, &p.Name, &p.RepositoryPath, &p.DefaultBranch, &p.Provider, &p.Model, &p.FallbackModel, &p.State, &p.WorktreeEnabled, &p.AutoCommitEnabled, &p.WIPLimit, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -353,7 +442,7 @@ func (s *Store) ProjectByID(ctx context.Context, id string) (model.Project, erro
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,created_at FROM projects ORDER BY created_at,id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,repository_path,default_branch,provider,model,fallback_model,state,worktree_enabled,auto_commit_enabled,COALESCE(wip_limit,1),created_at FROM projects ORDER BY created_at,id`)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +451,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]model.Project, error) {
 	for rows.Next() {
 		var project model.Project
 		var created string
-		if err = rows.Scan(&project.ID, &project.Name, &project.RepositoryPath, &project.DefaultBranch, &project.Provider, &project.Model, &project.FallbackModel, &project.State, &project.WorktreeEnabled, &project.AutoCommitEnabled, &created); err != nil {
+		if err = rows.Scan(&project.ID, &project.Name, &project.RepositoryPath, &project.DefaultBranch, &project.Provider, &project.Model, &project.FallbackModel, &project.State, &project.WorktreeEnabled, &project.AutoCommitEnabled, &project.WIPLimit, &created); err != nil {
 			return nil, err
 		}
 		project.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -437,24 +526,58 @@ func (s *Store) loadGoal(ctx context.Context, query, projectID string) (model.Go
 	return g, rows.Err()
 }
 
+// ProgressDetail explains a goal's progress instead of reducing it to one
+// number: which weight is in scope, which was discarded out of scope, and
+// which completion criteria are actually backed by evidence.
+type ProgressDetail struct {
+	Percent                                  float64
+	Complete                                 bool
+	TotalWeight, DoneWeight, DiscardedWeight float64
+	TotalItems, DoneItems, DiscardedItems    int
+	Criteria                                 []CriterionStatus
+	CriteriaMet                              bool
+}
+
+// GoalProgress reports percent complete and whether the goal is finished.
 func (s *Store) GoalProgress(ctx context.Context, goal model.Goal) (float64, bool, error) {
-	var total, done float64
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(weight),0),COALESCE(SUM(CASE WHEN status='DONE' THEN weight ELSE 0 END),0) FROM work_items WHERE goal_id=?`, goal.ID).Scan(&total, &done); err != nil {
-		return 0, false, err
+	detail, err := s.GoalProgressDetail(ctx, goal)
+	return detail.Percent, detail.Complete, err
+}
+
+// GoalProgressDetail computes progress over the goal's in-scope work only.
+// DISCARDED items are removed from the baseline rather than counted as
+// outstanding: leaving them in the denominator made `done == total`
+// unreachable, so a single discarded item blocked goal completion forever.
+// Required completion criteria still have to be met with evidence.
+func (s *Store) GoalProgressDetail(ctx context.Context, goal model.Goal) (ProgressDetail, error) {
+	var detail ProgressDetail
+	if err := s.db.QueryRowContext(ctx, `SELECT
+COALESCE(SUM(CASE WHEN status<>'DISCARDED' THEN weight ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DONE' THEN weight ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DISCARDED' THEN weight ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status<>'DISCARDED' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DONE' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DISCARDED' THEN 1 ELSE 0 END),0)
+FROM work_items WHERE goal_id=?`, goal.ID).Scan(&detail.TotalWeight, &detail.DoneWeight, &detail.DiscardedWeight,
+		&detail.TotalItems, &detail.DoneItems, &detail.DiscardedItems); err != nil {
+		return detail, err
 	}
-	criteriaOK := len(goal.Criteria) > 0
-	for _, c := range goal.Criteria {
-		var actual, status string
-		err := s.db.QueryRowContext(ctx, `SELECT actual_value,status FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goal.ID, c.Type).Scan(&actual, &status)
-		if err != nil || status != "PASSED" || !criterionMet(c.ExpectedValue, actual) {
-			criteriaOK = false
+	criteria, err := s.CriteriaStatus(ctx, goal)
+	if err != nil {
+		return detail, err
+	}
+	detail.Criteria = criteria
+	detail.CriteriaMet = len(criteria) > 0
+	for _, c := range criteria {
+		if !c.Satisfied {
+			detail.CriteriaMet = false
 		}
 	}
-	progress := float64(0)
-	if total > 0 {
-		progress = done / total * 100
+	if detail.TotalWeight > 0 {
+		detail.Percent = detail.DoneWeight / detail.TotalWeight * 100
 	}
-	return progress, criteriaOK && total > 0 && done == total, nil
+	detail.Complete = detail.CriteriaMet && detail.TotalWeight > 0 && detail.DoneWeight == detail.TotalWeight
+	return detail, nil
 }
 
 func (s *Store) CreateMilestone(ctx context.Context, m model.Milestone) (model.Milestone, error) {
@@ -511,12 +634,22 @@ func (s *Store) CreateWorkItem(ctx context.Context, w model.WorkItem) (model.Wor
 	if w.MilestoneID != "" {
 		milestone = w.MilestoneID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Dependency, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens)
-	return w, err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return w, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens, w.Objective, w.Acceptance); err != nil {
+		return w, err
+	}
+	if err = s.setDependencies(ctx, tx, w.GoalID, w.ID, w.Dependencies); err != nil {
+		return w, err
+	}
+	return w, tx.Commit()
 }
 
 func (s *Store) ListWorkItems(ctx context.Context, goalID string) ([]model.WorkItem, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens FROM work_items WHERE goal_id=? ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'BACKLOG' THEN 1 ELSE 2 END, priority DESC, id`, goalID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE goal_id=? ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'BACKLOG' THEN 1 ELSE 2 END, priority DESC, id`, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -524,12 +657,22 @@ func (s *Store) ListWorkItems(ctx context.Context, goalID string) ([]model.WorkI
 	var result []model.WorkItem
 	for rows.Next() {
 		var w model.WorkItem
-		if err := rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens); err != nil {
+		if err := rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason); err != nil {
 			return nil, err
 		}
 		result = append(result, w)
 	}
-	return result, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	dependencies, err := s.dependencyRows(ctx, goalID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range result {
+		result[i].Dependencies = dependencies[result[i].ID]
+	}
+	return result, nil
 }
 
 func (s *Store) SetWorkItemStatus(ctx context.Context, goalID, workID, status string) error {
@@ -542,28 +685,22 @@ func (s *Store) SetWorkItemStatus(ctx context.Context, goalID, workID, status st
 		return err
 	}
 	defer tx.Rollback()
-	var dependency string
-	if err := tx.QueryRowContext(ctx, `SELECT dependency FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).Scan(&dependency); errors.Is(err, sql.ErrNoRows) {
+	var exists string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
 	}
 	if status == "IN_PROGRESS" {
-		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items WHERE goal_id=? AND status='IN_PROGRESS' AND id<>?`, goalID, workID).Scan(&active); err != nil {
+		if err := s.checkConcurrency(ctx, tx, goalID, workID); err != nil {
 			return err
 		}
-		if active > 0 {
-			return errors.New("implementation WIP limit reached: another item is in progress")
+		unmet, unmetErr := s.unmetDependencies(ctx, tx, workID)
+		if unmetErr != nil {
+			return unmetErr
 		}
-		if dependency != "" {
-			var dependencyStatus string
-			if err := tx.QueryRowContext(ctx, `SELECT status FROM work_items WHERE id=? AND goal_id=?`, dependency, goalID).Scan(&dependencyStatus); err != nil {
-				return fmt.Errorf("dependency %s is unavailable: %w", dependency, err)
-			}
-			if dependencyStatus != "DONE" {
-				return fmt.Errorf("dependency %s is not done", dependency)
-			}
+		if len(unmet) > 0 {
+			return fmt.Errorf("dependencies not done: %s", strings.Join(unmet, ", "))
 		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET status=? WHERE id=? AND goal_id=?`, status, workID, goalID)
@@ -596,6 +733,10 @@ func criterionMet(expected, actual string) bool {
 type RunRecord struct {
 	ID, ProjectID, WorkItemID, Provider, Model, State string
 	TaskType                                          string
+	// ConfigVersion identifies the configuration this run executed under, so
+	// a later change in success rate or cost can be attributed rather than
+	// guessed at.
+	ConfigVersion string
 }
 
 type SessionRecord struct {
@@ -657,7 +798,7 @@ func (s *Store) StartRun(ctx context.Context, run RunRecord) error {
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project is not runnable")
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,started_at) VALUES(?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,config_version,started_at) VALUES(?,?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, run.ConfigVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -889,6 +1030,20 @@ func (s *Store) SetProjectBudget(ctx context.Context, projectID string, tokenLim
 	_, err := s.db.ExecContext(ctx, `INSERT INTO project_budgets(project_id,token_limit,cost_limit_usd,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET token_limit=excluded.token_limit,cost_limit_usd=excluded.cost_limit_usd,updated_at=excluded.updated_at`, projectID, tokenLimit, costLimit, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
+
+// ProjectBudgetConfig reads every configured limit without usage. Editing one
+// limit needs the rest of them, and the usage query returns only the two
+// totals it joins over.
+func (s *Store) ProjectBudgetConfig(ctx context.Context, projectID string) (ProjectBudget, error) {
+	var b ProjectBudget
+	err := s.db.QueryRowContext(ctx, `SELECT token_limit,cost_limit_usd,daily_run_limit,daily_token_limit,daily_cost_limit_usd FROM project_budgets WHERE project_id=?`, projectID).
+		Scan(&b.TokenLimit, &b.CostLimitUSD, &b.DailyRunLimit, &b.DailyTokenLimit, &b.DailyCostLimitUSD)
+	if errors.Is(err, sql.ErrNoRows) {
+		return b, ErrNotFound
+	}
+	return b, err
+}
+
 func (s *Store) ProjectBudgetUsage(ctx context.Context, projectID string) (ProjectBudget, error) {
 	var b ProjectBudget
 	err := s.db.QueryRowContext(ctx, `SELECT b.token_limit,b.cost_limit_usd,COALESCE(SUM(CASE WHEN l.token_type<>'cost_usd' THEN l.amount ELSE 0 END),0),COALESCE(SUM(l.cost),0) FROM project_budgets b LEFT JOIN runs r ON r.project_id=b.project_id LEFT JOIN usage_ledger l ON l.run_id=r.id WHERE b.project_id=? GROUP BY b.project_id,b.token_limit,b.cost_limit_usd`, projectID).Scan(&b.TokenLimit, &b.CostLimitUSD, &b.TokensUsed, &b.CostUsedUSD)

@@ -43,13 +43,18 @@ goalforge project init --name N [--repo .] [--provider codex|claude|qwen|opencod
                        [--fallback-model M] [--worktrees] [--auto-commit]
 goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily-tokens 250000 --daily-cost-usd 15
 goalforge project runtime --turn-timeout 30m --run-timeout 2h
+goalforge project concurrency --wip 2      # only items with disjoint change scopes run together
+goalforge project profile personal|team|production   # an operating posture as one set of limits
 goalforge project provider set --provider claude --model sonnet --reason "..."
 goalforge goal set --title T --objective O --criterion build_passed=true [--reason ...]
 goalforge goal show
 goalforge milestone add --title T --weight 2
 goalforge work add --title T --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
+                   [--depends-on WORK-1,WORK-2]   # every predecessor must be DONE first
 goalforge work list | work status ID --set APPROVED
+goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
 goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100]
+                          [--value-pattern 'coverage:\s+([0-9.]+)%']   # measure, do not assume
 ```
 
 ### Discovery, execution, replanning
@@ -78,9 +83,9 @@ pass is committed in its worktree as author `GoalForge` with
 `Goal-ID`/`Work-Item-ID`/`Run-ID` trailers, never on the default branch.
 
 ```sh
-goalforge approval request --action merge-branch --reason "..."   # then: approval approve APR-...
+goalforge approval request --action merge-branch --work-item WORK-1 --reason "..."
 goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
-goalforge approval request --action publish-branch --reason "..."
+goalforge approval request --action publish-branch --work-item WORK-1 [--remote origin] --reason "..."
 goalforge publish --work-item WORK-1 [--remote origin]
 goalforge worktree gc [--force]        # remove worktrees of DONE/DISCARDED items; branches kept
 goalforge rollback --work-item WORK-1 --reason "..."
@@ -90,10 +95,23 @@ goalforge rollback --work-item WORK-1 --reason "..."
 
 ```sh
 goalforge status | usage | sessions | logs [--limit 50]
+goalforge report [--since 24h] [--json]    # what ran, what stopped and why, what awaits you
+goalforge models [--task-type CONTINUE_GOAL]  # model records, the next choice and why, cost forecast
+goalforge verify integration               # verify the merged result on the default branch
+goalforge decision add --title T --decision "..." [--alternatives "..."] [--consequences "..."] [--supersedes DEC-1]
+goalforge decision list [--all]            # settled architecture, inherited by every later session
+goalforge reproduce --run RUN-1 [--out ./repro]   # commit, workspace, gate commands, logs, environment
+goalforge takeover --work-item WORK-1 --reason "..."        # stop automation and take the workspace
+goalforge takeover return --work-item WORK-1 --summary "..." # re-verify and hand it back
+goalforge eval add --name N --kind bug_fix|feature|refactor|docs --objective "..."
+goalforge eval record --case EVAL-1 --label "haiku+v2" --run RUN-1
+goalforge eval compare [--case EVAL-1]     # pass rate, cost per run, manual interventions by label
+goalforge approval reject APR-1 --category code_quality --note "..."
+goalforge pr --work-item WORK-1            # a PR body carrying the goal, criteria, and evidence
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
-goalforge approval request --action protected-files|publish-branch|merge-branch --reason "..."
+goalforge approval request --action protected-files|publish-branch|merge-branch [--work-item WORK-1] --reason "..."
 goalforge approval approve APR-ID
 GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
 ```
@@ -166,6 +184,121 @@ Before writable AI runs, GoalForge hashes protected repository files such as
 change, or deletion blocks verification, returns the work item to the backlog,
 sets the project to `BLOCKED`, and records a policy violation. Protected-file
 approvals require an explicit request and approval and are consumed by one run.
+
+Merge and publish approvals are bound to the work item, the verified commit
+SHA, and the destination (default branch or remote) resolved when the approval
+is requested. An approval therefore covers one reviewed change: it cannot be
+spent by another work item, and if the work item is re-run and produces a new
+commit the approval is reported as stale so the new change is reviewed instead
+of inheriting the old decision.
+
+`goalforge verify template` installs a starting set of gates for a kind of
+project without replacing thresholds someone chose deliberately, and
+`goalforge project profile` expresses an operating posture — personal, team,
+production — as the budget, concurrency, and repair limits that implement it.
+`goalforge pr` emits a pull request body carrying the goal, the work item's
+purpose and acceptance criteria, the gate results, the completion criteria it
+moves, the changed files, and the trailers linking them, so a reviewer sees
+what was achieved and how it was proven without reconstructing it from commits.
+
+Improving the automation needs a fixed yardstick, so a prompt, model, or
+policy change can be told apart from the work that happened to come up.
+`goalforge eval` registers representative cases by kind, attaches completed
+runs to them under a configuration label, and compares labels by the verified
+pass rate, the cost per run, and the manual interventions each needed —
+passing means every required gate passed, not that the run finished. Every run
+is stamped with a fingerprint of the configuration it executed under.
+Rejections record why the work was turned down, so the recurring reason is
+visible rather than buried in individual approvals, and `goalforge report` adds
+the rework rate, how often automation stopped for a person, and the median
+approval wait.
+
+When automation cannot finish something, two things make handing it to a person
+cheap. `goalforge reproduce` writes the commit, the workspace, the exact gate
+commands, their output, and the environment diagnosis as a runnable package —
+it does not try to make the model produce the same output again, which is not
+reproducible and not what investigating a failure needs. `goalforge takeover`
+is more than a pause: it refuses while a run is still executing, transfers the
+workspace, stops the planner from claiming the item, and on return re-runs the
+gates so a hand edit is verified like any other change.
+
+A passing verification result is a statement about a particular tree checked by
+a particular command. When the gate changes, or work is merged into the default
+branch, the affected evidence is marked as needing re-verification and stops
+counting toward completion until it is re-run — `verify integration` records
+the integrated result as the new current evidence. Changes that make passing
+easier rather than making the result better — a lowered threshold, a required
+gate turned optional, deleted test files — are recorded and shown for review
+rather than blocked: relaxing a standard can be the right call, but it must not
+be mistaken for progress.
+
+Every execution prompt now carries an assembled context package for its work
+item: the settled design decisions with the commit they were made against, the
+change constraints, what previous attempts at the same item actually failed on,
+and the gates and criteria that will judge the result — each line with its
+source and date. It is appended with the rules that make it usable: a decision
+is settled unless the session proposes changing it as its next action, a
+previously failed approach may not be retried without saying what changed, and
+verification is never relaxed. Decisions are recorded rather than deleted; one
+is superseded by another, because the record of what was rejected is what stops
+it being proposed again.
+
+Work items may declare several predecessors, and a dependency that would close
+a cycle is refused where it is created. `project concurrency --wip N` raises
+how many items may be implemented at once, but items still only run together
+when their declared change scopes are disjoint: two sessions editing the same
+files in separate worktrees produce a conflict neither of them verified. For
+the same reason a merge marks the default branch as needing integration
+verification — each item verified inside its own worktree, and nothing has yet
+verified their combination — which `goalforge verify integration` clears.
+
+`goalforge models` compares the approved models by the verified success rate
+their runs actually achieved, not by whether the provider call returned, and
+selects between the configured model and the approved fallback only when the
+evidence is strong enough, always with the reason. Token forecasts are a range
+with a sample count and a stated confidence rather than a single number, and
+the estimate error against actual usage is tracked.
+
+A failed verification is classified before it is retried: test and build
+failures and unmet thresholds are repairable by a code fix, while a missing
+tool, an unreachable host, an expired credential, or a dependency that will
+not resolve are not — re-running a model against those only spends budget.
+Automatic repair is capped by attempts and by the cost already spent repairing
+the same work item (2 attempts and $5 by default), and the worker stops
+rescheduling as soon as the failure is one it cannot fix. `goalforge report`
+summarizes a window of automated work: what finished, what stopped and why,
+what is waiting on a decision, and what it cost.
+
+The dashboard's live view streams run events over Server-Sent Events with
+incremental fetches, and shows its own connection state: a feed that went quiet
+because the connection dropped must not look like a run that went quiet because
+nothing is happening.
+
+Completion is judged over in-scope work only. `DISCARDED` items leave the
+goal's baseline rather than counting as outstanding, so dropping an idea
+restates the denominator instead of making completion unreachable; required
+completion criteria still have to be met with verification evidence. A gate
+with `--value-pattern` records the value it measured from its own output and
+fails when that value is below `--success-value`, so numeric criteria such as
+coverage are proven by measurement rather than by configuration.
+
+A first project can be set up from the dashboard as well as the CLI: the
+`#/new` flow walks repository → environment diagnosis (the same checks as
+`goalforge doctor`, which now blocks on a directory that is not a repository)
+→ goal → completion criteria → execution policy, and refuses to continue while
+a blocking diagnostic stands.
+
+The dashboard at `serve` follows the decision, not the data model. The home
+view leads with what needs a decision — approvals, projects needing repair,
+budgets near a limit — each with its cause, effect, and recommended action. A
+project opens on an overview (current item, next item, last run, expected cost)
+with plan, runs, verification, and cost behind tabs. Work items have a detail
+page with an editable specification (objective, acceptance criteria, scope,
+dependency, estimate) and the blockers that explain why an action is
+unavailable; saving a specification never changes status. A run opens as a
+change review: verdict, gates with full output, changed files, the diff, and
+the prompt that caused it. An approval opens with its grounds: the commit, the
+files, the gates, the destination, and how to undo it.
 
 `status` remains available after goal completion and reports weighted progress,
 run success/failure and average duration, work-item outcomes, verification pass

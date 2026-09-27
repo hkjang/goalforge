@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/model"
@@ -41,7 +42,10 @@ func (s *Store) CreateScoredIdea(ctx context.Context, w model.WorkItem, score mo
 	if w.MilestoneID != "" {
 		milestone = w.MilestoneID
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,dependency,risk,change_scope,weight,estimated_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Dependency, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,milestone_id,type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, w.ID, w.GoalID, milestone, w.Type, w.Title, w.Priority, w.Status, w.Risk, w.ChangeScope, w.Weight, w.EstimatedTokens, w.Objective, w.Acceptance); err != nil {
+		return w, err
+	}
+	if err = s.setDependencies(ctx, tx, w.GoalID, w.ID, w.Dependencies); err != nil {
 		return w, err
 	}
 	scope, approval := 0, 0
@@ -123,19 +127,30 @@ func (s *Store) ClaimNextWorkItem(ctx context.Context, goalID string) (model.Wor
 		return w, err
 	}
 	defer tx.Rollback()
-	var active int
+	var active, limit int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items WHERE goal_id=? AND status='IN_PROGRESS'`, goalID).Scan(&active); err != nil {
 		return w, err
 	}
-	if active > 0 {
-		return w, errors.New("implementation WIP limit reached")
+	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(p.wip_limit,1) FROM goals g JOIN projects p ON p.id=g.project_id WHERE g.id=?`, goalID).Scan(&limit); err != nil {
+		return w, err
 	}
-	err = tx.QueryRowContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.dependency,w.risk,w.change_scope,w.weight,w.estimated_tokens FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(i.approval_required,0)=0 AND (w.dependency='' OR EXISTS(SELECT 1 FROM work_items d WHERE d.id=w.dependency AND d.status='DONE')) ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT 1`, goalID).Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Dependency, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens)
+	if limit <= 0 {
+		limit = 1
+	}
+	if active >= limit {
+		return w, fmt.Errorf("implementation WIP limit reached: %d of %d items in progress", active, limit)
+	}
+	err = tx.QueryRowContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.risk,w.change_scope,w.weight,w.estimated_tokens,w.objective,w.acceptance,w.blocked_reason FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(w.owner,'AI')='AI' AND COALESCE(i.approval_required,0)=0 AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d LEFT JOIN work_items p ON p.id=d.depends_on_id WHERE d.work_item_id=w.id AND COALESCE(p.status,'')<>'DONE') ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT 1`, goalID).Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, ErrNotFound
 	}
 	if err != nil {
 		return w, err
+	}
+	if active > 0 {
+		if err = s.checkConcurrency(ctx, tx, goalID, w.ID); err != nil {
+			return w, err
+		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET status='IN_PROGRESS' WHERE id=? AND status=?`, w.ID, w.Status)
 	if err != nil {

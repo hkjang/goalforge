@@ -40,3 +40,101 @@ func OutOfScopeChanges(scope string, changes []gitops.FileChange) []string {
 	sort.Strings(violations)
 	return violations
 }
+
+// ScopesOverlap reports whether two declared change scopes could touch the
+// same files. Running two work items at once is only safe when their scopes
+// are disjoint; an empty scope means "anywhere", which overlaps everything.
+func ScopesOverlap(left, right string) bool {
+	leftPatterns, rightPatterns := scopePatterns(left), scopePatterns(right)
+	if len(leftPatterns) == 0 || len(rightPatterns) == 0 {
+		return true
+	}
+	for _, a := range leftPatterns {
+		for _, b := range rightPatterns {
+			if patternsOverlap(a, b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func scopePatterns(scope string) []string {
+	var result []string
+	for _, pattern := range strings.Split(scope, ",") {
+		if pattern = strings.TrimSpace(strings.TrimPrefix(pattern, "./")); pattern != "" {
+			result = append(result, pattern)
+		}
+	}
+	return result
+}
+
+// patternsOverlap compares two scope patterns conservatively: anything it
+// cannot prove disjoint is treated as overlapping, because a false "safe"
+// answer means two sessions editing the same file.
+func patternsOverlap(a, b string) bool {
+	prefixA, wildA := scopePrefix(a)
+	prefixB, wildB := scopePrefix(b)
+	if strings.HasPrefix(prefixA, prefixB) || strings.HasPrefix(prefixB, prefixA) {
+		return true
+	}
+	if !wildA && !wildB {
+		return prefixA == prefixB
+	}
+	return false
+}
+
+// scopePrefix reduces a pattern to the literal directory prefix before any
+// wildcard, which is what decides whether two scopes can reach each other.
+func scopePrefix(pattern string) (string, bool) {
+	pattern = strings.TrimSuffix(pattern, "/**")
+	index := strings.IndexAny(pattern, "*?[")
+	if index < 0 {
+		return strings.TrimSuffix(pattern, "/"), false
+	}
+	prefix := pattern[:index]
+	if cut := strings.LastIndex(prefix, "/"); cut >= 0 {
+		return prefix[:cut], true
+	}
+	return "", true
+}
+
+// DeletedTestFiles reports test files a change removed. Deleting a test is the
+// cheapest way to make a failing gate pass, so a run that does it is surfaced
+// for review rather than counted as progress.
+func DeletedTestFiles(changes []gitops.FileChange) []string {
+	var deleted []string
+	for _, change := range changes {
+		if !strings.EqualFold(change.ChangeType, "deleted") && !strings.EqualFold(change.ChangeType, "removed") {
+			continue
+		}
+		if IsTestPath(change.Path) {
+			deleted = append(deleted, change.Path)
+		}
+	}
+	return deleted
+}
+
+// IsTestPath recognizes the common test-file conventions across the languages
+// GoalForge's providers are likely to be pointed at.
+func IsTestPath(path string) bool {
+	name := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	base := name
+	if cut := strings.LastIndex(name, "/"); cut >= 0 {
+		base = name[cut+1:]
+	}
+	switch {
+	case strings.HasSuffix(base, "_test.go"), strings.HasSuffix(base, "_test.py"), strings.HasPrefix(base, "test_"):
+		return true
+	case strings.Contains(base, ".test."), strings.Contains(base, ".spec."):
+		return true
+	case strings.HasSuffix(base, "test.java"), strings.HasSuffix(base, "tests.cs"):
+		return true
+	}
+	for _, directory := range []string{"test/", "tests/", "spec/", "__tests__/"} {
+		if strings.HasPrefix(name, directory) || strings.Contains(name, "/"+directory) {
+			return true
+		}
+	}
+	return false
+}
