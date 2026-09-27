@@ -75,6 +75,7 @@ ship       approval request | approval list | approval approve ID | approval rej
            merge --work-item ID | publish --work-item ID | rollback | worktree gc
 handoff    takeover --work-item ID | takeover return --work-item ID
 evaluate   eval add | eval list | eval record | eval compare
+operate    backup --out FILE | restore --from FILE --to PATH | effects [--reconcile]
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
            checkpoint --next-action TEXT`
 
@@ -100,6 +101,7 @@ var privilegedCommands = map[string]string{
 	"eval spec":                "평가 기준 변경",
 	"takeover":                 "작업 인계",
 	"storage postgres migrate": "저장소 마이그레이션",
+	"restore":                  "상태 복원",
 }
 
 // commandAuthority names the operation for a command line, or an empty string
@@ -267,6 +269,10 @@ func run(ctx context.Context, args []string) error {
 		return takeoverStart(ctx, s, args[1:])
 	case "evidence":
 		return evidenceExport(ctx, s, args[1:])
+	case "backup":
+		return backupState(ctx, s, args[1:])
+	case "restore":
+		return restoreState(ctx, args[1:])
 	case "effects":
 		return effectsShow(ctx, s, args[1:])
 	case "reproduce":
@@ -1748,6 +1754,119 @@ func takeoverReturn(ctx context.Context, s *store.Store, args []string) error {
 	return nil
 }
 
+// backupState writes a consistent copy of the state database.
+func backupState(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("backup", flag.ContinueOnError)
+	out := f.String("out", "", "file to write the backup to")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *out == "" {
+		return errors.New("--out is required")
+	}
+	manifest, err := s.Backup(ctx, *out)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(*out+".manifest.json", encoded, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("backup written: %s (%d bytes, digest %s)\n  프로젝트 %d · 실행 %d · 외부 효과 %d · 승인 %d · 증거 %d\n",
+		*out, manifest.SizeBytes, manifest.Digest, manifest.Projects, manifest.Runs, manifest.Effects,
+		manifest.Approvals, manifest.Evidence)
+	return nil
+}
+
+// restoreState brings a backup up in a new location and checks two things
+// before anything is allowed to resume: that the records match what was taken,
+// and that nothing GoalForge started outside is still unresolved. Resuming
+// with an unsettled push or merge is how a restore produces a duplicate.
+func restoreState(ctx context.Context, args []string) error {
+	f := flag.NewFlagSet("restore", flag.ContinueOnError)
+	from := f.String("from", "", "backup file to restore")
+	to := f.String("to", "", "path for the restored state database")
+	reconcile := f.Bool("reconcile", true, "settle external effects left unresolved by the failure")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *from == "" || *to == "" {
+		return errors.New("--from and --to are required")
+	}
+	if _, err := os.Stat(*to); err == nil {
+		return fmt.Errorf("%s already exists; restore refuses to overwrite live state", *to)
+	}
+	source, err := os.ReadFile(*from)
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Dir(*to), 0o750); err != nil {
+		return err
+	}
+	if err = os.WriteFile(*to, source, 0o600); err != nil {
+		return err
+	}
+	restored, err := store.Open(*to)
+	if err != nil {
+		return err
+	}
+	defer restored.Close()
+	inventory, err := restored.Inventory(ctx)
+	if err != nil {
+		return err
+	}
+	if manifestBytes, readErr := os.ReadFile(*from + ".manifest.json"); readErr == nil {
+		var manifest store.BackupManifest
+		if err = json.Unmarshal(manifestBytes, &manifest); err != nil {
+			return err
+		}
+		differences := manifest.Matches(inventory)
+		if len(differences) > 0 {
+			return fmt.Errorf("restored records do not match the backup: %s", strings.Join(differences, "; "))
+		}
+		fmt.Printf("restored and verified against the backup manifest (%s 기준)\n", manifest.TakenAt.Format(time.RFC3339))
+	} else {
+		fmt.Println("no manifest beside the backup; records restored but not compared")
+	}
+	fmt.Printf("  프로젝트 %d · 실행 %d · 외부 효과 %d · 승인 %d · 증거 %d\n",
+		inventory.Projects, inventory.Runs, inventory.Effects, inventory.Approvals, inventory.Evidence)
+	if !*reconcile {
+		fmt.Println("  --reconcile=false: 미해결 외부 효과를 정산하지 않았습니다. 재개 전에 goalforge effects --reconcile 을 실행하세요.")
+		return nil
+	}
+	projects, err := restored.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	unresolved := 0
+	for _, project := range projects {
+		results, reconcileErr := app.ReconcileAll(ctx, restored, project)
+		if reconcileErr != nil {
+			return reconcileErr
+		}
+		for _, result := range results {
+			verdict := "확인 불가 — 재개 전에 사람이 판단해야 합니다"
+			switch {
+			case result.Resolved && result.Applied:
+				verdict = "이미 반영됨"
+			case result.Resolved:
+				verdict = "반영되지 않음 — 재시도 가능"
+			default:
+				unresolved++
+			}
+			fmt.Printf("  %-16s %-14s %s — %s\n", project.Name, result.Effect.Kind, verdict, result.Detail)
+		}
+	}
+	if unresolved > 0 {
+		return fmt.Errorf("%d개의 외부 효과 결과를 확인할 수 없습니다. 정산 전에는 재개하지 마세요", unresolved)
+	}
+	fmt.Println("safe to resume")
+	return nil
+}
+
 // effectsShow lists what GoalForge changed outside its own database and
 // settles anything whose outcome was never recorded. A retry that skips this
 // is how the same push or merge happens twice.
@@ -2082,7 +2201,21 @@ func verifyIntegration(ctx context.Context, s *store.Store, args []string) error
 		return goalErr
 	}
 	if !passed {
-		return fmt.Errorf("integration verification failed on %s (%s)", p.DefaultBranch, strings.Join(details, "; "))
+		// A failing combination is work, not just an error message: without an
+		// item nobody is assigned to it and the branch stays unreleasable with
+		// no plan to change that.
+		if goalErr == nil {
+			item, created, repairErr := s.RecordIntegrationFailure(ctx, p.ID, goal.ID, branchSHA, details)
+			if repairErr != nil {
+				return repairErr
+			}
+			verb := "기존 통합 수정 작업을 갱신했습니다"
+			if created {
+				verb = "통합 수정 작업을 만들었습니다"
+			}
+			fmt.Printf("%s: %s %s\n", verb, item.ID, item.Title)
+		}
+		return fmt.Errorf("integration verification failed on %s (%s) — 출시 불가", p.DefaultBranch, strings.Join(details, "; "))
 	}
 	fmt.Printf("integration verified: %s at %s\n", p.DefaultBranch, branchSHA)
 	return nil

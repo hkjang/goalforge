@@ -95,6 +95,8 @@ pass is committed in its worktree as author `GoalForge` with
 goalforge approval request --action merge-branch --work-item WORK-1 --reason "..."
 goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
 goalforge effects [--reconcile]        # what was changed outside, and settle anything unresolved
+goalforge backup --out FILE            # consistent copy of the state database
+goalforge restore --from FILE --to PATH  # verify the records, settle outside work, then resume
 goalforge approval request --action publish-branch --work-item WORK-1 [--remote origin] --reason "..."
 goalforge publish --work-item WORK-1 [--remote origin]
 goalforge worktree gc [--force]        # remove worktrees of DONE/DISCARDED items; branches kept
