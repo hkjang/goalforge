@@ -92,6 +92,17 @@ func ReconcileAll(ctx context.Context, db *store.Store, project model.Project) (
 // and could not be settled. Doing it anyway is exactly the duplicate the
 // ledger exists to prevent.
 func GuardEffect(ctx context.Context, db *store.Store, project model.Project, effect store.ExternalEffect) error {
+	return GuardEffectAs(ctx, db, project, effect, store.Lease{})
+}
+
+// GuardEffectAs is GuardEffect for a caller holding a lease. A worker whose
+// tenancy ended must not start something outside: it cannot know whether it
+// was cancelled or replaced while it was working, and the effect would be
+// attributed to a project that has moved on without it.
+func GuardEffectAs(ctx context.Context, db *store.Store, project model.Project, effect store.ExternalEffect, lease store.Lease) error {
+	if err := db.Fence(ctx, lease); err != nil {
+		return err
+	}
 	existing, created, err := db.BeginEffect(ctx, effect)
 	if err != nil {
 		return err

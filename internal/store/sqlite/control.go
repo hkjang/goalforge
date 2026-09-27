@@ -27,6 +27,15 @@ func (s *Store) RequestRunControl(ctx context.Context, projectID, action string)
 		return request, err
 	}
 	request.ID, request.ProjectID, request.Action, request.Status = NewID("CTRL"), projectID, action, "PENDING"
+	// Cancelling ends the current tenancy. A run that was already under way
+	// may still finish its work, but it can no longer confirm state or start
+	// an external effect: the point of a cancel is that what follows it does
+	// not happen.
+	if action == "CANCEL" {
+		if _, bumpErr := s.BumpGeneration(ctx, projectID); bumpErr != nil {
+			return request, bumpErr
+		}
+	}
 	request.RequestedAt = time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO run_control_requests(id,project_id,run_id,action,status,requested_at) VALUES(?,?,?,?,?,?)`, request.ID, projectID, request.RunID, action, request.Status, request.RequestedAt.Format(time.RFC3339Nano))
 	if err != nil {

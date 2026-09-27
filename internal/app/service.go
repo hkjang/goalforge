@@ -301,7 +301,10 @@ func (s *Service) Develop(ctx context.Context, project model.Project) (ContinueR
 
 func (s *Service) executeNext(ctx context.Context, project model.Project, taskType string) (result ContinueResult, err error) {
 	runID := s.newRunID()
-	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+	// The lease carries a generation, so a cancel or a takeover part-way
+	// through this run is detectable before anything is confirmed.
+	lease, err := s.store.AcquireGenerationLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration)
+	if err != nil {
 		return result, err
 	}
 	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
@@ -407,6 +410,12 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	auditErr := s.recordWorkspaceChanges(ctx, executionProject.RepositoryPath, runID, workspaceBefore)
 	if err != nil || auditErr != nil {
 		return result, errors.Join(err, auditErr)
+	}
+	// The work is done; whether it may be confirmed is a separate question. A
+	// cancel or a takeover while the provider was running ends this tenancy,
+	// and a late confirmation would overwrite whatever has been running since.
+	if err = s.store.Fence(ctx, lease); err != nil {
+		return result, err
 	}
 	if err = s.enforceProtectedFiles(ctx, executionProject, result.Run.RunID, protectedBefore); err != nil {
 		return result, err

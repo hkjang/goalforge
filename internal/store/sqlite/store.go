@@ -257,7 +257,7 @@ CREATE TABLE IF NOT EXISTS scheduler_jobs (
 );
 CREATE TABLE IF NOT EXISTS process_leases (
  project_id TEXT PRIMARY KEY REFERENCES projects(id), owner TEXT NOT NULL, expires_at TEXT NOT NULL,
- heartbeat_at TEXT NOT NULL
+ heartbeat_at TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS run_control_requests (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL REFERENCES runs(id),
@@ -326,6 +326,9 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 		return err
 	}
 	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "process_leases", "generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
 	for _, column := range []string{"failure_kind", "repair_mode", "stale_reason", "tree_id", "evaluator_id"} {
