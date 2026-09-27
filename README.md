@@ -183,6 +183,18 @@ with `--value-pattern` records the value it measured from its own output and
 fails when that value is below `--success-value`, so numeric criteria such as
 coverage are proven by measurement rather than by configuration.
 
+The dashboard at `serve` follows the decision, not the data model. The home
+view leads with what needs a decision — approvals, projects needing repair,
+budgets near a limit — each with its cause, effect, and recommended action. A
+project opens on an overview (current item, next item, last run, expected cost)
+with plan, runs, verification, and cost behind tabs. Work items have a detail
+page with an editable specification (objective, acceptance criteria, scope,
+dependency, estimate) and the blockers that explain why an action is
+unavailable; saving a specification never changes status. A run opens as a
+change review: verdict, gates with full output, changed files, the diff, and
+the prompt that caused it. An approval opens with its grounds: the commit, the
+files, the gates, the destination, and how to undo it.
+
 `status` remains available after goal completion and reports weighted progress,
 run success/failure and average duration, work-item outcomes, verification pass
 rate, active session count, token categories, and accumulated cost.

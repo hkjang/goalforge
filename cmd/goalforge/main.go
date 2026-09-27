@@ -1385,21 +1385,37 @@ func workList(ctx context.Context, s *store.Store) error {
 func workStatus(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("work status", flag.ContinueOnError)
 	status := f.String("set", "", "new status")
-	if err := f.Parse(args); err != nil {
+	// The documented form puts the ID first, and Go's flag package stops
+	// parsing at the first non-flag argument, so the ID is taken out before
+	// the flags are parsed instead of being silently ignored.
+	workID, rest := splitLeadingArg(args)
+	if err := f.Parse(rest); err != nil {
 		return err
 	}
-	if f.NArg() != 1 || *status == "" {
+	if workID == "" && f.NArg() == 1 {
+		workID = f.Arg(0)
+	}
+	if workID == "" || *status == "" {
 		return errors.New("work status requires ID and --set STATUS")
 	}
 	g, err := activeGoal(ctx, s)
 	if err != nil {
 		return err
 	}
-	if err := s.SetWorkItemStatus(ctx, g.ID, f.Arg(0), strings.ToUpper(*status)); err != nil {
+	if err := s.SetWorkItemStatus(ctx, g.ID, workID, strings.ToUpper(*status)); err != nil {
 		return err
 	}
-	fmt.Printf("work item updated: %s %s\n", f.Arg(0), strings.ToUpper(*status))
+	fmt.Printf("work item updated: %s %s\n", workID, strings.ToUpper(*status))
 	return nil
+}
+
+// splitLeadingArg pulls a leading positional argument off a command line so the
+// remaining flags parse normally.
+func splitLeadingArg(args []string) (string, []string) {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return args[0], args[1:]
+	}
+	return "", args
 }
 
 func verifyRecord(ctx context.Context, s *store.Store, args []string) error {

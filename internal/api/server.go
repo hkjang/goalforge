@@ -28,6 +28,11 @@ type ProjectSummary struct {
 	Complete bool                 `json:"complete"`
 	Scope    ProgressScope        `json:"progress_scope"`
 	Metrics  store.ProjectMetrics `json:"metrics"`
+	// Budget is included in the list so the home view can say which projects
+	// are near a limit without opening each one.
+	Budget *store.ProjectBudget `json:"budget,omitempty"`
+	// PendingApprovals counts decisions waiting on the user for this project.
+	PendingApprovals int `json:"pending_approvals_count"`
 }
 
 // ProgressScope states the baseline a progress percentage was computed over,
@@ -192,13 +197,7 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 			detail.Jobs = append(detail.Jobs, JobView{ID: job.ID, Type: job.Type, Status: job.Status, LastError: job.LastError, RunAt: job.RunAt, Attempts: job.Attempts})
 		}
 	}
-	if err == nil {
-		if budget, budgetErr := s.store.ProjectBudgetUsage(r.Context(), project.ID); budgetErr == nil {
-			detail.Budget = &budget
-		} else if !errors.Is(budgetErr, store.ErrNotFound) {
-			err = budgetErr
-		}
-	}
+	detail.Budget = summary.Budget
 	if err == nil {
 		if _, daily, dailyErr := s.store.ProjectDailyUsage(r.Context(), project.ID, time.Now().UTC()); dailyErr == nil {
 			detail.Daily = &daily
@@ -369,6 +368,17 @@ func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSum
 	}
 	if err == nil {
 		summary.Metrics, err = s.store.ProjectMetrics(ctx, project.ID)
+	}
+	if err == nil {
+		if budget, budgetErr := s.store.ProjectBudgetUsage(ctx, project.ID); budgetErr == nil {
+			summary.Budget = &budget
+		} else if !errors.Is(budgetErr, store.ErrNotFound) {
+			err = budgetErr
+		}
+	}
+	if err == nil {
+		pending, pendingErr := s.store.ListPendingApprovals(ctx, project.ID)
+		summary.PendingApprovals, err = len(pending), pendingErr
 	}
 	return summary, progress, err
 }
