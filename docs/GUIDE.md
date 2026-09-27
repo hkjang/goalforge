@@ -33,7 +33,11 @@ goalforge doctor
 
 ```
 FAIL criteria coverage  완료 조건 latency_p95 을(를) 측정하는 게이트가 없어 증거가 영원히 쌓이지 않습니다
+FAIL proof kind         완료 조건이 요구하는 검증 종류와 게이트가 다릅니다: note_saves (journey 필요, 게이트는 build)
+WARN proof kind         동작을 확인하는 게이트가 없어 빌드만 통과해도 완료로 판정될 수 있습니다
 ```
+
+두 번째 `proof kind` 가 그중 가장 건강해 보이는 오설정입니다. 게이트도 있고 이름도 맞고 통과도 하는데, **측정한 것이 조건이 묻는 것이 아닙니다.**
 
 ---
 
@@ -59,6 +63,23 @@ goalforge project profile team          # 예산·동시성·복구 한도를 �
 goalforge goal set --title "결제 실패율 개선" --objective "재시도 로직을 고친다" \
   --criterion build_passed=true --criterion coverage=85
 ```
+
+조건 이름에 `@종류` 를 붙이면 **어떤 종류의 검증이라야 그 조건을 충족시킬 수 있는지**를 함께 못박습니다.
+
+```sh
+goalforge goal set --title "메모 앱" --objective "사용자가 메모를 저장할 수 있다" \
+  --criterion build_passed@build=true --criterion note_saves@journey=true
+```
+
+종류는 `build`, `test`, `integration`, `journey`, `security`, `performance`, `review` 입니다. 화면이 다 만들어졌고 빌드도 초록이지만 저장 버튼이 모의 구현에 연결된 경우, 빌드 통과는 **사실이면서 아무것도 증명하지 않습니다**. `@journey` 를 요구하면 그 조건은 빌드 게이트의 통과로 충족되지 않고 `WRONG_KIND` 로 보고되며, 목표는 완료되지 않습니다.
+
+```
+[x]  note_saves       기준 true       측정 true    검증 종류 불일치: journey 종류의 검증이 필요하지만 build 게이트가 측정했습니다
+```
+
+- 더 강한 증거는 약한 요구를 충족시킵니다. 여정이 돌았다면 빌드는 이미 성공했기 때문입니다.
+- `security` 와 `performance` 는 다른 어떤 검증으로도 대체되지 않는 별개의 속성입니다.
+- 종류를 요구하지 않는 조건은 이전과 완전히 동일하게 동작합니다. 기존 프로젝트가 갑자기 미충족이 되지 않습니다.
 
 요구가 모호하거나 여러 개일 때는 **계약**을 씁니다.
 
@@ -93,8 +114,17 @@ goalforge goal contract --title "상담 시스템" \
 goalforge verify template go-api        # 프로젝트 유형별 시작 묶음
 goalforge verify gate add --type coverage \
   --command-json '["go","test","-cover","./..."]' \
-  --success-value 85 --value-pattern 'coverage:\s+([0-9.]+)%'
+  --success-value 85 --value-pattern 'coverage:\s+([0-9.]+)%' --kind test
 ```
+
+**게이트에는 `--kind` 로 그 게이트가 무엇을 증명하는지 밝힙니다.** 템플릿이 넣는 게이트는 모두 `build`/`test` 입니다. 그 프로젝트의 사용자 작업이 실제로 끝나는지는 프로젝트마다 다르므로 템플릿이 대신 채울 수 없고, `doctor` 가 그 공백을 경고합니다.
+
+```sh
+goalforge verify gate add --type note_saves \
+  --command-json '["./scripts/journey-save.sh"]' --kind journey
+```
+
+게이트의 종류를 바꾸면 그 게이트가 과거에 남긴 증거는 **재검증 대상이 됩니다.** 컴파일을 "여정"이라고 다시 이름 붙여 옛 빌드 결과를 여정 증거로 승격시킬 수는 없습니다.
 
 **수치 조건에는 `--value-pattern` 이 필요합니다.** 없으면 게이트가 통과했을 때 설정값을 그대로 실측값으로 기록해, 커버리지 조건이 상수 두 개를 비교하게 됩니다. 패턴이 있으면 출력에서 실제 값을 뽑아 임계값과 비교하고, 측정값이 없으면 실패 처리합니다.
 

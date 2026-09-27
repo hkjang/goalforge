@@ -160,7 +160,7 @@ func (s *Store) goalHistory(ctx context.Context, projectID string) ([]GoalVersio
 }
 
 func (s *Store) criteriaForGoal(ctx context.Context, goalID string) ([]model.Criterion, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT criterion_type,expected_value FROM goal_criteria WHERE goal_id=? ORDER BY criterion_type`, goalID)
+	rows, err := s.db.QueryContext(ctx, `SELECT criterion_type,expected_value,COALESCE(required_kind,'') FROM goal_criteria WHERE goal_id=? ORDER BY criterion_type`, goalID)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +168,7 @@ func (s *Store) criteriaForGoal(ctx context.Context, goalID string) ([]model.Cri
 	var result []model.Criterion
 	for rows.Next() {
 		var criterion model.Criterion
-		if err = rows.Scan(&criterion.Type, &criterion.ExpectedValue); err != nil {
+		if err = rows.Scan(&criterion.Type, &criterion.ExpectedValue, &criterion.RequiredKind); err != nil {
 			return nil, err
 		}
 		result = append(result, criterion)

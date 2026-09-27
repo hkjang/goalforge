@@ -105,6 +105,8 @@ func statusLabel(status CriterionStatus) string {
 		return "충족 (" + status.ActualValue + ")"
 	case "UNMET":
 		return "기준 미달 (" + status.ActualValue + ")"
+	case "WRONG_KIND":
+		return "검증 종류 불일치 (" + status.KindMismatch() + ")"
 	default:
 		return "증거 없음"
 	}

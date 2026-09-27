@@ -1282,6 +1282,11 @@ func verifyTemplate(ctx context.Context, s *store.Store, args []string) error {
 		fmt.Printf("kept existing: %s (use --overwrite to replace)\n", strings.Join(skipped, ", "))
 	}
 	fmt.Println("review the thresholds before relying on them: a template is a starting point, not a standard")
+	// Templates can only install checks that any project of this kind can run.
+	// Whether the user's actual task works is project-specific, so saying so
+	// here is the difference between a starting point and a false sense of
+	// coverage.
+	fmt.Println("이 게이트들은 build/test 종류입니다. 사용자 작업이 실제로 끝나는지 확인하려면 verify gate add --kind journey 로 여정 게이트를 추가하고 goal set --criterion 이름@journey=true 로 그 종류를 요구하세요")
 	return nil
 }
 
@@ -1722,7 +1727,7 @@ func takeoverReturn(ctx context.Context, s *store.Store, args []string) error {
 		}
 		checks := make([]verification.Gate, 0, len(gates))
 		for _, g := range gates {
-			checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
+			checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern, Kind: g.Kind})
 		}
 		results, passed, checkErr := engine.Check(ctx, takeover.Workspace, checks)
 		if checkErr != nil {
@@ -2137,7 +2142,7 @@ func verifyIntegration(ctx context.Context, s *store.Store, args []string) error
 	}
 	checks := make([]verification.Gate, 0, len(gates))
 	for _, g := range gates {
-		checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
+		checks = append(checks, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern, Kind: g.Kind})
 	}
 	branchSHA, err := gitops.HeadCommit(ctx, p.RepositoryPath, p.DefaultBranch)
 	if err != nil {
@@ -2684,6 +2689,7 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	optional := f.Bool("optional", false, "non-blocking gate")
 	success := f.String("success-value", "true", "criterion value on success (numeric values become a minimum threshold)")
 	valuePattern := f.String("value-pattern", "", "regular expression with one capture group extracting the measured value from the gate output")
+	gateKind := f.String("kind", "", "what this gate establishes: "+strings.Join(policy.KnownGateKinds(), ", "))
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -2698,14 +2704,14 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err = s.UpsertGate(ctx, p.ID, store.GateConfig{Type: *kind, Command: command, Timeout: time.Duration(*timeout) * time.Second, Required: !*optional, SuccessValue: *success, ValuePattern: *valuePattern}); err != nil {
+	if err = s.UpsertGate(ctx, p.ID, store.GateConfig{Type: *kind, Command: command, Timeout: time.Duration(*timeout) * time.Second, Required: !*optional, SuccessValue: *success, ValuePattern: *valuePattern, Kind: *gateKind}); err != nil {
 		return err
 	}
 	if *valuePattern != "" {
-		fmt.Printf("verification gate configured: %s %v measured=%s threshold=%s\n", *kind, command, *valuePattern, *success)
+		fmt.Printf("verification gate configured: %s %v measured=%s threshold=%s kind=%s\n", *kind, command, *valuePattern, *success, gateKindLabel(*gateKind))
 		return nil
 	}
-	fmt.Printf("verification gate configured: %s %v\n", *kind, command)
+	fmt.Printf("verification gate configured: %s %v kind=%s\n", *kind, command, gateKindLabel(*gateKind))
 	return nil
 }
 
@@ -3071,7 +3077,7 @@ func goalSet(ctx context.Context, s *store.Store, args []string) error {
 	objective := f.String("objective", "", "objective")
 	reason := f.String("reason", "", "change reason")
 	var raw listFlag
-	f.Var(&raw, "criterion", "key=value completion criterion")
+	f.Var(&raw, "criterion", "type=value completion criterion, or type@kind=value to demand a kind of proof ("+strings.Join(policy.KnownGateKinds(), ", ")+")")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -3084,11 +3090,11 @@ func goalSet(ctx context.Context, s *store.Store, args []string) error {
 	}
 	criteria := make([]model.Criterion, 0, len(raw))
 	for _, v := range raw {
-		parts := strings.SplitN(v, "=", 2)
-		if len(parts) != 2 || parts[0] == "" {
-			return fmt.Errorf("invalid criterion %q; use key=value", v)
+		criterion, parseErr := model.ParseCriterion(v)
+		if parseErr != nil {
+			return parseErr
 		}
-		criteria = append(criteria, model.Criterion{Type: parts[0], ExpectedValue: parts[1]})
+		criteria = append(criteria, criterion)
 	}
 	if len(criteria) == 0 {
 		return errors.New("at least one --criterion is required")
@@ -3159,9 +3165,20 @@ func criterionMark(status string) string {
 		return "[!]"
 	case "STALE":
 		return "[~]"
+	case "WRONG_KIND":
+		return "[x]"
 	default:
 		return "[ ]"
 	}
+}
+
+// gateKindLabel names an unclassified gate rather than printing an empty
+// string, so "kind=" never reads as a display bug.
+func gateKindLabel(kind string) string {
+	if strings.TrimSpace(kind) == "" {
+		return "unclassified"
+	}
+	return strings.ToLower(strings.TrimSpace(kind))
 }
 
 func dashIfEmpty(value string) string {
@@ -3175,6 +3192,8 @@ func criterionEvidence(status store.CriterionStatus) string {
 	switch status.Status {
 	case "STALE":
 		return "재검증 필요: " + status.StaleReason
+	case "WRONG_KIND":
+		return "검증 종류 불일치: " + status.KindMismatch()
 	case "NO_EVIDENCE":
 		return "증거 없음"
 	default:

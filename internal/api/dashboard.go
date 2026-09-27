@@ -135,7 +135,13 @@ function critBadge(c){var st=c.Status||(c.Satisfied?'MET':'NO_EVIDENCE');
 if(st==='MET')return'<span class="badge met">✓ 충족</span>';
 if(st==='UNMET')return'<span class="badge unmet">△ 기준 미달</span>';
 if(st==='STALE')return'<span class="badge unmet">↻ 재검증 필요</span>';
+if(st==='WRONG_KIND')return'<span class="badge unmet" title="'+esc(kindMismatch(c))+'">✗ 검증 종류 불일치</span>';
 return'<span class="badge none">○ 증거 없음</span>'}
+// A criterion can demand a kind of proof (journey, integration, ...). When the
+// gate that measured it proves something else, saying only "미충족" would send
+// the user to fix code that may be fine: the check is what is wrong.
+function kindMismatch(c){var need=c.RequiredKind||'',got=c.EvidenceKind||'종류 미지정';
+if(!need)return'';return need+' 종류의 검증이 필요하지만 '+got+' 게이트가 측정했습니다'}
 function relaxationLabel(kind){var m={threshold_lowered:'기준값 하향',gate_optional:'필수 게이트를 선택으로 변경',criterion_changed:'성공 기준 변경',tests_deleted:'테스트 삭제'};return m[kind]||kind}
 // relaxationPanel surfaces changes that made passing easier. They are shown
 // rather than blocked: relaxing a standard can be the right call, but it must

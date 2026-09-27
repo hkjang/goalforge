@@ -145,6 +145,8 @@ func criterionTag(status store.CriterionStatus) string {
 		return `<span class="tag unmet">기준 미달</span>`
 	case "STALE":
 		return `<span class="tag stale">재검증 필요</span>`
+	case "WRONG_KIND":
+		return `<span class="tag unmet">검증 종류 불일치</span>`
 	default:
 		return `<span class="tag">증거 없음</span>`
 	}
@@ -161,6 +163,8 @@ func evidenceRef(status store.CriterionStatus) string {
 	switch status.Status {
 	case "STALE":
 		return status.StaleReason
+	case "WRONG_KIND":
+		return status.KindMismatch()
 	case "NO_EVIDENCE":
 		return "없음"
 	default:

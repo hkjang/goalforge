@@ -30,8 +30,9 @@ goalforge doctor                       # verify git, provider CLI, flags, auth
 goalforge project init --name demo --provider claude --model haiku \
   --worktrees --auto-commit --fallback-model sonnet
 goalforge goal set --title "Ship the feature" --objective "..." \
-  --criterion build_passed=true
-goalforge verify gate add --type build_passed --command-json '["go","build","./..."]'
+  --criterion build_passed=true --criterion note_saves@journey=true
+goalforge verify gate add --type build_passed --command-json '["go","build","./..."]' --kind build
+goalforge verify gate add --type note_saves --command-json '["./scripts/journey-save.sh"]' --kind journey
 goalforge work add --title "Implement session store" --priority 90 --scope "internal/session/**"
 goalforge continue                     # one verified work item
 goalforge status
@@ -54,14 +55,14 @@ goalforge project provider set --provider claude --model sonnet --reason "..."
 goalforge goal contract --title T --outcome "key|method|judge" --measure "p95=latency_ms<=200"
                         [--users ...] [--exclude ...] [--reason ...] [--decider ...]
 goalforge goal contract show           # required outcomes, what is unconfirmed, what conflicts
-goalforge goal set --title T --objective O --criterion build_passed=true [--reason ...]
+goalforge goal set --title T --objective O --criterion build_passed=true [--criterion NAME@journey=true] [--reason ...]
 goalforge goal show
 goalforge milestone add --title T --weight 2
 goalforge work add --title T --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
                    [--depends-on WORK-1,WORK-2]   # every predecessor must be DONE first
 goalforge work list | work status ID --set APPROVED
 goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
-goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100]
+goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100] [--kind build|test|integration|journey|security|performance|review]
                           [--value-pattern 'coverage:\s+([0-9.]+)%']   # measure, do not assume
 ```
 
@@ -245,6 +246,21 @@ spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
 
+A gate declares what it establishes and a criterion declares what would settle
+it. `--kind` on a gate and `name@kind=value` on a criterion are what separate
+"it compiles" from "the user can do the thing": a screen can be finished, the
+build green, and the save button wired to a stub, and a build gate passing is
+true while saying nothing about whether a note can be saved. When the gate
+measuring a criterion proves a weaker kind than the criterion demands, the
+criterion reports `WRONG_KIND` rather than `MET` — the goal cannot complete, and
+the message names the kind asked for and the kind that answered, because the fix
+is to replace the check, not the code. Stronger evidence settles a weaker
+demand: a journey that ran necessarily compiled. Security and performance are
+specific properties nothing else implies. A criterion that demands no kind
+behaves exactly as before, so adding this does not unmet existing projects, and
+relabelling a gate marks its old evidence for re-measurement rather than
+retroactively promoting it.
+
 `goalforge verify template` installs a starting set of gates for a kind of
 project without replacing thresholds someone chose deliberately, and
 `goalforge project profile` expresses an operating posture — personal, team,
@@ -357,10 +373,14 @@ different project than the one that happened.
 whether this machine can run anything; the readiness checks ask whether this
 project could ever finish, which is where the silent misconfiguration lives: a
 completion criterion with no gate of the same name accumulates no evidence, so
-the goal runs forever while everything looks healthy. Readiness also catches a
-goal with no criteria, gates that are all optional, and gate commands that are
-not on PATH, and warns about an unset budget, stale evidence, and pending
-integration verification.
+the goal runs forever while everything looks healthy. It also catches the
+configuration that looks healthiest of all — a criterion about whether the
+user's task works, measured by a gate that only compiles — and warns when no
+gate in the project claims to do more than build, because then a goal can
+complete having never exercised anything. Readiness also catches a goal with no
+criteria, gates that are all optional, and gate commands that are not on PATH,
+and warns about an unset budget, stale evidence, and pending integration
+verification.
 
 Work items may declare several predecessors, and a dependency that would close
 a cycle is refused where it is created. `project concurrency --wip N` raises

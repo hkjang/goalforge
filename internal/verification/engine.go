@@ -32,6 +32,9 @@ type Gate struct {
 	// proves the command exited zero but never proves a number such as
 	// coverage or latency.
 	ValuePattern string
+	// Kind is what this gate establishes, carried onto the evidence it
+	// produces so a criterion can insist on the kind that would settle it.
+	Kind string
 }
 type Result struct {
 	Type, Status, Output string
@@ -127,9 +130,10 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 		actual := measure(gate, &result)
 		record := store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual,
 			Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode,
-			Duration: result.Duration, Required: gate.Required, TreeID: treeID,
+			Duration: result.Duration, Required: gate.Required, TreeID: treeID, EvidenceKind: gate.Kind,
 			EvaluatorID: store.EvaluatorID(store.GateConfig{Type: gate.Type, Command: gate.Command,
-				Timeout: gate.Timeout, Required: gate.Required, SuccessValue: gate.SuccessValue, ValuePattern: gate.ValuePattern})}
+				Timeout: gate.Timeout, Required: gate.Required, SuccessValue: gate.SuccessValue,
+				ValuePattern: gate.ValuePattern, Kind: gate.Kind})}
 		if result.Status != "PASSED" {
 			failure := policy.ClassifyGateFailure(result.Status, result.Output)
 			record.FailureKind, record.RepairMode = string(failure.Kind), string(failure.Mode)

@@ -108,6 +108,8 @@ func criterionLabel(status CriterionStatus) string {
 		return "기준 미달 (" + orDash(status.ActualValue) + ")"
 	case "STALE":
 		return "재검증 필요"
+	case "WRONG_KIND":
+		return "검증 종류 불일치 (" + status.KindMismatch() + ")"
 	default:
 		return "증거 없음"
 	}

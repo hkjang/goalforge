@@ -90,3 +90,41 @@ func TestReadinessWarnsWithoutBlocking(t *testing.T) {
 		}
 	}
 }
+
+// The misconfiguration that looks healthiest: a criterion about whether the
+// user's task works, measured by a gate that only compiles. Every other check
+// is green, so readiness has to be the thing that says it.
+func TestReadinessRejectsProofOfTheWrongKind(t *testing.T) {
+	input := ReadinessInput{
+		HasProject:       true,
+		GoalTitle:        "notes",
+		Criteria:         []string{"note_saves"},
+		CriterionKinds:   map[string]string{"note_saves": "journey"},
+		Gates:            []GateSpec{{Type: "note_saves", Command: []string{"go"}, Required: true, Kind: "build"}},
+		BudgetConfigured: true,
+	}
+	if level := levelFor(CheckReadiness(input), "proof kind"); level != LevelFail {
+		t.Fatalf("a build gate behind a journey criterion must block: %+v", CheckReadiness(input))
+	}
+	input.Gates[0].Kind = "journey"
+	if level := levelFor(CheckReadiness(input), "proof kind"); level != LevelOK {
+		t.Fatalf("a journey gate behind a journey criterion is fine: %+v", CheckReadiness(input))
+	}
+}
+
+// A project whose gates only compile can complete without anything ever having
+// been exercised. That is a warning rather than a failure: it can still finish,
+// just on weaker evidence than the user probably thinks.
+func TestReadinessWarnsWhenNothingChecksBehaviour(t *testing.T) {
+	input := ReadinessInput{
+		HasProject: true, GoalTitle: "svc", Criteria: []string{"build_passed"}, BudgetConfigured: true,
+		Gates: []GateSpec{{Type: "build_passed", Command: []string{"go"}, Required: true, Kind: "build"}},
+	}
+	if level := levelFor(CheckReadiness(input), "proof kind"); level != LevelWarn {
+		t.Fatalf("build-only verification must be called out: %+v", CheckReadiness(input))
+	}
+	input.Gates = append(input.Gates, GateSpec{Type: "tests_passed", Command: []string{"go"}, Required: true, Kind: "test"})
+	if level := levelFor(CheckReadiness(input), "proof kind"); level != "" {
+		t.Fatalf("a project that exercises its code needs no warning: %+v", CheckReadiness(input))
+	}
+}

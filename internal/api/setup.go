@@ -140,6 +140,9 @@ type setGoalRequest struct {
 	Criteria  []struct {
 		Type          string `json:"type"`
 		ExpectedValue string `json:"expected_value"`
+		// RequiredKind demands a kind of check (journey, integration, ...);
+		// empty accepts any gate, which is how goals were recorded before.
+		RequiredKind string `json:"required_kind"`
 	} `json:"criteria"`
 }
 
@@ -165,7 +168,7 @@ func (s *Server) setGoal(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "완료 조건은 이름과 기준값이 모두 필요합니다")
 			return
 		}
-		criteria = append(criteria, model.Criterion{Type: c.Type, ExpectedValue: c.ExpectedValue})
+		criteria = append(criteria, model.Criterion{Type: c.Type, ExpectedValue: c.ExpectedValue, RequiredKind: c.RequiredKind})
 	}
 	goal, err := s.store.SetGoal(r.Context(), r.PathValue("id"), request.Title, request.Objective, request.Reason, criteria)
 	if err != nil {

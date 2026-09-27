@@ -22,8 +22,12 @@ func (s *Store) ReadinessInput(ctx context.Context, projectID string) (diagnosti
 		return input, err
 	}
 	input.GoalTitle = goal.Title
+	input.CriterionKinds = map[string]string{}
 	for _, criterion := range goal.Criteria {
 		input.Criteria = append(input.Criteria, criterion.Type)
+		if criterion.RequiredKind != "" {
+			input.CriterionKinds[criterion.Type] = criterion.RequiredKind
+		}
 	}
 	statuses, err := s.CriteriaStatus(ctx, goal)
 	if err != nil {
@@ -39,7 +43,7 @@ func (s *Store) ReadinessInput(ctx context.Context, projectID string) (diagnosti
 		return input, err
 	}
 	for _, gate := range gates {
-		input.Gates = append(input.Gates, diagnostics.GateSpec{Type: gate.Type, Command: gate.Command, Required: gate.Required})
+		input.Gates = append(input.Gates, diagnostics.GateSpec{Type: gate.Type, Command: gate.Command, Required: gate.Required, Kind: gate.Kind})
 	}
 	budget, err := s.ProjectBudgetConfig(ctx, projectID)
 	if err != nil && !errors.Is(err, ErrNotFound) {

@@ -17,6 +17,7 @@ import (
 
 	"github.com/goalforge/goalforge/internal/audit"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/policy"
 	"github.com/goalforge/goalforge/internal/provider"
 )
 
@@ -347,6 +348,18 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// A gate declares what kind of evidence it produces and a criterion
+	// declares what kind it needs. Both default to empty, which is what every
+	// gate and criterion written before kinds existed means: unclassified.
+	if err := s.ensureColumn(ctx, "verification_gates", "kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "goal_criteria", "required_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "verification_results", "evidence_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "process_leases", "generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
@@ -528,7 +541,10 @@ func (s *Store) SetGoal(ctx context.Context, projectID, title, objective, reason
 		return g, err
 	}
 	for _, c := range criteria {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO goal_criteria(goal_id,criterion_type,expected_value) VALUES(?,?,?)`, g.ID, c.Type, c.ExpectedValue); err != nil {
+		if kindErr := policy.ValidGateKind(c.RequiredKind); kindErr != nil {
+			return g, fmt.Errorf("criterion %s: %w", c.Type, kindErr)
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO goal_criteria(goal_id,criterion_type,expected_value,required_kind) VALUES(?,?,?,?)`, g.ID, c.Type, c.ExpectedValue, strings.ToLower(strings.TrimSpace(c.RequiredKind))); err != nil {
 			return g, err
 		}
 	}
@@ -558,14 +574,14 @@ func (s *Store) loadGoal(ctx context.Context, query, projectID string) (model.Go
 		return g, err
 	}
 	g.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	rows, err := s.db.QueryContext(ctx, `SELECT criterion_type,expected_value FROM goal_criteria WHERE goal_id=? ORDER BY criterion_type`, g.ID)
+	rows, err := s.db.QueryContext(ctx, `SELECT criterion_type,expected_value,COALESCE(required_kind,'') FROM goal_criteria WHERE goal_id=? ORDER BY criterion_type`, g.ID)
 	if err != nil {
 		return g, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var c model.Criterion
-		if err = rows.Scan(&c.Type, &c.ExpectedValue); err != nil {
+		if err = rows.Scan(&c.Type, &c.ExpectedValue, &c.RequiredKind); err != nil {
 			return g, err
 		}
 		g.Criteria = append(g.Criteria, c)
