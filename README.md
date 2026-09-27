@@ -182,6 +182,16 @@ spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
 
+A passing verification result is a statement about a particular tree checked by
+a particular command. When the gate changes, or work is merged into the default
+branch, the affected evidence is marked as needing re-verification and stops
+counting toward completion until it is re-run — `verify integration` records
+the integrated result as the new current evidence. Changes that make passing
+easier rather than making the result better — a lowered threshold, a required
+gate turned optional, deleted test files — are recorded and shown for review
+rather than blocked: relaxing a standard can be the right call, but it must not
+be mistaken for progress.
+
 Every execution prompt now carries an assembled context package for its work
 item: the settled design decisions with the commit they were made against, the
 change constraints, what previous attempts at the same item actually failed on,

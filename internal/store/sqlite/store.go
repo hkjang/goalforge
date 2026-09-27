@@ -101,7 +101,13 @@ CREATE TABLE IF NOT EXISTS verification_results (
  check_type TEXT NOT NULL, status TEXT NOT NULL, actual_value TEXT NOT NULL DEFAULT '',
  command TEXT NOT NULL DEFAULT '', exit_code INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0,
  required INTEGER NOT NULL DEFAULT 1, output TEXT NOT NULL DEFAULT '',
- failure_kind TEXT NOT NULL DEFAULT '', repair_mode TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+ failure_kind TEXT NOT NULL DEFAULT '', repair_mode TEXT NOT NULL DEFAULT '',
+ stale INTEGER NOT NULL DEFAULT 0, stale_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS verification_relaxations (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL DEFAULT '',
+ kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', before_value TEXT NOT NULL DEFAULT '',
+ after_value TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS repair_attempts (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), work_item_id TEXT NOT NULL,
@@ -286,10 +292,13 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	for _, column := range []string{"failure_kind", "repair_mode"} {
+	for _, column := range []string{"failure_kind", "repair_mode", "stale_reason"} {
 		if err := s.ensureColumn(ctx, "verification_results", column, "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}
+	}
+	if err := s.ensureColumn(ctx, "verification_results", "stale", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
 	}
 	for _, column := range []struct{ name, definition string }{{"objective", "TEXT NOT NULL DEFAULT ''"}, {"acceptance", "TEXT NOT NULL DEFAULT ''"}, {"blocked_reason", "TEXT NOT NULL DEFAULT ''"}} {
 		if err := s.ensureColumn(ctx, "work_items", column.name, column.definition); err != nil {

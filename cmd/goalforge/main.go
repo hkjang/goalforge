@@ -315,6 +315,12 @@ func mergeWork(ctx context.Context, s *store.Store, args []string) error {
 	if err = s.MarkIntegrationPending(ctx, project.ID, "병합 후 통합 검증이 필요합니다: "+*workItemID, sha); err != nil {
 		return err
 	}
+	// Evidence gathered inside a worktree says nothing about the branch the
+	// change was just merged into, so it stops counting until integration
+	// verification runs.
+	if _, err = s.InvalidateProjectEvidence(ctx, project.ID, store.StaleCodeChanged); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
 	fmt.Printf("merged: branch=%s into=%s commit=%s work=%s\n", commit.Branch, project.DefaultBranch, sha, *workItemID)
 	fmt.Println("integration verification required: run `goalforge verify integration` — each item verified in its own worktree, not merged together")
 	return nil
@@ -934,6 +940,30 @@ func verifyIntegration(ctx context.Context, s *store.Store, args []string) error
 	}
 	if err = s.RecordIntegrationResult(ctx, p.ID, branchSHA, strings.Join(details, "; "), passed); err != nil {
 		return err
+	}
+	// The integration run is what proves the criteria on the branch that
+	// ships, so its results become the current evidence.
+	if goal, goalErr := s.CurrentGoal(ctx, p.ID); goalErr == nil {
+		records := make([]store.VerificationRecord, 0, len(results))
+		for _, result := range results {
+			actual := "false"
+			if result.Status == "PASSED" {
+				actual = "true"
+			}
+			for _, g := range gates {
+				if g.Type == result.Type && result.Status == "PASSED" && g.SuccessValue != "" {
+					actual = g.SuccessValue
+				}
+			}
+			records = append(records, store.VerificationRecord{CheckType: result.Type, Status: result.Status,
+				ActualValue: actual, Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration,
+				Required: result.Required, FailureKind: result.FailureKind, RepairMode: result.RepairMode})
+		}
+		if err = s.RecordIntegrationEvidence(ctx, goal.ID, branchSHA, records); err != nil {
+			return err
+		}
+	} else if !errors.Is(goalErr, store.ErrNotFound) {
+		return goalErr
 	}
 	if !passed {
 		return fmt.Errorf("integration verification failed on %s (%s)", p.DefaultBranch, strings.Join(details, "; "))

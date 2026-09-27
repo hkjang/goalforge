@@ -122,7 +122,19 @@ function workLabel(s){var m={BACKLOG:'대기',APPROVED:'승인됨',IN_PROGRESS:'
 function stateChip(s){return'<span class="state '+stateClass(s)+'">'+esc(stateLabel(s))+' <small class="mono">'+esc(s)+'</small></span>'}
 // Criterion status is shown with a text marker as well as colour so it is
 // readable without relying on colour alone.
-function critBadge(c){var st=c.Status||(c.Satisfied?'MET':'NO_EVIDENCE');if(st==='MET')return'<span class="badge met">✓ 충족</span>';if(st==='UNMET')return'<span class="badge unmet">△ 기준 미달</span>';return'<span class="badge none">○ 증거 없음</span>'}
+function critBadge(c){var st=c.Status||(c.Satisfied?'MET':'NO_EVIDENCE');
+if(st==='MET')return'<span class="badge met">✓ 충족</span>';
+if(st==='UNMET')return'<span class="badge unmet">△ 기준 미달</span>';
+if(st==='STALE')return'<span class="badge unmet">↻ 재검증 필요</span>';
+return'<span class="badge none">○ 증거 없음</span>'}
+function relaxationLabel(kind){var m={threshold_lowered:'기준값 하향',gate_optional:'필수 게이트를 선택으로 변경',criterion_changed:'성공 기준 변경',tests_deleted:'테스트 삭제'};return m[kind]||kind}
+// relaxationPanel surfaces changes that made passing easier. They are shown
+// rather than blocked: relaxing a standard can be the right call, but it must
+// not be mistaken for the code getting better.
+function relaxationPanel(d){var list=d.relaxations||[];if(!list.length)return'';
+var html='<section class="panel"><h2>검증 기준 변경 '+list.length+'건</h2><div class="why">아래 변경은 코드를 개선한 것이 아니라 통과를 쉽게 만든 변경입니다. 의도한 것인지 확인하세요.</div><table><tr><th>유형</th><th>내용</th><th>이전</th><th>이후</th><th>시각</th></tr>';
+list.forEach(function(r){html+='<tr><td><span class="badge unmet">'+esc(relaxationLabel(r.Kind))+'</span></td><td>'+esc(r.Detail)+'</td><td class="mono">'+esc(r.Before||'-')+'</td><td class="mono">'+esc(r.After||'-')+'</td><td class="sub">'+fmtTime(r.CreatedAt)+'</td></tr>'});
+return html+'</table></section>'}
 function shortSHA(v){return esc(String(v||'').slice(0,12))}
 function fmtUSD(v){return '$'+(v||0).toFixed(v&&v<1?4:2)}
 function tabsHTML(projectID,active){var tabs=[['overview','개요'],['plan','계획'],['runs','실행'],['verify','검증'],['cost','비용']];var html='<div class="tabs">';tabs.forEach(function(t){var href='#/project/'+encodeURIComponent(projectID)+(t[0]==='overview'?'':'/tab/'+t[0]);html+='<a class="'+(active===t[0]?'on':'')+'" href="'+href+'">'+t[1]+'</a>'});return html+'</div>'}
@@ -210,7 +222,7 @@ return fmtTokens(total)+' 토큰 <span class="sub">(예상치가 있는 '+known.
 // criterion is shown with the evidence that decided it.
 function criteriaPanel(d){if(!d.criteria||!d.criteria.length)return'<section class="panel"><h2>완료 조건</h2><div class="sub">완료 조건이 없어 목표는 완료로 판정되지 않습니다. <code>goalforge goal set --criterion build_passed=true</code></div></section>';
 var html='<section class="panel"><h2>완료 조건과 근거</h2><table><tr><th>조건</th><th>기준</th><th>측정값</th><th>상태</th><th>근거</th></tr>';
-d.criteria.forEach(function(c){var evidence='<span class="sub">없음</span>';if(c.RunID)evidence='<a class="plain mono" href="#/project/'+encodeURIComponent(d.project.ID)+'/run/'+encodeURIComponent(c.RunID)+'">'+esc(c.RunID)+'</a>'+(c.MeasuredAt?' <span class="sub">'+fmtTime(c.MeasuredAt)+'</span>':'');
+d.criteria.forEach(function(c){var evidence='<span class="sub">없음</span>';if(c.Status==='STALE')evidence='<span class="sub">'+esc(c.StaleReason||'재검증 필요')+'</span>';else if(c.RunID)evidence='<a class="plain mono" href="#/project/'+encodeURIComponent(d.project.ID)+'/run/'+encodeURIComponent(c.RunID)+'">'+esc(c.RunID)+'</a>'+(c.MeasuredAt?' <span class="sub">'+fmtTime(c.MeasuredAt)+'</span>':'');
 html+='<tr><td>'+esc(c.Type)+'</td><td class="mono">'+esc(c.ExpectedValue)+'</td><td class="mono">'+esc(c.ActualValue||'-')+'</td><td>'+critBadge(c)+'</td><td>'+evidence+'</td></tr>'});
 return html+'</table></section>'}
 // planTab is the whole backlog with search and status filters; the kanban only
@@ -265,7 +277,7 @@ var timeline=[];(d.quota_windows||[]).forEach(function(q){if(q.QuotaResetAt)time
 if(timeline.length){html+='<section class="panel"><h2>한도·스케줄 타임라인</h2><table>';timeline.forEach(function(e){var future=new Date(e.t).getTime()>Date.now();html+='<tr><td class="mono" style="width:130px;color:'+(future?'var(--warn)':'var(--muted)')+'">'+(future?'▸ ':'')+fmtTime(e.t)+'</td><td>'+e.label+'</td><td class="sub">'+e.detail+'</td></tr>'});html+='</table></section>'}
 if(d.sessions&&d.sessions.length){html+='<section class="panel"><h2>세션</h2><table><tr><th>세션</th><th>상태</th><th>컨텍스트 토큰</th><th>사유</th></tr>';d.sessions.forEach(function(s){html+='<tr><td class="mono">'+esc(s.SessionID)+'</td><td>'+esc(s.Status)+'</td><td>'+fmtTokens(s.ContextTokensUsed)+'</td><td class="sub">'+esc(s.ReplacementReason||'-')+'</td></tr>'});html+='</table></section>'}
 return html}
-function verifyTab(d){var html=criteriaPanel(d);
+function verifyTab(d){var html=criteriaPanel(d)+relaxationPanel(d);
 var gated=(d.runs||[]).filter(function(r){return r.State==='REPAIR_REQUIRED'||r.State==='FAILED'});
 if(gated.length){html+='<section class="panel"><h2>검증 실패 실행 · '+gated.length+'건</h2><table>';gated.forEach(function(r){html+='<tr><td class="mono"><a class="plain" href="#/project/'+encodeURIComponent(d.project.ID)+'/run/'+encodeURIComponent(r.ID)+'">'+esc(r.ID)+'</a></td><td>'+esc(r.WorkItemID||'-')+'</td><td>'+stateChip(r.State)+'</td><td class="sub">'+fmtTime(r.StartedAt)+'</td></tr>'});html+='</table></section>'}
 html+='<section class="panel"><h2>게이트 설정</h2><div class="sub">게이트는 CLI 로 관리합니다: <code>goalforge verify gate add --type coverage --command-json \'["go","test","-cover","./..."]\' --success-value 85 --value-pattern \'([0-9.]+)%\'</code><br>수치 조건은 <code>--value-pattern</code> 이 있어야 실측값으로 판정됩니다.</div></section>';

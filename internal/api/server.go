@@ -64,6 +64,9 @@ type ProjectDetail struct {
 	Approvals  []ApprovalView             `json:"pending_approvals"`
 	IdeaScores map[string]model.IdeaScore `json:"idea_scores"`
 	Series     []store.DailyUsagePoint    `json:"usage_series"`
+	// Relaxations are changes that made passing easier rather than making the
+	// result better; they are shown, not blocked.
+	Relaxations []store.VerificationRelaxation `json:"relaxations"`
 }
 
 type ApprovalView struct {
@@ -184,6 +187,9 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil {
 		detail.Series, err = s.store.DailyUsageSeries(r.Context(), project.ID, 14)
+	}
+	if err == nil {
+		detail.Relaxations, err = s.store.ListRelaxations(r.Context(), project.ID, 20)
 	}
 	if err == nil {
 		var pending []store.Approval

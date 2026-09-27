@@ -1,6 +1,10 @@
 package policy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/goalforge/goalforge/internal/gitops"
+)
 
 func TestScopesOverlap(t *testing.T) {
 	for _, tc := range []struct {
@@ -26,5 +30,45 @@ func TestScopesOverlap(t *testing.T) {
 				t.Fatalf("not symmetric for %q/%q", tc.left, tc.right)
 			}
 		})
+	}
+}
+
+func TestDeletedTestFiles(t *testing.T) {
+	changes := []gitops.FileChange{
+		{Path: "internal/api/server_test.go", ChangeType: "deleted"},
+		{Path: "tests/e2e/login.spec.ts", ChangeType: "deleted"},
+		{Path: "internal/api/server.go", ChangeType: "deleted"},
+		{Path: "internal/api/work_test.go", ChangeType: "modified"},
+	}
+	deleted := DeletedTestFiles(changes)
+	if len(deleted) != 2 {
+		t.Fatalf("only deleted test files count: %v", deleted)
+	}
+	for _, path := range []string{"internal/api/server_test.go", "tests/e2e/login.spec.ts"} {
+		found := false
+		for _, got := range deleted {
+			if got == path {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing %s in %v", path, deleted)
+		}
+	}
+}
+
+func TestIsTestPath(t *testing.T) {
+	for path, expected := range map[string]bool{
+		"internal/api/server_test.go":  true,
+		"tests/login.spec.ts":          true,
+		"src/__tests__/button.test.js": true,
+		"test_login.py":                true,
+		"src/UserTest.java":            true,
+		"internal/api/server.go":       false,
+		"docs/testing.md":              false,
+	} {
+		if got := IsTestPath(path); got != expected {
+			t.Errorf("IsTestPath(%q)=%t want %t", path, got, expected)
+		}
 	}
 }

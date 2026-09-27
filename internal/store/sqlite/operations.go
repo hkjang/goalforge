@@ -72,8 +72,10 @@ func (s *Store) ProjectMetrics(ctx context.Context, projectID string) (ProjectMe
 // hid the difference.
 type CriterionStatus struct {
 	Type, ExpectedValue, ActualValue string
-	// Status is MET, UNMET, or NO_EVIDENCE.
+	// Status is MET, UNMET, STALE, or NO_EVIDENCE.
 	Status string
+	// StaleReason explains why evidence that once passed no longer counts.
+	StaleReason string
 	// CheckStatus is the raw gate outcome behind the evidence (PASSED,
 	// FAILED, TIMEOUT) and is empty when there is no evidence.
 	CheckStatus string
@@ -98,8 +100,9 @@ func (s *Store) CriteriaStatus(ctx context.Context, goal model.Goal) ([]Criterio
 func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion model.Criterion) (CriterionStatus, error) {
 	entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue, Status: "NO_EVIDENCE"}
 	var measured string
-	err := s.db.QueryRowContext(ctx, `SELECT actual_value,status,COALESCE(run_id,''),created_at FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goalID, criterion.Type).
-		Scan(&entry.ActualValue, &entry.CheckStatus, &entry.RunID, &measured)
+	var stale int
+	err := s.db.QueryRowContext(ctx, `SELECT actual_value,status,COALESCE(run_id,''),created_at,COALESCE(stale,0),COALESCE(stale_reason,'') FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goalID, criterion.Type).
+		Scan(&entry.ActualValue, &entry.CheckStatus, &entry.RunID, &measured, &stale, &entry.StaleReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return entry, nil
 	}
@@ -108,6 +111,13 @@ func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion mo
 	}
 	entry.HasEvidence = true
 	entry.MeasuredAt, _ = time.Parse(time.RFC3339Nano, measured)
+	// Stale evidence is not current evidence: the tree or the check it was
+	// measured against has changed since, so it cannot satisfy the criterion
+	// until it has been re-run.
+	if stale == 1 {
+		entry.Status, entry.Satisfied = "STALE", false
+		return entry, nil
+	}
 	entry.Satisfied = entry.CheckStatus == "PASSED" && criterionMet(criterion.ExpectedValue, entry.ActualValue)
 	if entry.Satisfied {
 		entry.Status = "MET"

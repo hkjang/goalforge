@@ -501,3 +501,73 @@ func TestIntegrationVerificationGap(t *testing.T) {
 		t.Fatalf("a passing integration check clears it: %+v err=%v", status, err)
 	}
 }
+
+// Evidence is a statement about a particular tree checked by a particular
+// command. When either changes it stops being current, and a goal must not be
+// reported complete on a check that no longer applies.
+func TestEvidenceGoesStaleWhenTheCheckOrTheCodeChanges(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "Goal", "objective", "", []model.Criterion{{Type: "coverage", ExpectedValue: "85"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpsertGate(ctx, p.ID, GateConfig{Type: "coverage", Command: []string{"go", "test", "-cover", "./..."},
+		Timeout: time.Minute, Required: true, SuccessValue: "85"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,type,title,status,weight) VALUES('W1',?,'IMPLEMENT','x','DONE',1)`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,check_type,status,actual_value,required,created_at) VALUES(?,'coverage','PASSED','90',1,'now')`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := s.GoalProgressDetail(ctx, g)
+	if err != nil || !detail.Complete {
+		t.Fatalf("fresh evidence completes the goal: %+v err=%v", detail, err)
+	}
+	// Lowering the threshold changes the check and is recorded as a relaxation.
+	if err = s.UpsertGate(ctx, p.ID, GateConfig{Type: "coverage", Command: []string{"go", "test", "-cover", "./..."},
+		Timeout: time.Minute, Required: true, SuccessValue: "70"}); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = s.GoalProgressDetail(ctx, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Complete || detail.Criteria[0].Status != "STALE" {
+		t.Fatalf("a changed gate must invalidate its evidence: %+v", detail.Criteria)
+	}
+	relaxations, err := s.ListRelaxations(ctx, p.ID, 10)
+	if err != nil || len(relaxations) != 1 || relaxations[0].Kind != "threshold_lowered" {
+		t.Fatalf("relaxations=%+v err=%v", relaxations, err)
+	}
+	if relaxations[0].Before != "85" || relaxations[0].After != "70" {
+		t.Fatalf("a relaxation must record both sides: %+v", relaxations[0])
+	}
+	// Re-verifying on the integrated branch restores current evidence.
+	if err = s.RecordIntegrationEvidence(ctx, g.ID, "abcdef1234567890", []VerificationRecord{
+		{CheckType: "coverage", Status: "PASSED", ActualValue: "88", Required: true}}); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = s.GoalProgressDetail(ctx, g)
+	if err != nil || !detail.Complete {
+		t.Fatalf("re-verified evidence completes the goal again: %+v err=%v", detail, err)
+	}
+	// A change to the code itself invalidates everything again.
+	if _, err = s.InvalidateProjectEvidence(ctx, p.ID, StaleCodeChanged); err != nil {
+		t.Fatal(err)
+	}
+	detail, err = s.GoalProgressDetail(ctx, g)
+	if err != nil || detail.Complete || detail.Criteria[0].StaleReason != StaleCodeChanged {
+		t.Fatalf("changed code invalidates evidence: %+v err=%v", detail.Criteria, err)
+	}
+}

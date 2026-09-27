@@ -98,3 +98,43 @@ func scopePrefix(pattern string) (string, bool) {
 	}
 	return "", true
 }
+
+// DeletedTestFiles reports test files a change removed. Deleting a test is the
+// cheapest way to make a failing gate pass, so a run that does it is surfaced
+// for review rather than counted as progress.
+func DeletedTestFiles(changes []gitops.FileChange) []string {
+	var deleted []string
+	for _, change := range changes {
+		if !strings.EqualFold(change.ChangeType, "deleted") && !strings.EqualFold(change.ChangeType, "removed") {
+			continue
+		}
+		if IsTestPath(change.Path) {
+			deleted = append(deleted, change.Path)
+		}
+	}
+	return deleted
+}
+
+// IsTestPath recognizes the common test-file conventions across the languages
+// GoalForge's providers are likely to be pointed at.
+func IsTestPath(path string) bool {
+	name := strings.ToLower(strings.ReplaceAll(path, "\\", "/"))
+	base := name
+	if cut := strings.LastIndex(name, "/"); cut >= 0 {
+		base = name[cut+1:]
+	}
+	switch {
+	case strings.HasSuffix(base, "_test.go"), strings.HasSuffix(base, "_test.py"), strings.HasPrefix(base, "test_"):
+		return true
+	case strings.Contains(base, ".test."), strings.Contains(base, ".spec."):
+		return true
+	case strings.HasSuffix(base, "test.java"), strings.HasSuffix(base, "tests.cs"):
+		return true
+	}
+	for _, directory := range []string{"test/", "tests/", "spec/", "__tests__/"} {
+		if strings.HasPrefix(name, directory) || strings.Contains(name, "/"+directory) {
+			return true
+		}
+	}
+	return false
+}

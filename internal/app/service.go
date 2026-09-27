@@ -404,6 +404,15 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	if err != nil {
 		return result, err
 	}
+	// Deleting tests is the cheapest way to make a failing gate pass, so it is
+	// recorded for review even when the run goes on to verify.
+	if deleted := policy.DeletedTestFiles(changes); len(deleted) > 0 {
+		if relaxErr := s.store.RecordRelaxation(ctx, store.VerificationRelaxation{ProjectID: project.ID, RunID: result.Run.RunID,
+			Kind: "tests_deleted", Detail: "삭제된 테스트 파일: " + strings.Join(deleted, ", "),
+			Before: fmt.Sprintf("%d개 테스트 파일", len(deleted)), After: "삭제됨"}); relaxErr != nil {
+			return result, relaxErr
+		}
+	}
 	if drift := policy.OutOfScopeChanges(result.WorkItem.ChangeScope, changes); len(drift) > 0 {
 		details := "work item changed files outside declared scope: " + strings.Join(drift, ", ")
 		if recordErr := s.store.RecordPolicyViolation(ctx, project.ID, result.Run.RunID, "GOAL_DRIFT", details); recordErr != nil {
