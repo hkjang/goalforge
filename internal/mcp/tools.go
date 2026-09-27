@@ -54,7 +54,7 @@ func toolDescriptors() []toolDescriptor {
 		{"list_projects", "List every registered project with its state, goal, and progress.", schema(nil, nil)},
 		{"project_status", "Full status of one project: state, goal, progress, criteria evidence, metrics.", schema(nil, map[string]any{"project": projectProperty})},
 		{"goal_show", "Show the active (or latest) goal with completion criteria.", schema(nil, map[string]any{"project": projectProperty})},
-		{"goal_set", "Set a new goal version. Requires a reason after the first version.", schema([]string{"title", "objective"}, map[string]any{"project": projectProperty, "title": stringProperty("Goal title."), "objective": stringProperty("What done means."), "reason": stringProperty("Why the goal changed (required after v1)."), "criteria": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Completion criteria as type=value pairs, e.g. build_passed=true."}})},
+		{"goal_set", "Set a new goal version. Requires a reason after the first version.", schema([]string{"title", "objective"}, map[string]any{"project": projectProperty, "title": stringProperty("Goal title."), "objective": stringProperty("What done means."), "reason": stringProperty("Why the goal changed (required after v1)."), "criteria": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Completion criteria as type=value pairs, e.g. build_passed=true. Append @kind to the type to demand a kind of proof, e.g. note_saves@journey=true, so a passing build cannot settle a criterion about the feature working."}})},
 		{"work_list", "List the active goal's work items with status, priority, and idea scores.", schema(nil, map[string]any{"project": projectProperty})},
 		{"work_add", "Add a work item to the active goal's backlog.", schema([]string{"title"}, map[string]any{"project": projectProperty, "title": stringProperty("Work item title."), "priority": numberProperty("Selection priority (higher first)."), "scope": stringProperty("Allowed change scope, e.g. internal/session/**."), "type": stringProperty("Work type (default IMPLEMENT)."), "estimated_tokens": numberProperty("Manual token estimate for one run.")})},
 		{"work_set_status", "Triage a backlog item: APPROVED, BLOCKED, DISCARDED, or BACKLOG. Execution states are refused.", schema([]string{"work_item_id", "status"}, map[string]any{"project": projectProperty, "work_item_id": stringProperty("Work item ID."), "status": stringProperty("APPROVED | BLOCKED | DISCARDED | BACKLOG")})},
@@ -66,7 +66,7 @@ func toolDescriptors() []toolDescriptor {
 		{"run_detail", "Replay one run from audit records: prompt template and hash, usage, gates, file changes, commit.", schema([]string{"run_id"}, map[string]any{"project": projectProperty, "run_id": stringProperty("Run ID (RUN-...).")})},
 		{"continue_enqueue", "Schedule a persistent CONTINUE job so a running `goalforge worker` executes work items one at a time toward the goal.", schema(nil, map[string]any{"project": projectProperty})},
 		{"plan_preview", "What the next run would do, without doing it: the work item that would be chosen and why others were skipped, the model, expected tokens and cost against the remaining budget, the gates that would judge it, and every precondition that would refuse it.", schema(nil, map[string]any{"project": projectProperty})},
-		{"project_readiness", "Check whether a project could ever complete: goal, criteria, gates, whether every criterion has a gate that measures it, gate commands on PATH, budget, and pending integration verification.", schema(nil, map[string]any{"project": projectProperty})},
+		{"project_readiness", "Check whether a project could ever complete: goal, criteria, gates, whether every criterion has a gate that measures it, whether that gate proves the kind of thing the criterion demands, gate commands on PATH, budget, and pending integration verification.", schema(nil, map[string]any{"project": projectProperty})},
 		{"work_item_detail", "One work item with its specification, what is blocking it (dependencies, WIP limit, scope approval, human takeover), its run history, and the model that would execute it.", schema([]string{"work_item_id"}, map[string]any{"project": projectProperty, "work_item_id": stringProperty("Work item ID (WORK-...).")})},
 		{"decisions_list", "Settled design decisions with what was rejected and why. Treat these as already agreed rather than re-deriving them.", schema(nil, map[string]any{"project": projectProperty, "all": stringProperty("true to include superseded decisions.")})},
 		{"decision_add", "Record a design decision: what was decided, what was considered and rejected, and what it commits the project to.", schema([]string{"title", "decision"}, map[string]any{"project": projectProperty, "title": stringProperty("Short name."), "decision": stringProperty("What was decided."), "context": stringProperty("What problem forced it."), "alternatives": stringProperty("What was rejected and why."), "consequences": stringProperty("What this commits to."), "work_item_id": stringProperty("Work item it came out of.")})},
@@ -298,11 +298,11 @@ func (s *Server) goalSet(ctx context.Context, args toolArgs) (string, error) {
 	}
 	criteria := make([]model.Criterion, 0, len(args.Criteria))
 	for _, raw := range args.Criteria {
-		key, value, found := strings.Cut(raw, "=")
-		if !found || key == "" || value == "" {
-			return "", fmt.Errorf("criterion %q must be type=value", raw)
+		criterion, parseErr := model.ParseCriterion(raw)
+		if parseErr != nil {
+			return "", parseErr
 		}
-		criteria = append(criteria, model.Criterion{Type: strings.TrimSpace(key), ExpectedValue: strings.TrimSpace(value)})
+		criteria = append(criteria, criterion)
 	}
 	return marshal(s.store.SetGoal(ctx, project.ID, args.Title, args.Objective, args.Reason, criteria))
 }

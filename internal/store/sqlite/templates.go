@@ -17,43 +17,46 @@ type GateTemplate struct {
 }
 
 // gateTemplates are deliberately conservative: commands that exist in a stock
-// toolchain, thresholds only where a measurement is meaningful.
+// toolchain, thresholds only where a measurement is meaningful. Every template
+// gate is build or test kind, because a journey check has to exercise this
+// project's actual user task and no template can guess it — readiness warns
+// about the gap rather than a template pretending to fill it.
 var gateTemplates = map[string]GateTemplate{
 	"go-api": {
 		Name:        "go-api",
 		Description: "Go 서비스: 빌드, 테스트, 정적 분석, 커버리지",
 		Gates: []GateConfig{
-			{Type: "build_passed", Command: []string{"go", "build", "./..."}, Timeout: 5 * time.Minute, Required: true, SuccessValue: "true"},
-			{Type: "tests_passed", Command: []string{"go", "test", "./..."}, Timeout: 15 * time.Minute, Required: true, SuccessValue: "true"},
-			{Type: "vet_clean", Command: []string{"go", "vet", "./..."}, Timeout: 5 * time.Minute, Required: true, SuccessValue: "true"},
+			{Type: "build_passed", Command: []string{"go", "build", "./..."}, Timeout: 5 * time.Minute, Required: true, SuccessValue: "true", Kind: "build"},
+			{Type: "tests_passed", Command: []string{"go", "test", "./..."}, Timeout: 15 * time.Minute, Required: true, SuccessValue: "true", Kind: "test"},
+			{Type: "vet_clean", Command: []string{"go", "vet", "./..."}, Timeout: 5 * time.Minute, Required: true, SuccessValue: "true", Kind: "build"},
 			{Type: "coverage", Command: []string{"go", "test", "-cover", "./..."}, Timeout: 15 * time.Minute, Required: false,
-				SuccessValue: "70", ValuePattern: `coverage:\s+([0-9.]+)%`},
+				SuccessValue: "70", ValuePattern: `coverage:\s+([0-9.]+)%`, Kind: "test"},
 		},
 	},
 	"node-frontend": {
 		Name:        "node-frontend",
 		Description: "Node 프런트엔드: 타입 검사, 린트, 테스트, 빌드",
 		Gates: []GateConfig{
-			{Type: "typecheck_passed", Command: []string{"npm", "run", "typecheck"}, Timeout: 10 * time.Minute, Required: true, SuccessValue: "true"},
-			{Type: "lint_clean", Command: []string{"npm", "run", "lint"}, Timeout: 10 * time.Minute, Required: true, SuccessValue: "true"},
-			{Type: "tests_passed", Command: []string{"npm", "test", "--", "--run"}, Timeout: 20 * time.Minute, Required: true, SuccessValue: "true"},
-			{Type: "build_passed", Command: []string{"npm", "run", "build"}, Timeout: 15 * time.Minute, Required: true, SuccessValue: "true"},
+			{Type: "typecheck_passed", Command: []string{"npm", "run", "typecheck"}, Timeout: 10 * time.Minute, Required: true, SuccessValue: "true", Kind: "build"},
+			{Type: "lint_clean", Command: []string{"npm", "run", "lint"}, Timeout: 10 * time.Minute, Required: true, SuccessValue: "true", Kind: "build"},
+			{Type: "tests_passed", Command: []string{"npm", "test", "--", "--run"}, Timeout: 20 * time.Minute, Required: true, SuccessValue: "true", Kind: "test"},
+			{Type: "build_passed", Command: []string{"npm", "run", "build"}, Timeout: 15 * time.Minute, Required: true, SuccessValue: "true", Kind: "build"},
 		},
 	},
 	"python-library": {
 		Name:        "python-library",
 		Description: "Python 라이브러리: 테스트, 린트, 타입 검사",
 		Gates: []GateConfig{
-			{Type: "tests_passed", Command: []string{"python", "-m", "pytest", "-q"}, Timeout: 20 * time.Minute, Required: true, SuccessValue: "true"},
-			{Type: "lint_clean", Command: []string{"python", "-m", "ruff", "check", "."}, Timeout: 5 * time.Minute, Required: true, SuccessValue: "true"},
-			{Type: "typecheck_passed", Command: []string{"python", "-m", "mypy", "."}, Timeout: 10 * time.Minute, Required: false, SuccessValue: "true"},
+			{Type: "tests_passed", Command: []string{"python", "-m", "pytest", "-q"}, Timeout: 20 * time.Minute, Required: true, SuccessValue: "true", Kind: "test"},
+			{Type: "lint_clean", Command: []string{"python", "-m", "ruff", "check", "."}, Timeout: 5 * time.Minute, Required: true, SuccessValue: "true", Kind: "build"},
+			{Type: "typecheck_passed", Command: []string{"python", "-m", "mypy", "."}, Timeout: 10 * time.Minute, Required: false, SuccessValue: "true", Kind: "build"},
 		},
 	},
 	"docs": {
 		Name:        "docs",
 		Description: "문서 중심 저장소: 링크와 형식 검사",
 		Gates: []GateConfig{
-			{Type: "build_passed", Command: []string{"make", "docs"}, Timeout: 10 * time.Minute, Required: true, SuccessValue: "true"},
+			{Type: "build_passed", Command: []string{"make", "docs"}, Timeout: 10 * time.Minute, Required: true, SuccessValue: "true", Kind: "build"},
 		},
 	},
 }

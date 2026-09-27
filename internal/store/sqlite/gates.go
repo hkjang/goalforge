@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/goalforge/goalforge/internal/policy"
 )
 
 type GateConfig struct {
@@ -21,6 +24,11 @@ type GateConfig struct {
 	// single capture group, so numeric criteria are proven by measurement
 	// rather than by the configured SuccessValue being echoed back.
 	ValuePattern string
+	// Kind states what this gate establishes — build, test, integration,
+	// journey, security, performance, or review. Without it a gate named
+	// "checkout_works" pointed at a compile command looks like proof that
+	// checkout works.
+	Kind string
 }
 
 func (s *Store) UpsertGate(ctx context.Context, projectID string, g GateConfig) error {
@@ -38,6 +46,10 @@ func (s *Store) UpsertGate(ctx context.Context, projectID string, g GateConfig) 
 	if g.SuccessValue == "" {
 		g.SuccessValue = "true"
 	}
+	if err = policy.ValidGateKind(g.Kind); err != nil {
+		return err
+	}
+	g.Kind = strings.ToLower(strings.TrimSpace(g.Kind))
 	if g.ValuePattern != "" {
 		pattern, compileErr := regexp.Compile(g.ValuePattern)
 		if compileErr != nil {
@@ -51,7 +63,7 @@ func (s *Store) UpsertGate(ctx context.Context, projectID string, g GateConfig) 
 	if previousErr != nil && !errors.Is(previousErr, ErrNotFound) {
 		return previousErr
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_gates(project_id,check_type,command_json,timeout_seconds,required,success_value,value_pattern,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id,check_type) DO UPDATE SET command_json=excluded.command_json,timeout_seconds=excluded.timeout_seconds,required=excluded.required,success_value=excluded.success_value,value_pattern=excluded.value_pattern`, projectID, g.Type, string(raw), int64(g.Timeout/time.Second), required, g.SuccessValue, g.ValuePattern, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_gates(project_id,check_type,command_json,timeout_seconds,required,success_value,value_pattern,kind,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,check_type) DO UPDATE SET command_json=excluded.command_json,timeout_seconds=excluded.timeout_seconds,required=excluded.required,success_value=excluded.success_value,value_pattern=excluded.value_pattern,kind=excluded.kind`, projectID, g.Type, string(raw), int64(g.Timeout/time.Second), required, g.SuccessValue, g.ValuePattern, g.Kind, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -61,7 +73,7 @@ func (s *Store) UpsertGate(ctx context.Context, projectID string, g GateConfig) 
 	// Changing the check invalidates what the old check proved, and a change
 	// that only makes passing easier is recorded for review: relaxing the
 	// standard is a legitimate decision, but it must not look like progress.
-	if previous.SuccessValue != g.SuccessValue || !equalCommands(previous.Command, g.Command) || previous.Required != g.Required || previous.ValuePattern != g.ValuePattern {
+	if previous.SuccessValue != g.SuccessValue || !equalCommands(previous.Command, g.Command) || previous.Required != g.Required || previous.ValuePattern != g.ValuePattern || previous.Kind != g.Kind {
 		if _, staleErr := s.invalidateGateEvidence(ctx, projectID, g.Type); staleErr != nil {
 			return staleErr
 		}
@@ -74,8 +86,8 @@ func (s *Store) gateByType(ctx context.Context, projectID, checkType string) (Ga
 	var raw string
 	var seconds int64
 	var required int
-	err := s.db.QueryRowContext(ctx, `SELECT check_type,command_json,timeout_seconds,required,success_value,value_pattern FROM verification_gates WHERE project_id=? AND check_type=?`, projectID, checkType).
-		Scan(&g.Type, &raw, &seconds, &required, &g.SuccessValue, &g.ValuePattern)
+	err := s.db.QueryRowContext(ctx, `SELECT check_type,command_json,timeout_seconds,required,success_value,value_pattern,COALESCE(kind,'') FROM verification_gates WHERE project_id=? AND check_type=?`, projectID, checkType).
+		Scan(&g.Type, &raw, &seconds, &required, &g.SuccessValue, &g.ValuePattern, &g.Kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return g, ErrNotFound
 	}
@@ -134,7 +146,7 @@ func equalCommands(a, b []string) bool {
 	return true
 }
 func (s *Store) ListGates(ctx context.Context, projectID string) ([]GateConfig, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT check_type,command_json,timeout_seconds,required,success_value,value_pattern FROM verification_gates WHERE project_id=? ORDER BY check_type`, projectID)
+	rows, err := s.db.QueryContext(ctx, `SELECT check_type,command_json,timeout_seconds,required,success_value,value_pattern,COALESCE(kind,'') FROM verification_gates WHERE project_id=? ORDER BY check_type`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +157,7 @@ func (s *Store) ListGates(ctx context.Context, projectID string) ([]GateConfig, 
 		var raw string
 		var seconds int64
 		var required int
-		if err = rows.Scan(&g.Type, &raw, &seconds, &required, &g.SuccessValue, &g.ValuePattern); err != nil {
+		if err = rows.Scan(&g.Type, &raw, &seconds, &required, &g.SuccessValue, &g.ValuePattern, &g.Kind); err != nil {
 			return nil, err
 		}
 		if err = json.Unmarshal([]byte(raw), &g.Command); err != nil {

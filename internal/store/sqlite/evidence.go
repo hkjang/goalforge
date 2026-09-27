@@ -160,7 +160,7 @@ func splitWorkspaceTree(value string) (workspace, tree string) {
 // of the gate that produced it, so a gate edited through any path — not only
 // the one that remembers to invalidate — stops satisfying the criterion.
 func EvaluatorID(gate GateConfig) string {
-	payload := strings.Join(gate.Command, "\x00") + "\x00" + gate.SuccessValue + "\x00" + gate.ValuePattern
+	payload := strings.Join(gate.Command, "\x00") + "\x00" + gate.SuccessValue + "\x00" + gate.ValuePattern + "\x00" + gate.Kind
 	if gate.Required {
 		payload += "\x00required"
 	}

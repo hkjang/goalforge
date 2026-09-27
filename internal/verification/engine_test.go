@@ -148,3 +148,120 @@ func TestMeasureIgnoresFailedGates(t *testing.T) {
 		t.Fatalf("actual=%q", actual)
 	}
 }
+
+// AT-11 end to end: the screen is built and the build gate is green, but the
+// save path is a stub, so the journey gate that actually saves a note fails.
+// The goal must not be judged complete, and the criterion must report that the
+// build's success says nothing about it.
+func TestBuildGreenWithFailingJourneyDoesNotCompleteTheGoal(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	project := model.Project{ID: "P1", Name: "notes", RepositoryPath: root, DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := s.SetGoal(ctx, project.ID, "notes", "user can save a note", "", []model.Criterion{
+		{Type: "build_passed", ExpectedValue: "true", RequiredKind: "build"},
+		{Type: "note_saves", ExpectedValue: "true", RequiredKind: "journey"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "save screen"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, goal.ID, "W1", "IN_PROGRESS"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.StartRun(ctx, store.RunRecord{ID: "R1", ProjectID: project.ID, WorkItemID: "W1", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinishRun(ctx, "R1", "VERIFYING", "VERIFYING"); err != nil {
+		t.Fatal(err)
+	}
+	build := executable(t, root, "build", "echo compiled", "echo compiled")
+	// The journey exercises the real save path, which is still a stub.
+	journey := executable(t, root, "journey", "echo saving...\necho save handler is a stub\nexit 1", "echo saving...\r\necho save handler is a stub\r\nexit /b 1")
+	engine, _ := New(s, 4096)
+	report, err := engine.Verify(ctx, "R1", project, []Gate{
+		{Type: "build_passed", Command: []string{build}, Timeout: 5 * time.Second, Required: true, Kind: "build"},
+		{Type: "note_saves", Command: []string{journey}, Timeout: 5 * time.Second, Required: true, Kind: "journey"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Passed || report.GoalCompleted {
+		t.Fatalf("a finished screen in front of a stub is not a completed goal: %+v", report)
+	}
+	criteria, err := s.CriteriaStatus(ctx, goal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byType := map[string]store.CriterionStatus{}
+	for _, criterion := range criteria {
+		byType[criterion.Type] = criterion
+	}
+	if byType["build_passed"].Status != "MET" {
+		t.Fatalf("the build really did pass: %+v", byType["build_passed"])
+	}
+	if byType["note_saves"].Status != "UNMET" || byType["note_saves"].EvidenceKind != "journey" {
+		t.Fatalf("the journey ran and failed: %+v", byType["note_saves"])
+	}
+}
+
+// The same project with the journey gate swapped for a second build command:
+// everything passes, and the goal still must not complete, because nothing
+// measured whether a note can be saved.
+func TestPassingBuildInPlaceOfAJourneyStillBlocksCompletion(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	project := model.Project{ID: "P1", Name: "notes", RepositoryPath: root, DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := s.SetGoal(ctx, project.ID, "notes", "user can save a note", "", []model.Criterion{
+		{Type: "note_saves", ExpectedValue: "true", RequiredKind: "journey"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "save screen"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, goal.ID, "W1", "IN_PROGRESS"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.StartRun(ctx, store.RunRecord{ID: "R1", ProjectID: project.ID, WorkItemID: "W1", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.FinishRun(ctx, "R1", "VERIFYING", "VERIFYING"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetWorkItemStatus(ctx, goal.ID, "W1", "DONE"); err != nil {
+		t.Fatal(err)
+	}
+	build := executable(t, root, "build", "echo compiled", "echo compiled")
+	engine, _ := New(s, 4096)
+	report, err := engine.Verify(ctx, "R1", project, []Gate{
+		{Type: "note_saves", Command: []string{build}, Timeout: 5 * time.Second, Required: true, Kind: "build"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed {
+		t.Fatalf("every gate passed: %+v", report)
+	}
+	if report.GoalCompleted {
+		t.Fatal("a compile standing in for the user's task must not complete the goal")
+	}
+}

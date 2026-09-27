@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/policy"
 )
 
 type EventLog struct {
@@ -72,8 +73,13 @@ func (s *Store) ProjectMetrics(ctx context.Context, projectID string) (ProjectMe
 // hid the difference.
 type CriterionStatus struct {
 	Type, ExpectedValue, ActualValue string
-	// Status is MET, UNMET, STALE, or NO_EVIDENCE.
+	// Status is MET, UNMET, STALE, WRONG_KIND, or NO_EVIDENCE.
 	Status string
+	// RequiredKind is the kind of check the criterion insists on and
+	// EvidenceKind is the kind that actually produced the latest evidence.
+	// When they disagree the criterion is WRONG_KIND: something passed, but
+	// not something that could settle this.
+	RequiredKind, EvidenceKind string
 	// StaleReason explains why evidence that once passed no longer counts.
 	StaleReason string
 	// CheckStatus is the raw gate outcome behind the evidence (PASSED,
@@ -98,11 +104,12 @@ func (s *Store) CriteriaStatus(ctx context.Context, goal model.Goal) ([]Criterio
 }
 
 func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion model.Criterion) (CriterionStatus, error) {
-	entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue, Status: "NO_EVIDENCE"}
+	entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue,
+		RequiredKind: criterion.RequiredKind, Status: "NO_EVIDENCE"}
 	var measured string
 	var stale int
-	err := s.db.QueryRowContext(ctx, `SELECT actual_value,status,COALESCE(run_id,''),created_at,COALESCE(stale,0),COALESCE(stale_reason,'') FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goalID, criterion.Type).
-		Scan(&entry.ActualValue, &entry.CheckStatus, &entry.RunID, &measured, &stale, &entry.StaleReason)
+	err := s.db.QueryRowContext(ctx, `SELECT actual_value,status,COALESCE(run_id,''),created_at,COALESCE(stale,0),COALESCE(stale_reason,''),COALESCE(evidence_kind,'') FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goalID, criterion.Type).
+		Scan(&entry.ActualValue, &entry.CheckStatus, &entry.RunID, &measured, &stale, &entry.StaleReason, &entry.EvidenceKind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return entry, nil
 	}
@@ -118,6 +125,15 @@ func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion mo
 		entry.Status, entry.Satisfied = "STALE", false
 		return entry, nil
 	}
+	// Evidence of the wrong kind is not evidence for this criterion. A screen
+	// can be finished, the build green, and the save button wired to a stub:
+	// the build passing is true and says nothing about whether the user's task
+	// completes. Reported separately from UNMET because the fix is different —
+	// the check needs replacing, not the code.
+	if !policy.EvidenceSatisfies(criterion.RequiredKind, entry.EvidenceKind) {
+		entry.Status, entry.Satisfied = "WRONG_KIND", false
+		return entry, nil
+	}
 	entry.Satisfied = entry.CheckStatus == "PASSED" && criterionMet(criterion.ExpectedValue, entry.ActualValue)
 	if entry.Satisfied {
 		entry.Status = "MET"
@@ -125,6 +141,19 @@ func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion mo
 		entry.Status = "UNMET"
 	}
 	return entry, nil
+}
+
+// KindMismatch explains a WRONG_KIND criterion in the terms the user needs to
+// act on: which kind was asked for and which one answered.
+func (c CriterionStatus) KindMismatch() string {
+	if c.Status != "WRONG_KIND" {
+		return ""
+	}
+	produced := c.EvidenceKind
+	if produced == "" {
+		produced = "종류 미지정"
+	}
+	return c.RequiredKind + " 종류의 검증이 필요하지만 " + produced + " 게이트가 측정했습니다"
 }
 
 // RunView is a run summarized for operational displays.

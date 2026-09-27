@@ -22,9 +22,13 @@ type VerificationRecord struct {
 	// recording both is what lets either one changing invalidate it without
 	// every mutation site having to remember to say so.
 	TreeID, EvaluatorID string
-	ExitCode            int
-	Duration            time.Duration
-	Required            bool
+	// EvidenceKind is the kind of check that produced this result. It is
+	// stored with the result rather than read back from the gate later, so
+	// redefining a gate cannot retroactively relabel what old evidence proved.
+	EvidenceKind string
+	ExitCode     int
+	Duration     time.Duration
+	Required     bool
 }
 
 func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord) error {
@@ -40,7 +44,7 @@ func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord)
 	if r.Required {
 		required = 1
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,tree_id,evaluator_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), r.FailureKind, r.RepairMode, r.TreeID, r.EvaluatorID, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,tree_id,evaluator_id,evidence_kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), r.FailureKind, r.RepairMode, r.TreeID, r.EvaluatorID, r.EvidenceKind, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -90,13 +94,13 @@ func (s *Store) ApplyVerificationOutcome(ctx context.Context, runID string, pass
 		return goal, err
 	}
 	goal.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	rows, err := tx.QueryContext(ctx, `SELECT criterion_type,expected_value FROM goal_criteria WHERE goal_id=?`, goal.ID)
+	rows, err := tx.QueryContext(ctx, `SELECT criterion_type,expected_value,COALESCE(required_kind,'') FROM goal_criteria WHERE goal_id=?`, goal.ID)
 	if err != nil {
 		return goal, err
 	}
 	for rows.Next() {
 		var c model.Criterion
-		if err = rows.Scan(&c.Type, &c.ExpectedValue); err != nil {
+		if err = rows.Scan(&c.Type, &c.ExpectedValue, &c.RequiredKind); err != nil {
 			rows.Close()
 			return goal, err
 		}
