@@ -19,6 +19,28 @@ Writable mappings deliberately avoid each tool's broadest permission mode
 GoalForge's own policy-checked engine either way. Run `goalforge doctor` to
 verify the installed CLI supports every flag the adapter passes.
 
+## 설치
+
+각 릴리즈에는 바로 실행할 수 있는 바이너리가 플랫폼별로 붙어 있습니다
+([releases](https://github.com/hkjang/goalforge/releases)). 압축을 풀고 실행하면
+끝입니다 — Go 툴체인도, 런타임도 필요하지 않습니다 (SQLite 드라이버가 순수 Go 라
+`CGO_ENABLED=0` 으로 정적 빌드됩니다).
+
+```sh
+tar -xzf goalforge_vX.Y.Z_linux_amd64.tar.gz
+./goalforge version       # 어떤 빌드인지 먼저 확인
+./goalforge doctor
+```
+
+같은 릴리즈의 `SHA256SUMS` 로 내려받은 파일을 검증할 수 있습니다:
+`sha256sum -c SHA256SUMS --ignore-missing`.
+
+소스에서 빌드하려면 `go build ./cmd/goalforge`, 릴리즈 산출물을 직접 만들려면
+`scripts/build-release.sh vX.Y.Z` 입니다. 후자는 linux/darwin/windows 의
+amd64·arm64 여섯 조합을 `-trimpath` 로 빌드하고, 각 압축 파일에 바이너리와 가이드를
+넣고, 체크섬 파일을 만듭니다. 버전·커밋·빌드 시각은 링크 시점에 박히므로
+`goalforge version` 이 스스로를 정확히 밝힙니다.
+
 ## 사용 가이드
 
 처음부터 끝까지 한 번 돌려 보는 순서는 [docs/GUIDE.md](docs/GUIDE.md) 에 있습니다.

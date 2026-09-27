@@ -20,9 +20,19 @@ GoalForge 는 목표를 받아 작업으로 나누고, AI 세션이 그 작업�
 
 ## 1. 설치와 첫 진단
 
+[releases](https://github.com/hkjang/goalforge/releases) 에서 플랫폼에 맞는 압축 파일을
+내려받아 풀면 실행 가능한 바이너리 하나가 나옵니다. 별도 런타임이나 Go 툴체인은
+필요하지 않습니다.
+
 ```sh
+tar -xzf goalforge_vX.Y.Z_linux_amd64.tar.gz
+sha256sum -c SHA256SUMS --ignore-missing   # 같은 릴리즈의 체크섬으로 검증
+./goalforge version
 goalforge doctor
 ```
+
+`version` 은 상태 데이터베이스를 열기 전에 답합니다. 내려받은 바이너리에 가장 먼저 하는
+질문이 "이게 뭔데"이고, 그 답은 아직 프로젝트를 고르지 않은 디렉터리에서도 나와야 합니다.
 
 `doctor` 는 두 가지를 따로 확인합니다.
 
