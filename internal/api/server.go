@@ -26,7 +26,21 @@ type ProjectSummary struct {
 	Goal     *model.Goal          `json:"goal,omitempty"`
 	Progress float64              `json:"progress_percent"`
 	Complete bool                 `json:"complete"`
+	Scope    ProgressScope        `json:"progress_scope"`
 	Metrics  store.ProjectMetrics `json:"metrics"`
+}
+
+// ProgressScope states the baseline a progress percentage was computed over,
+// so a client can explain the number instead of only showing it: discarded
+// work has left the baseline, and criteria can be unmet independently of it.
+type ProgressScope struct {
+	TotalWeight     float64 `json:"total_weight"`
+	DoneWeight      float64 `json:"done_weight"`
+	DiscardedWeight float64 `json:"discarded_weight"`
+	TotalItems      int     `json:"total_items"`
+	DoneItems       int     `json:"done_items"`
+	DiscardedItems  int     `json:"discarded_items"`
+	CriteriaMet     bool    `json:"criteria_met"`
 }
 
 type ProjectDetail struct {
@@ -47,6 +61,7 @@ type ProjectDetail struct {
 type ApprovalView struct {
 	ID, ActionType, Reason string
 	RequestedAt            time.Time
+	Scope                  store.ApprovalScope
 }
 
 type QuotaView struct {
@@ -109,7 +124,7 @@ func (s *Server) projects(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]ProjectSummary, 0, len(projects))
 	for _, project := range projects {
-		summary, summaryErr := s.summary(r.Context(), project)
+		summary, _, summaryErr := s.summary(r.Context(), project)
 		if summaryErr != nil {
 			writeError(w, http.StatusInternalServerError, summaryErr.Error())
 			return
@@ -129,17 +144,15 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	summary, err := s.summary(r.Context(), project)
+	summary, progress, err := s.summary(r.Context(), project)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	detail := ProjectDetail{ProjectSummary: summary}
 	if summary.Goal != nil {
+		detail.Criteria = progress.Criteria
 		detail.WorkItems, err = s.store.ListWorkItems(r.Context(), summary.Goal.ID)
-		if err == nil {
-			detail.Criteria, err = s.store.CriteriaStatus(r.Context(), *summary.Goal)
-		}
 		if err == nil {
 			detail.IdeaScores, err = s.store.IdeaScoresForGoal(r.Context(), summary.Goal.ID)
 		}
@@ -154,7 +167,7 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 		var pending []store.Approval
 		pending, err = s.store.ListPendingApprovals(r.Context(), project.ID)
 		for _, approval := range pending {
-			detail.Approvals = append(detail.Approvals, ApprovalView{ID: approval.ID, ActionType: approval.ActionType, Reason: approval.Reason, RequestedAt: approval.RequestedAt})
+			detail.Approvals = append(detail.Approvals, ApprovalView{ID: approval.ID, ActionType: approval.ActionType, Reason: approval.Reason, RequestedAt: approval.RequestedAt, Scope: approval.Scope})
 		}
 	}
 	if err == nil {
@@ -313,8 +326,9 @@ func statusForPath(path string) string {
 	return "APPROVED"
 }
 
-func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSummary, error) {
+func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSummary, store.ProgressDetail, error) {
 	summary := ProjectSummary{Project: project}
+	var progress store.ProgressDetail
 	goal, err := s.store.CurrentGoal(ctx, project.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		// A completed project has no ACTIVE goal; show the last goal so the
@@ -323,14 +337,18 @@ func (s *Server) summary(ctx context.Context, project model.Project) (ProjectSum
 	}
 	if err == nil {
 		summary.Goal = &goal
-		summary.Progress, summary.Complete, err = s.store.GoalProgress(ctx, goal)
+		progress, err = s.store.GoalProgressDetail(ctx, goal)
+		summary.Progress, summary.Complete = progress.Percent, progress.Complete
+		summary.Scope = ProgressScope{TotalWeight: progress.TotalWeight, DoneWeight: progress.DoneWeight,
+			DiscardedWeight: progress.DiscardedWeight, TotalItems: progress.TotalItems, DoneItems: progress.DoneItems,
+			DiscardedItems: progress.DiscardedItems, CriteriaMet: progress.CriteriaMet}
 	} else if errors.Is(err, store.ErrNotFound) {
 		err = nil
 	}
 	if err == nil {
 		summary.Metrics, err = s.store.ProjectMetrics(ctx, project.ID)
 	}
-	return summary, err
+	return summary, progress, err
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

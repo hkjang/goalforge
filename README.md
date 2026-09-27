@@ -50,6 +50,7 @@ goalforge milestone add --title T --weight 2
 goalforge work add --title T --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
 goalforge work list | work status ID --set APPROVED
 goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100]
+                          [--value-pattern 'coverage:\s+([0-9.]+)%']   # measure, do not assume
 ```
 
 ### Discovery, execution, replanning
@@ -78,9 +79,9 @@ pass is committed in its worktree as author `GoalForge` with
 `Goal-ID`/`Work-Item-ID`/`Run-ID` trailers, never on the default branch.
 
 ```sh
-goalforge approval request --action merge-branch --reason "..."   # then: approval approve APR-...
+goalforge approval request --action merge-branch --work-item WORK-1 --reason "..."
 goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
-goalforge approval request --action publish-branch --reason "..."
+goalforge approval request --action publish-branch --work-item WORK-1 [--remote origin] --reason "..."
 goalforge publish --work-item WORK-1 [--remote origin]
 goalforge worktree gc [--force]        # remove worktrees of DONE/DISCARDED items; branches kept
 goalforge rollback --work-item WORK-1 --reason "..."
@@ -93,7 +94,7 @@ goalforge status | usage | sessions | logs [--limit 50]
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
-goalforge approval request --action protected-files|publish-branch|merge-branch --reason "..."
+goalforge approval request --action protected-files|publish-branch|merge-branch [--work-item WORK-1] --reason "..."
 goalforge approval approve APR-ID
 GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
 ```
@@ -166,6 +167,21 @@ Before writable AI runs, GoalForge hashes protected repository files such as
 change, or deletion blocks verification, returns the work item to the backlog,
 sets the project to `BLOCKED`, and records a policy violation. Protected-file
 approvals require an explicit request and approval and are consumed by one run.
+
+Merge and publish approvals are bound to the work item, the verified commit
+SHA, and the destination (default branch or remote) resolved when the approval
+is requested. An approval therefore covers one reviewed change: it cannot be
+spent by another work item, and if the work item is re-run and produces a new
+commit the approval is reported as stale so the new change is reviewed instead
+of inheriting the old decision.
+
+Completion is judged over in-scope work only. `DISCARDED` items leave the
+goal's baseline rather than counting as outstanding, so dropping an idea
+restates the denominator instead of making completion unreachable; required
+completion criteria still have to be met with verification evidence. A gate
+with `--value-pattern` records the value it measured from its own output and
+fails when that value is below `--success-value`, so numeric criteria such as
+coverage are proven by measurement rather than by configuration.
 
 `status` remains available after goal completion and reports weighted progress,
 run success/failure and average duration, work-item outcomes, verification pass

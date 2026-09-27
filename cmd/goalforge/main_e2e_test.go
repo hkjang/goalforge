@@ -123,7 +123,10 @@ func TestCLIFullLifecycle(t *testing.T) {
 	if output, err := runCLIWithError(t, ctx, "merge", "--work-item", workID); err == nil {
 		t.Fatalf("merge must require approval, got: %s", output)
 	}
-	approvalOut := runCLI(t, ctx, "approval", "request", "--action", "merge-branch", "--reason", "test")
+	if output, err := runCLIWithError(t, ctx, "approval", "request", "--action", "merge-branch", "--reason", "test"); err == nil {
+		t.Fatalf("merge approval must name the work item being approved, got: %s", output)
+	}
+	approvalOut := runCLI(t, ctx, "approval", "request", "--action", "merge-branch", "--work-item", workID, "--reason", "test")
 	approvalID := regexp.MustCompile(`APR-\d+`).FindString(approvalOut)
 	runCLI(t, ctx, "approval", "approve", approvalID)
 	runCLI(t, ctx, "merge", "--work-item", workID)
@@ -134,7 +137,7 @@ func TestCLIFullLifecycle(t *testing.T) {
 	if output, err := runCLIWithError(t, ctx, "publish", "--work-item", workID); err == nil {
 		t.Fatalf("publish must require approval, got: %s", output)
 	}
-	approvalOut = runCLI(t, ctx, "approval", "request", "--action", "publish-branch", "--reason", "test")
+	approvalOut = runCLI(t, ctx, "approval", "request", "--action", "publish-branch", "--work-item", workID, "--reason", "test")
 	approvalID = regexp.MustCompile(`APR-\d+`).FindString(approvalOut)
 	runCLI(t, ctx, "approval", "approve", approvalID)
 	publishOut := runCLI(t, ctx, "publish", "--work-item", workID)

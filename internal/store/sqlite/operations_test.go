@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -138,5 +139,74 @@ func TestApprovalIsExplicitAndSingleUse(t *testing.T) {
 	}
 	if used, err := s.ConsumeApproval(ctx, p.ID, ApprovalProtectedFiles, "R2"); err != nil || used {
 		t.Fatalf("approval reused: used=%t err=%v", used, err)
+	}
+}
+
+// An approval is spendable only on the change it was granted for. Previously
+// approvals matched on (project, action type) alone, so reviewing one work
+// item's commit produced a token any other merge or publish could spend.
+func TestScopedApprovalBindsToWorkItemAndCommit(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: t.TempDir(), DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := ApprovalScope{WorkItemID: "W1", SourceBranch: "goalforge/W1", TargetRef: "main", CommitSHA: "aaaaaaaaaaaabbbb", FilesChanged: 3}
+	if _, err = s.RequestScopedApproval(ctx, p.ID, ApprovalMergeBranch, "review W1", ApprovalScope{WorkItemID: "W1"}); err == nil {
+		t.Fatal("a merge approval without a commit must be refused")
+	}
+	approval, err := s.RequestScopedApproval(ctx, p.ID, ApprovalMergeBranch, "review W1", reviewed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Approve(ctx, p.ID, approval.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Another work item cannot spend it.
+	other := ApprovalScope{WorkItemID: "W2", SourceBranch: "goalforge/W2", TargetRef: "main", CommitSHA: "ccccccccccccdddd"}
+	if used, err := s.ConsumeScopedApproval(ctx, p.ID, ApprovalMergeBranch, "R9", other); err != nil || used {
+		t.Fatalf("approval leaked to another work item: used=%t err=%v", used, err)
+	}
+	// The same work item at a different commit is a change made after review.
+	moved := reviewed
+	moved.CommitSHA = "eeeeeeeeeeeeffff"
+	var stale *StaleApprovalError
+	if _, err := s.ConsumeScopedApproval(ctx, p.ID, ApprovalMergeBranch, "R9", moved); !errors.As(err, &stale) {
+		t.Fatalf("a commit that moved after approval must be reported as stale: %v", err)
+	}
+	if stale.Field != "commit" || stale.Approved != reviewed.CommitSHA || stale.Requested != moved.CommitSHA {
+		t.Fatalf("stale error lost the comparison: %+v", stale)
+	}
+	// A destination that was not the one reviewed is not covered either.
+	elsewhere := reviewed
+	elsewhere.TargetRef = "release"
+	if _, err := s.ConsumeScopedApproval(ctx, p.ID, ApprovalMergeBranch, "R9", elsewhere); !errors.As(err, &stale) || stale.Field != "target" {
+		t.Fatalf("approval leaked to another target: %v", err)
+	}
+	// The reviewed change itself goes through, exactly once.
+	if used, err := s.ConsumeScopedApproval(ctx, p.ID, ApprovalMergeBranch, "R1", reviewed); err != nil || !used {
+		t.Fatalf("reviewed change not approved: used=%t err=%v", used, err)
+	}
+	if used, err := s.ConsumeScopedApproval(ctx, p.ID, ApprovalMergeBranch, "R2", reviewed); err != nil || used {
+		t.Fatalf("approval reused: used=%t err=%v", used, err)
+	}
+}
+
+// Scoped actions must not fall back to the unscoped path, which would restore
+// the hole the scope closes.
+func TestUnscopedConsumeRefusesScopedActions(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.ConsumeApproval(ctx, "P1", ApprovalMergeBranch, "R1"); err == nil {
+		t.Fatal("merge approvals must not be consumable without a scope")
 	}
 }

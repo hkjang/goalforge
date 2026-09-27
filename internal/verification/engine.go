@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +25,12 @@ type Gate struct {
 	Timeout      time.Duration
 	Required     bool
 	SuccessValue string
+	// ValuePattern is a regular expression with one capture group that
+	// extracts the measured value from the gate's output. Without it a
+	// passing gate can only record its own configured SuccessValue, which
+	// proves the command exited zero but never proves a number such as
+	// coverage or latency.
+	ValuePattern string
 }
 type Result struct {
 	Type, Status, Output string
@@ -63,14 +71,8 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 	}
 	for _, gate := range gates {
 		result, err := e.runGate(ctx, project.RepositoryPath, gate)
+		actual := measure(gate, &result)
 		report.Results = append(report.Results, result)
-		actual := "false"
-		if result.Status == "PASSED" {
-			actual = gate.SuccessValue
-			if actual == "" {
-				actual = "true"
-			}
-		}
 		recordErr := e.store.RecordRunVerification(ctx, store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual, Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration, Required: gate.Required})
 		if recordErr != nil {
 			return report, recordErr
@@ -97,6 +99,55 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 		return report, err
 	}
 	return report, nil
+}
+
+// measure derives the value recorded as evidence for a gate. A gate without
+// a value pattern keeps its boolean meaning. A gate with one must produce a
+// measurement that clears SuccessValue: a command that exits zero while
+// reporting 71% coverage against an 85% threshold is a failure, and an
+// unparseable output is not evidence, so neither is allowed to pass.
+func measure(gate Gate, result *Result) string {
+	if result.Status != "PASSED" {
+		return "false"
+	}
+	if gate.ValuePattern == "" {
+		if gate.SuccessValue == "" {
+			return "true"
+		}
+		return gate.SuccessValue
+	}
+	pattern, err := regexp.Compile(gate.ValuePattern)
+	if err != nil {
+		result.Status = "FAILED"
+		result.Output += fmt.Sprintf("\n[gate %s: value pattern is invalid: %v]", gate.Type, err)
+		return ""
+	}
+	match := pattern.FindStringSubmatch(result.Output)
+	if len(match) < 2 {
+		result.Status = "FAILED"
+		result.Output += fmt.Sprintf("\n[gate %s: value pattern matched no measurement in the output]", gate.Type)
+		return ""
+	}
+	actual := strings.TrimSpace(match[1])
+	threshold, thresholdErr := strconv.ParseFloat(gate.SuccessValue, 64)
+	if thresholdErr == nil {
+		measured, measuredErr := strconv.ParseFloat(actual, 64)
+		if measuredErr != nil {
+			result.Status = "FAILED"
+			result.Output += fmt.Sprintf("\n[gate %s: measured %q is not a number]", gate.Type, actual)
+			return actual
+		}
+		if measured < threshold {
+			result.Status = "FAILED"
+			result.Output += fmt.Sprintf("\n[gate %s: measured %s is below the threshold %s]", gate.Type, actual, gate.SuccessValue)
+		}
+		return actual
+	}
+	if gate.SuccessValue != "" && actual != gate.SuccessValue {
+		result.Status = "FAILED"
+		result.Output += fmt.Sprintf("\n[gate %s: measured %q does not equal the required %q]", gate.Type, actual, gate.SuccessValue)
+	}
+	return actual
 }
 
 func (e *Engine) runGate(parent context.Context, workDir string, gate Gate) (Result, error) {

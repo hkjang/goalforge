@@ -40,7 +40,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	summaries := make([]ProjectSummary, 0, len(projects))
 	for _, project := range projects {
-		summary, summaryErr := s.summary(r.Context(), project)
+		summary, _, summaryErr := s.summary(r.Context(), project)
 		if summaryErr != nil {
 			writeError(w, http.StatusInternalServerError, summaryErr.Error())
 			return

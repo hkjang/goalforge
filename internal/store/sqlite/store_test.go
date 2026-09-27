@@ -271,3 +271,80 @@ func TestProjectBudgetAndQuotaWindow(t *testing.T) {
 		t.Fatal("reset and resume timestamps must remain distinct")
 	}
 }
+
+// A discarded work item leaves the goal's baseline instead of sitting in the
+// denominator forever; before this it made done == total unreachable, so any
+// goal with a discarded item could never complete.
+func TestDiscardedWorkLeavesTheGoalBaseline(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "PRJ-1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "Goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO work_items(id,goal_id,type,title,status,weight) VALUES('W1',?,'IMPLEMENT','done work','DONE',3)`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO work_items(id,goal_id,type,title,status,weight) VALUES('W2',?,'IMPLEMENT','dropped idea','DISCARDED',2)`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO verification_results(goal_id,check_type,status,actual_value,created_at) VALUES(?,'build_passed','PASSED','true','now')`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := s.GoalProgressDetail(ctx, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Percent != 100 || !detail.Complete {
+		t.Fatalf("discarded work must not block completion: percent=%v complete=%v", detail.Percent, detail.Complete)
+	}
+	if detail.TotalWeight != 3 || detail.DiscardedWeight != 2 || detail.DiscardedItems != 1 {
+		t.Fatalf("baseline not restated: %+v", detail)
+	}
+	if len(detail.Criteria) != 1 || detail.Criteria[0].Status != "MET" {
+		t.Fatalf("criteria=%+v", detail.Criteria)
+	}
+}
+
+// Criteria distinguish a measured shortfall from never having been measured,
+// so the UI can say "기준 미달" instead of "증거 없음" and vice versa.
+func TestCriterionStatusSeparatesShortfallFromMissingEvidence(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "PRJ-1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "Goal", "objective", "", []model.Criterion{
+		{Type: "coverage", ExpectedValue: "85"},
+		{Type: "deploy_ready", ExpectedValue: "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO verification_results(goal_id,check_type,status,actual_value,created_at) VALUES(?,'coverage','PASSED','71.4','now')`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	criteria, err := s.CriteriaStatus(ctx, g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if criteria[0].Status != "UNMET" || !criteria[0].HasEvidence || criteria[0].ActualValue != "71.4" {
+		t.Fatalf("shortfall: %+v", criteria[0])
+	}
+	if criteria[1].Status != "NO_EVIDENCE" || criteria[1].HasEvidence {
+		t.Fatalf("missing evidence: %+v", criteria[1])
+	}
+}

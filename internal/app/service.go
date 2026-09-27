@@ -275,7 +275,7 @@ func requiredGates(gates []store.GateConfig) ([]verification.Gate, error) {
 	result := make([]verification.Gate, 0, len(gates))
 	for _, g := range gates {
 		required = required || g.Required
-		result = append(result, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue})
+		result = append(result, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
 	}
 	if !required {
 		return nil, errors.New("at least one required verification gate must be configured")
@@ -400,7 +400,7 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	}
 	verificationGates := make([]verification.Gate, 0, len(gates))
 	for _, g := range gates {
-		verificationGates = append(verificationGates, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue})
+		verificationGates = append(verificationGates, verification.Gate{Type: g.Type, Command: g.Command, Timeout: g.Timeout, Required: g.Required, SuccessValue: g.SuccessValue, ValuePattern: g.ValuePattern})
 	}
 	result.Verification, err = s.verification.Verify(ctx, result.Run.RunID, executionProject, verificationGates)
 	if err == nil {

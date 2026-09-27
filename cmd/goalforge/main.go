@@ -276,12 +276,14 @@ func mergeWork(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	approved, err := s.ConsumeApproval(ctx, project.ID, store.ApprovalMergeBranch, "merge:"+*workItemID)
+	scope := store.ApprovalScope{WorkItemID: *workItemID, SourceBranch: commit.Branch, TargetRef: project.DefaultBranch, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+	approved, err := s.ConsumeScopedApproval(ctx, project.ID, store.ApprovalMergeBranch, "merge:"+*workItemID, scope)
 	if err != nil {
 		return err
 	}
 	if !approved {
-		return fmt.Errorf("merging into %s requires approval: run `goalforge approval request --action merge-branch --reason ...` and approve it first", project.DefaultBranch)
+		return fmt.Errorf("merging %s into %s requires approval of that commit: run `goalforge approval request --action merge-branch --work-item %s --reason ...` and approve it first",
+			shortSHA(commit.CommitSHA), project.DefaultBranch, *workItemID)
 	}
 	message := "Merge verified work " + *workItemID + "\n\nGoal-ID: " + commit.GoalID + "\nWork-Item-ID: " + commit.WorkItemID + "\nRun-ID: " + commit.RunID + "\n"
 	sha, err := gitops.MergeVerified(ctx, project.RepositoryPath, project.DefaultBranch, commit.Branch, message)
@@ -316,12 +318,14 @@ func publishWork(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	approved, err := s.ConsumeApproval(ctx, project.ID, store.ApprovalPublishBranch, "publish:"+*workItemID)
+	scope := store.ApprovalScope{WorkItemID: *workItemID, SourceBranch: commit.Branch, TargetRef: *remote, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+	approved, err := s.ConsumeScopedApproval(ctx, project.ID, store.ApprovalPublishBranch, "publish:"+*workItemID, scope)
 	if err != nil {
 		return err
 	}
 	if !approved {
-		return fmt.Errorf("publishing requires approval: run `goalforge approval request --action %s --reason ...` and approve it first", store.ApprovalPublishBranch)
+		return fmt.Errorf("publishing %s to %s requires approval of that commit: run `goalforge approval request --action publish-branch --work-item %s --remote %s --reason ...` and approve it first",
+			shortSHA(commit.CommitSHA), *remote, *workItemID, *remote)
 	}
 	if err = gitops.PushBranch(ctx, project.RepositoryPath, *remote, commit.Branch); err != nil {
 		return err
@@ -826,6 +830,8 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("approval request", flag.ContinueOnError)
 	action := f.String("action", "protected-files", "protected-files, publish-branch, or merge-branch")
 	reason := f.String("reason", "", "reason for approval")
+	workItemID := f.String("work-item", "", "work item whose verified commit is being approved (required for publish-branch and merge-branch)")
+	remote := f.String("remote", "origin", "git remote the publish approval applies to")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -847,12 +853,58 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	approval, err := s.RequestApproval(ctx, p.ID, actionType, *reason)
+	scope, err := approvalScope(ctx, s, p, actionType, *workItemID, *remote)
 	if err != nil {
 		return err
 	}
+	approval, err := s.RequestScopedApproval(ctx, p.ID, actionType, *reason, scope)
+	if err != nil {
+		return err
+	}
+	if approval.Scope.Scoped() {
+		fmt.Printf("approval requested: %s action=%s work=%s commit=%s branch=%s target=%s files=%d\n",
+			approval.ID, approval.ActionType, scope.WorkItemID, shortSHA(scope.CommitSHA), scope.SourceBranch, scope.TargetRef, scope.FilesChanged)
+		return nil
+	}
 	fmt.Printf("approval requested: %s action=%s\n", approval.ID, approval.ActionType)
 	return nil
+}
+
+// approvalScope resolves what a publish or merge approval actually covers, so
+// the reviewer approves a named commit instead of an action type. Resolving it
+// at request time is also what makes a later commit detectable as a change the
+// approval no longer covers.
+func approvalScope(ctx context.Context, s *store.Store, p model.Project, actionType, workItemID, remote string) (store.ApprovalScope, error) {
+	if actionType != store.ApprovalMergeBranch && actionType != store.ApprovalPublishBranch {
+		if workItemID != "" {
+			return store.ApprovalScope{}, fmt.Errorf("--work-item does not apply to %s approvals", actionType)
+		}
+		return store.ApprovalScope{}, nil
+	}
+	if workItemID == "" {
+		return store.ApprovalScope{}, fmt.Errorf("--work-item is required for %s approvals so the approval names the commit being approved", actionType)
+	}
+	commit, err := s.LatestRunCommitForWork(ctx, p.ID, workItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.ApprovalScope{}, fmt.Errorf("work item %s has no verified commit yet; only verified work can be approved", workItemID)
+	}
+	if err != nil {
+		return store.ApprovalScope{}, err
+	}
+	scope := store.ApprovalScope{WorkItemID: workItemID, SourceBranch: commit.Branch, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+	if actionType == store.ApprovalMergeBranch {
+		scope.TargetRef = p.DefaultBranch
+	} else {
+		scope.TargetRef = remote
+	}
+	return scope, nil
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }
 
 func approvalApprove(ctx context.Context, s *store.Store, args []string) error {
@@ -1075,7 +1127,8 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	commandJSON := f.String("command-json", "", "JSON command array")
 	timeout := f.Int("timeout-seconds", 300, "timeout seconds")
 	optional := f.Bool("optional", false, "non-blocking gate")
-	success := f.String("success-value", "true", "criterion value on success")
+	success := f.String("success-value", "true", "criterion value on success (numeric values become a minimum threshold)")
+	valuePattern := f.String("value-pattern", "", "regular expression with one capture group extracting the measured value from the gate output")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -1090,8 +1143,12 @@ func gateAdd(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err = s.UpsertGate(ctx, p.ID, store.GateConfig{Type: *kind, Command: command, Timeout: time.Duration(*timeout) * time.Second, Required: !*optional, SuccessValue: *success}); err != nil {
+	if err = s.UpsertGate(ctx, p.ID, store.GateConfig{Type: *kind, Command: command, Timeout: time.Duration(*timeout) * time.Second, Required: !*optional, SuccessValue: *success, ValuePattern: *valuePattern}); err != nil {
 		return err
+	}
+	if *valuePattern != "" {
+		fmt.Printf("verification gate configured: %s %v measured=%s threshold=%s\n", *kind, command, *valuePattern, *success)
+		return nil
 	}
 	fmt.Printf("verification gate configured: %s %v\n", *kind, command)
 	return nil

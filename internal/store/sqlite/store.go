@@ -144,7 +144,10 @@ CREATE TABLE IF NOT EXISTS run_file_changes (
 CREATE TABLE IF NOT EXISTS approvals (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), action_type TEXT NOT NULL,
  reason TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('PENDING','APPROVED','CONSUMED','REJECTED')),
- requested_at TEXT NOT NULL, approved_at TEXT, consumed_run_id TEXT
+ requested_at TEXT NOT NULL, approved_at TEXT, consumed_run_id TEXT,
+ work_item_id TEXT NOT NULL DEFAULT '', source_branch TEXT NOT NULL DEFAULT '',
+ target_ref TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '',
+ files_changed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS policy_violations (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL REFERENCES runs(id),
@@ -214,7 +217,7 @@ CREATE TABLE IF NOT EXISTS loop_signals (
 CREATE TABLE IF NOT EXISTS verification_gates (
  project_id TEXT NOT NULL REFERENCES projects(id), check_type TEXT NOT NULL,
  command_json TEXT NOT NULL, timeout_seconds INTEGER NOT NULL, required INTEGER NOT NULL DEFAULT 1,
- success_value TEXT NOT NULL DEFAULT 'true', created_at TEXT NOT NULL,
+ success_value TEXT NOT NULL DEFAULT 'true', value_pattern TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
  PRIMARY KEY(project_id,check_type)
 );
 CREATE INDEX IF NOT EXISTS idx_goals_project_version ON goals(project_id, version DESC);
@@ -249,6 +252,14 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	}
 	if err := s.ensureColumn(ctx, "projects", "fallback_model", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
+	}
+	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, definition string }{{"work_item_id", "TEXT NOT NULL DEFAULT ''"}, {"source_branch", "TEXT NOT NULL DEFAULT ''"}, {"target_ref", "TEXT NOT NULL DEFAULT ''"}, {"commit_sha", "TEXT NOT NULL DEFAULT ''"}, {"files_changed", "INTEGER NOT NULL DEFAULT 0"}} {
+		if err := s.ensureColumn(ctx, "approvals", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	for _, column := range []struct{ name, definition string }{{"daily_run_limit", "INTEGER NOT NULL DEFAULT 0"}, {"daily_token_limit", "INTEGER NOT NULL DEFAULT 0"}, {"daily_cost_limit_usd", "REAL NOT NULL DEFAULT 0"}} {
 		if err := s.ensureColumn(ctx, "project_budgets", column.name, column.definition); err != nil {
@@ -437,24 +448,58 @@ func (s *Store) loadGoal(ctx context.Context, query, projectID string) (model.Go
 	return g, rows.Err()
 }
 
+// ProgressDetail explains a goal's progress instead of reducing it to one
+// number: which weight is in scope, which was discarded out of scope, and
+// which completion criteria are actually backed by evidence.
+type ProgressDetail struct {
+	Percent                                  float64
+	Complete                                 bool
+	TotalWeight, DoneWeight, DiscardedWeight float64
+	TotalItems, DoneItems, DiscardedItems    int
+	Criteria                                 []CriterionStatus
+	CriteriaMet                              bool
+}
+
+// GoalProgress reports percent complete and whether the goal is finished.
 func (s *Store) GoalProgress(ctx context.Context, goal model.Goal) (float64, bool, error) {
-	var total, done float64
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(weight),0),COALESCE(SUM(CASE WHEN status='DONE' THEN weight ELSE 0 END),0) FROM work_items WHERE goal_id=?`, goal.ID).Scan(&total, &done); err != nil {
-		return 0, false, err
+	detail, err := s.GoalProgressDetail(ctx, goal)
+	return detail.Percent, detail.Complete, err
+}
+
+// GoalProgressDetail computes progress over the goal's in-scope work only.
+// DISCARDED items are removed from the baseline rather than counted as
+// outstanding: leaving them in the denominator made `done == total`
+// unreachable, so a single discarded item blocked goal completion forever.
+// Required completion criteria still have to be met with evidence.
+func (s *Store) GoalProgressDetail(ctx context.Context, goal model.Goal) (ProgressDetail, error) {
+	var detail ProgressDetail
+	if err := s.db.QueryRowContext(ctx, `SELECT
+COALESCE(SUM(CASE WHEN status<>'DISCARDED' THEN weight ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DONE' THEN weight ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DISCARDED' THEN weight ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status<>'DISCARDED' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DONE' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='DISCARDED' THEN 1 ELSE 0 END),0)
+FROM work_items WHERE goal_id=?`, goal.ID).Scan(&detail.TotalWeight, &detail.DoneWeight, &detail.DiscardedWeight,
+		&detail.TotalItems, &detail.DoneItems, &detail.DiscardedItems); err != nil {
+		return detail, err
 	}
-	criteriaOK := len(goal.Criteria) > 0
-	for _, c := range goal.Criteria {
-		var actual, status string
-		err := s.db.QueryRowContext(ctx, `SELECT actual_value,status FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goal.ID, c.Type).Scan(&actual, &status)
-		if err != nil || status != "PASSED" || !criterionMet(c.ExpectedValue, actual) {
-			criteriaOK = false
+	criteria, err := s.CriteriaStatus(ctx, goal)
+	if err != nil {
+		return detail, err
+	}
+	detail.Criteria = criteria
+	detail.CriteriaMet = len(criteria) > 0
+	for _, c := range criteria {
+		if !c.Satisfied {
+			detail.CriteriaMet = false
 		}
 	}
-	progress := float64(0)
-	if total > 0 {
-		progress = done / total * 100
+	if detail.TotalWeight > 0 {
+		detail.Percent = detail.DoneWeight / detail.TotalWeight * 100
 	}
-	return progress, criteriaOK && total > 0 && done == total, nil
+	detail.Complete = detail.CriteriaMet && detail.TotalWeight > 0 && detail.DoneWeight == detail.TotalWeight
+	return detail, nil
 }
 
 func (s *Store) CreateMilestone(ctx context.Context, m model.Milestone) (model.Milestone, error) {

@@ -66,27 +66,55 @@ func (s *Store) ProjectMetrics(ctx context.Context, projectID string) (ProjectMe
 }
 
 // CriterionStatus reports whether a completion criterion is satisfied by the
-// latest verification evidence.
+// latest verification evidence. Status separates "measured and short of the
+// threshold" (UNMET) from "never measured" (NO_EVIDENCE); the two need
+// different actions from the user, and collapsing both into a false boolean
+// hid the difference.
 type CriterionStatus struct {
 	Type, ExpectedValue, ActualValue string
-	Satisfied                        bool
+	// Status is MET, UNMET, or NO_EVIDENCE.
+	Status string
+	// CheckStatus is the raw gate outcome behind the evidence (PASSED,
+	// FAILED, TIMEOUT) and is empty when there is no evidence.
+	CheckStatus string
+	RunID       string
+	MeasuredAt  time.Time
+	HasEvidence bool
+	Satisfied   bool
 }
 
 func (s *Store) CriteriaStatus(ctx context.Context, goal model.Goal) ([]CriterionStatus, error) {
 	result := make([]CriterionStatus, 0, len(goal.Criteria))
 	for _, criterion := range goal.Criteria {
-		entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue}
-		var actual, status string
-		err := s.db.QueryRowContext(ctx, `SELECT actual_value,status FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goal.ID, criterion.Type).Scan(&actual, &status)
-		if err == nil {
-			entry.ActualValue = actual
-			entry.Satisfied = status == "PASSED" && criterionMet(criterion.ExpectedValue, actual)
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		entry, err := s.criterionStatus(ctx, goal.ID, criterion)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, entry)
 	}
 	return result, nil
+}
+
+func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion model.Criterion) (CriterionStatus, error) {
+	entry := CriterionStatus{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue, Status: "NO_EVIDENCE"}
+	var measured string
+	err := s.db.QueryRowContext(ctx, `SELECT actual_value,status,COALESCE(run_id,''),created_at FROM verification_results WHERE goal_id=? AND check_type=? ORDER BY id DESC LIMIT 1`, goalID, criterion.Type).
+		Scan(&entry.ActualValue, &entry.CheckStatus, &entry.RunID, &measured)
+	if errors.Is(err, sql.ErrNoRows) {
+		return entry, nil
+	}
+	if err != nil {
+		return entry, err
+	}
+	entry.HasEvidence = true
+	entry.MeasuredAt, _ = time.Parse(time.RFC3339Nano, measured)
+	entry.Satisfied = entry.CheckStatus == "PASSED" && criterionMet(criterion.ExpectedValue, entry.ActualValue)
+	if entry.Satisfied {
+		entry.Status = "MET"
+	} else {
+		entry.Status = "UNMET"
+	}
+	return entry, nil
 }
 
 // RunView is a run summarized for operational displays.

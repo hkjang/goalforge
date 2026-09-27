@@ -56,7 +56,7 @@ func toolDescriptors() []toolDescriptor {
 		{"work_add", "Add a work item to the active goal's backlog.", schema([]string{"title"}, map[string]any{"project": projectProperty, "title": stringProperty("Work item title."), "priority": numberProperty("Selection priority (higher first)."), "scope": stringProperty("Allowed change scope, e.g. internal/session/**."), "type": stringProperty("Work type (default IMPLEMENT)."), "estimated_tokens": numberProperty("Manual token estimate for one run.")})},
 		{"work_set_status", "Triage a backlog item: APPROVED, BLOCKED, DISCARDED, or BACKLOG. Execution states are refused.", schema([]string{"work_item_id", "status"}, map[string]any{"project": projectProperty, "work_item_id": stringProperty("Work item ID."), "status": stringProperty("APPROVED | BLOCKED | DISCARDED | BACKLOG")})},
 		{"approvals_list", "List pending approvals across all projects.", schema(nil, nil)},
-		{"approval_request", "Request an approval for a gated action (protected-files, merge-branch, publish-branch).", schema([]string{"action", "reason"}, map[string]any{"project": projectProperty, "action": stringProperty("protected-files | merge-branch | publish-branch"), "reason": stringProperty("Why the action is needed.")})},
+		{"approval_request", "Request an approval for a gated action (protected-files, merge-branch, publish-branch). merge-branch and publish-branch approvals name the work item's verified commit, so an approval only covers that change.", schema([]string{"action", "reason"}, map[string]any{"project": projectProperty, "action": stringProperty("protected-files | merge-branch | publish-branch"), "reason": stringProperty("Why the action is needed."), "work_item_id": stringProperty("Work item whose verified commit is being approved; required for merge-branch and publish-branch."), "remote": stringProperty("Git remote a publish approval applies to (default origin).")})},
 		{"approval_decide", "Approve or reject one pending approval.", schema([]string{"approval_id", "decision"}, map[string]any{"project": projectProperty, "approval_id": stringProperty("Approval ID (APR-...)."), "decision": stringProperty("approve | reject")})},
 		{"usage_report", "Token and cost usage, budgets, and provider quota windows for a project.", schema(nil, map[string]any{"project": projectProperty})},
 		{"runs_recent", "Recent runs with task type, work item, tokens, and state.", schema(nil, map[string]any{"project": projectProperty, "limit": numberProperty("Maximum runs to return (default 10).")})},
@@ -77,6 +77,7 @@ type toolArgs struct {
 	Type            string   `json:"type"`
 	EstimatedTokens int64    `json:"estimated_tokens"`
 	WorkItemID      string   `json:"work_item_id"`
+	Remote          string   `json:"remote"`
 	Status          string   `json:"status"`
 	Action          string   `json:"action"`
 	ApprovalID      string   `json:"approval_id"`
@@ -352,7 +353,39 @@ func (s *Server) approvalRequest(ctx context.Context, args toolArgs) (string, er
 	if args.Reason == "" {
 		return "", errors.New("reason is required")
 	}
-	return marshal(s.store.RequestApproval(ctx, project.ID, actionType, args.Reason))
+	scope, err := s.approvalScope(ctx, project, actionType, args.WorkItemID, args.Remote)
+	if err != nil {
+		return "", err
+	}
+	return marshal(s.store.RequestScopedApproval(ctx, project.ID, actionType, args.Reason, scope))
+}
+
+// approvalScope resolves the commit a publish or merge approval covers so the
+// approval cannot later be spent on a different change.
+func (s *Server) approvalScope(ctx context.Context, project model.Project, actionType, workItemID, remote string) (store.ApprovalScope, error) {
+	if actionType != store.ApprovalMergeBranch && actionType != store.ApprovalPublishBranch {
+		return store.ApprovalScope{}, nil
+	}
+	if workItemID == "" {
+		return store.ApprovalScope{}, fmt.Errorf("work_item_id is required for %s approvals", actionType)
+	}
+	commit, err := s.store.LatestRunCommitForWork(ctx, project.ID, workItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.ApprovalScope{}, fmt.Errorf("work item %s has no verified commit yet", workItemID)
+	}
+	if err != nil {
+		return store.ApprovalScope{}, err
+	}
+	scope := store.ApprovalScope{WorkItemID: workItemID, SourceBranch: commit.Branch, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+	if actionType == store.ApprovalMergeBranch {
+		scope.TargetRef = project.DefaultBranch
+		return scope, nil
+	}
+	scope.TargetRef = remote
+	if scope.TargetRef == "" {
+		scope.TargetRef = "origin"
+	}
+	return scope, nil
 }
 
 func (s *Server) approvalDecide(ctx context.Context, args toolArgs) (string, error) {
