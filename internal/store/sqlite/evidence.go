@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -125,11 +127,100 @@ func (s *Store) recordExternalEvidence(ctx context.Context, goalID, source strin
 		if record.Required {
 			required = 1
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,stale,stale_reason,created_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,0,'',?)`,
+		if _, err = tx.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,stale,stale_reason,tree_id,evaluator_id,created_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,0,'',?,?,?)`,
 			goalID, record.CheckType, record.Status, record.ActualValue, source,
-			record.ExitCode, record.Duration.Milliseconds(), required, record.Output, record.FailureKind, record.RepairMode, now); err != nil {
+			record.ExitCode, record.Duration.Milliseconds(), required, record.Output, record.FailureKind, record.RepairMode,
+			record.TreeID, record.EvaluatorID, now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// StaleTreeChanged is recorded when evidence was measured against a different
+// working tree than the one now in place.
+const StaleTreeChanged = "measured against a different tree"
+
+// WorkspaceTreeID pairs the workspace a measurement was taken in with the tree
+// it saw. Evidence from a work item's isolated worktree is not evidence about
+// the default branch, so the two are only ever compared like with like.
+func WorkspaceTreeID(workspace, tree string) string {
+	return workspace + "\x00" + tree
+}
+
+func splitWorkspaceTree(value string) (workspace, tree string) {
+	parts := strings.SplitN(value, "\x00", 2)
+	if len(parts) != 2 {
+		return "", value
+	}
+	return parts[0], parts[1]
+}
+
+// EvaluatorID fingerprints a gate definition. Evidence carries the fingerprint
+// of the gate that produced it, so a gate edited through any path — not only
+// the one that remembers to invalidate — stops satisfying the criterion.
+func EvaluatorID(gate GateConfig) string {
+	payload := strings.Join(gate.Command, "\x00") + "\x00" + gate.SuccessValue + "\x00" + gate.ValuePattern
+	if gate.Required {
+		payload += "\x00required"
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))[:16]
+}
+
+// RefreshEvidence marks evidence stale when the tree it was measured against
+// or the gate that measured it no longer matches what is in place now. It is
+// called wherever current state is read, so staleness is detected rather than
+// depending on every mutation site remembering to declare it.
+func (s *Store) RefreshEvidence(ctx context.Context, projectID, goalID, treeID string, gates []GateConfig) (int64, error) {
+	evaluators := make(map[string]string, len(gates))
+	for _, gate := range gates {
+		evaluators[gate.Type] = EvaluatorID(gate)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,check_type,COALESCE(tree_id,''),COALESCE(evaluator_id,'') FROM verification_results WHERE goal_id=? AND stale=0 AND status='PASSED'`, goalID)
+	if err != nil {
+		return 0, err
+	}
+	type staleRow struct {
+		id     int64
+		reason string
+	}
+	var expired []staleRow
+	for rows.Next() {
+		var id int64
+		var checkType, recordedTree, recordedEvaluator string
+		if err = rows.Scan(&id, &checkType, &recordedTree, &recordedEvaluator); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		switch {
+		// Evidence recorded before identities were tracked cannot be judged,
+		// so it is left alone rather than invalidated on a missing field.
+		case recordedEvaluator != "" && evaluators[checkType] != "" && recordedEvaluator != evaluators[checkType]:
+			expired = append(expired, staleRow{id, StaleGateChanged})
+		default:
+			// Only a measurement taken in this workspace can be invalidated by
+			// this workspace moving.
+			recordedWorkspace, recordedTreeOnly := splitWorkspaceTree(recordedTree)
+			currentWorkspace, currentTreeOnly := splitWorkspaceTree(treeID)
+			if recordedWorkspace == "" || currentWorkspace == "" || recordedWorkspace != currentWorkspace {
+				continue
+			}
+			if recordedTreeOnly != "" && currentTreeOnly != "" && recordedTreeOnly != currentTreeOnly {
+				expired = append(expired, staleRow{id, StaleTreeChanged})
+			}
+		}
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	var marked int64
+	for _, row := range expired {
+		result, execErr := s.db.ExecContext(ctx, `UPDATE verification_results SET stale=1,stale_reason=? WHERE id=? AND stale=0`, row.reason, row.id)
+		if execErr != nil {
+			return marked, execErr
+		}
+		affected, _ := result.RowsAffected()
+		marked += affected
+	}
+	return marked, nil
 }

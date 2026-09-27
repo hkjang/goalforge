@@ -119,7 +119,8 @@ CREATE TABLE IF NOT EXISTS verification_results (
  command TEXT NOT NULL DEFAULT '', exit_code INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER NOT NULL DEFAULT 0,
  required INTEGER NOT NULL DEFAULT 1, output TEXT NOT NULL DEFAULT '',
  failure_kind TEXT NOT NULL DEFAULT '', repair_mode TEXT NOT NULL DEFAULT '',
- stale INTEGER NOT NULL DEFAULT 0, stale_reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+ stale INTEGER NOT NULL DEFAULT 0, stale_reason TEXT NOT NULL DEFAULT '',
+ tree_id TEXT NOT NULL DEFAULT '', evaluator_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS verification_relaxations (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL DEFAULT '',
@@ -313,7 +314,7 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "verification_gates", "value_pattern", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	for _, column := range []string{"failure_kind", "repair_mode", "stale_reason"} {
+	for _, column := range []string{"failure_kind", "repair_mode", "stale_reason", "tree_id", "evaluator_id"} {
 		if err := s.ensureColumn(ctx, "verification_results", column, "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return err
 		}

@@ -571,3 +571,128 @@ func TestEvidenceGoesStaleWhenTheCheckOrTheCodeChanges(t *testing.T) {
 		t.Fatalf("changed code invalidates evidence: %+v err=%v", detail.Criteria, err)
 	}
 }
+
+// AT-10: evidence that passed must stop counting once the code or the gate it
+// was measured against changes. Relying on each mutation site to declare that
+// is how evidence outlives the thing it describes, so staleness is detected by
+// comparing recorded identity against what is in place now.
+func TestRefreshEvidenceDetectsTreeAndGateChanges(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := GateConfig{Type: "build_passed", Command: []string{"go", "build", "./..."}, Timeout: time.Minute, Required: true, SuccessValue: "true"}
+	if err = s.UpsertGate(ctx, p.ID, gate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO work_items(id,goal_id,type,title,status,weight) VALUES('W1',?,'IMPLEMENT','x','DONE',1)`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Evidence records the workspace it was measured in, so only that
+	// workspace moving can invalidate it.
+	record := func(tree string) {
+		t.Helper()
+		if _, execErr := s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,check_type,status,actual_value,required,tree_id,evaluator_id,created_at) VALUES(?,'build_passed','PASSED','true',1,?,?,?)`,
+			g.ID, WorkspaceTreeID(p.RepositoryPath, tree), EvaluatorID(gate), time.Now().UTC().Format(time.RFC3339Nano)); execErr != nil {
+			t.Fatal(execErr)
+		}
+	}
+	here := func(tree string) string { return WorkspaceTreeID(p.RepositoryPath, tree) }
+	record("commit-a")
+	// Same tree, same gate: nothing to invalidate.
+	marked, err := s.RefreshEvidence(ctx, p.ID, g.ID, here("commit-a"), []GateConfig{gate})
+	if err != nil || marked != 0 {
+		t.Fatalf("unchanged inputs must not invalidate: marked=%d err=%v", marked, err)
+	}
+	detail, err := s.GoalProgressDetail(ctx, g)
+	if err != nil || !detail.Complete {
+		t.Fatalf("fresh evidence completes the goal: %+v err=%v", detail, err)
+	}
+	// The tree moved: the measurement describes code that is no longer there.
+	marked, err = s.RefreshEvidence(ctx, p.ID, g.ID, here("commit-b"), []GateConfig{gate})
+	if err != nil || marked != 1 {
+		t.Fatalf("a changed tree must invalidate: marked=%d err=%v", marked, err)
+	}
+	detail, err = s.GoalProgressDetail(ctx, g)
+	if err != nil || detail.Complete || detail.Criteria[0].StaleReason != StaleTreeChanged {
+		t.Fatalf("criteria=%+v err=%v", detail.Criteria, err)
+	}
+	// Re-measured against the current tree, then the gate itself is rewritten.
+	record("commit-b")
+	if detail, err = s.GoalProgressDetail(ctx, g); err != nil || !detail.Complete {
+		t.Fatalf("re-measured evidence counts again: %+v err=%v", detail, err)
+	}
+	weakened := gate
+	weakened.Command = []string{"true"}
+	marked, err = s.RefreshEvidence(ctx, p.ID, g.ID, here("commit-b"), []GateConfig{weakened})
+	if err != nil || marked != 1 {
+		t.Fatalf("a rewritten gate must invalidate what the old one proved: marked=%d err=%v", marked, err)
+	}
+	if detail, err = s.GoalProgressDetail(ctx, g); err != nil || detail.Criteria[0].StaleReason != StaleGateChanged {
+		t.Fatalf("criteria=%+v err=%v", detail.Criteria, err)
+	}
+}
+
+// A work item verifies inside its own worktree. That measurement says nothing
+// about the default branch, so the repository moving must not invalidate it —
+// which is also why merging has its own explicit invalidation.
+func TestRefreshEvidenceIgnoresOtherWorkspaces(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,check_type,status,actual_value,required,tree_id,created_at) VALUES(?,'build_passed','PASSED','true',1,?,'now')`,
+		g.ID, WorkspaceTreeID("/repo.goalforge-worktrees/W1", "commit-x")); err != nil {
+		t.Fatal(err)
+	}
+	marked, err := s.RefreshEvidence(ctx, p.ID, g.ID, WorkspaceTreeID("/repo", "commit-y"), nil)
+	if err != nil || marked != 0 {
+		t.Fatalf("worktree evidence must not be invalidated by the repository moving: marked=%d err=%v", marked, err)
+	}
+}
+
+// Evidence written before identities were tracked carries neither, and must be
+// left alone rather than invalidated on a missing field.
+func TestRefreshEvidenceLeavesUnidentifiedRecordsAlone(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: "/repo", DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.SetGoal(ctx, p.ID, "goal", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,check_type,status,actual_value,required,created_at) VALUES(?,'build_passed','PASSED','true',1,'now')`, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	marked, err := s.RefreshEvidence(ctx, p.ID, g.ID, WorkspaceTreeID(p.RepositoryPath, "commit-a"), nil)
+	if err != nil || marked != 0 {
+		t.Fatalf("legacy evidence must not be invalidated for missing identity: marked=%d err=%v", marked, err)
+	}
+}

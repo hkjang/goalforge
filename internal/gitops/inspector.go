@@ -144,3 +144,30 @@ func HeadCommit(ctx context.Context, repository, ref string) (string, error) {
 	}
 	return gitOutput(ctx, repository, "rev-parse", ref)
 }
+
+// TreeID identifies the exact working tree a measurement was taken against:
+// the commit it is based on plus a digest of anything uncommitted. A commit
+// SHA alone would call two different working trees the same, which is how
+// evidence outlives the code it describes.
+func TreeID(ctx context.Context, repository string) (string, error) {
+	head, err := gitOutput(ctx, repository, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	status, err := gitOutput(ctx, repository, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(status) == "" {
+		return head, nil
+	}
+	files, err := parsePorcelainZ([]byte(status))
+	if err != nil {
+		return "", err
+	}
+	dirty, err := fingerprintDirty(repository, files)
+	if err != nil {
+		return "", err
+	}
+	return head + "+" + dirty, nil
+}

@@ -16,9 +16,15 @@ type VerificationRecord struct {
 	// FailureKind and RepairMode record why a gate failed and what would
 	// address it, so a failure can be routed instead of merely retried.
 	FailureKind, RepairMode string
-	ExitCode                int
-	Duration                time.Duration
-	Required                bool
+	// TreeID identifies the working tree the measurement was taken against
+	// and EvaluatorID identifies the gate definition that took it. Evidence
+	// is a statement about a particular tree checked by a particular command;
+	// recording both is what lets either one changing invalidate it without
+	// every mutation site having to remember to say so.
+	TreeID, EvaluatorID string
+	ExitCode            int
+	Duration            time.Duration
+	Required            bool
 }
 
 func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord) error {
@@ -34,7 +40,7 @@ func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord)
 	if r.Required {
 		required = 1
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), r.FailureKind, r.RepairMode, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,tree_id,evaluator_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), r.FailureKind, r.RepairMode, r.TreeID, r.EvaluatorID, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/policy"
 	"github.com/goalforge/goalforge/internal/procctl"
@@ -89,6 +90,16 @@ func (e *Engine) Check(ctx context.Context, repositoryPath string, gates []Gate)
 
 func (e *Engine) Verify(ctx context.Context, runID string, project model.Project, gates []Gate) (Report, error) {
 	report := Report{Passed: true}
+	// The tree the gates are about to measure is recorded with their results,
+	// so evidence can later be told apart from the code it was taken against.
+	// The workspace is recorded with the tree because a work item verifies
+	// inside its own worktree: that measurement says nothing about the default
+	// branch, and comparing the two trees would mark every run's evidence
+	// stale the moment it was written.
+	treeID := ""
+	if tree, treeErr := gitops.TreeID(ctx, project.RepositoryPath); treeErr == nil {
+		treeID = store.WorkspaceTreeID(project.RepositoryPath, tree)
+	}
 	if len(gates) == 0 {
 		return report, errors.New("at least one verification gate is required")
 	}
@@ -106,7 +117,9 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 		actual := measure(gate, &result)
 		record := store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual,
 			Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode,
-			Duration: result.Duration, Required: gate.Required}
+			Duration: result.Duration, Required: gate.Required, TreeID: treeID,
+			EvaluatorID: store.EvaluatorID(store.GateConfig{Type: gate.Type, Command: gate.Command,
+				Timeout: gate.Timeout, Required: gate.Required, SuccessValue: gate.SuccessValue, ValuePattern: gate.ValuePattern})}
 		if result.Status != "PASSED" {
 			failure := policy.ClassifyGateFailure(result.Status, result.Output)
 			record.FailureKind, record.RepairMode = string(failure.Kind), string(failure.Mode)

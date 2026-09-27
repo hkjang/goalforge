@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/goalforge/goalforge/internal/diagnostics"
+	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
@@ -159,6 +160,9 @@ func BuildPlan(ctx context.Context, db *store.Store, project model.Project) (Pla
 	} else {
 		plan.add("WARN", "workspace", "worktree 가 꺼져 있어 저장소에서 직접 실행됩니다 (goalforge project init --worktrees)")
 	}
+	if _, err = RefreshEvidence(ctx, s.store, project); err != nil {
+		return plan, err
+	}
 	readiness, err := s.store.ReadinessInput(ctx, project.ID)
 	if err != nil {
 		return plan, err
@@ -261,4 +265,36 @@ func orDefaultModel(name string) string {
 		return "제공자 기본값"
 	}
 	return name
+}
+
+// RefreshEvidence re-checks whether a project's verification evidence still
+// describes the code and gates in place now. It is called wherever current
+// state is read — status, the preview, the dashboard — because an invalidation
+// that depends on every mutation site remembering to declare it is one that
+// eventually gets forgotten.
+func RefreshEvidence(ctx context.Context, db *store.Store, project model.Project) (int64, error) {
+	goal, err := db.CurrentGoal(ctx, project.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		// A completed goal still has evidence, and code that moves after
+		// completion is exactly the case where it stops being true.
+		goal, err = db.LatestGoal(ctx, project.ID)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	gates, err := db.ListGates(ctx, project.ID)
+	if err != nil {
+		return 0, err
+	}
+	// A repository that cannot be inspected yields no tree identity, and the
+	// gate comparison still applies: a missing signal must not be read as a
+	// match.
+	treeID := ""
+	if tree, treeErr := gitops.TreeID(ctx, project.RepositoryPath); treeErr == nil {
+		treeID = store.WorkspaceTreeID(project.RepositoryPath, tree)
+	}
+	return db.RefreshEvidence(ctx, project.ID, goal.ID, treeID, gates)
 }

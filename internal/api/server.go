@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goalforge/goalforge/internal/app"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/provider"
@@ -169,6 +170,10 @@ func (s *Server) project(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, refreshErr := app.RefreshEvidence(r.Context(), s.store, project); refreshErr != nil {
+		writeError(w, http.StatusInternalServerError, refreshErr.Error())
 		return
 	}
 	summary, progress, err := s.summary(r.Context(), project)

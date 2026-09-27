@@ -1520,6 +1520,12 @@ func verifyIntegration(ctx context.Context, s *store.Store, args []string) error
 	if err != nil {
 		return err
 	}
+	// The tree actually measured, not just the branch tip: an integration
+	// check run against a dirty tree proves something about that tree.
+	treeSnapshot, err := gitops.TreeID(ctx, p.RepositoryPath)
+	if err != nil {
+		return err
+	}
 	results, passed, err := engine.Check(ctx, p.RepositoryPath, checks)
 	if err != nil {
 		return err
@@ -1535,8 +1541,14 @@ func verifyIntegration(ctx context.Context, s *store.Store, args []string) error
 		return err
 	}
 	// The integration run is what proves the criteria on the branch that
-	// ships, so its results become the current evidence.
-	if goal, goalErr := s.CurrentGoal(ctx, p.ID); goalErr == nil {
+	// ships, so its results become the current evidence. A completed goal
+	// still needs this recorded: otherwise verifying the integrated result
+	// after completion leaves no trace of having done it.
+	goal, goalErr := s.CurrentGoal(ctx, p.ID)
+	if errors.Is(goalErr, store.ErrNotFound) {
+		goal, goalErr = s.LatestGoal(ctx, p.ID)
+	}
+	if goalErr == nil {
 		records := make([]store.VerificationRecord, 0, len(results))
 		for _, result := range results {
 			actual := "false"
@@ -1548,9 +1560,16 @@ func verifyIntegration(ctx context.Context, s *store.Store, args []string) error
 					actual = g.SuccessValue
 				}
 			}
+			var evaluator string
+			for _, g := range gates {
+				if g.Type == result.Type {
+					evaluator = store.EvaluatorID(g)
+				}
+			}
 			records = append(records, store.VerificationRecord{CheckType: result.Type, Status: result.Status,
 				ActualValue: actual, Output: result.Output, ExitCode: result.ExitCode, Duration: result.Duration,
-				Required: result.Required, FailureKind: result.FailureKind, RepairMode: result.RepairMode})
+				Required: result.Required, FailureKind: result.FailureKind, RepairMode: result.RepairMode,
+				TreeID: store.WorkspaceTreeID(p.RepositoryPath, treeSnapshot), EvaluatorID: evaluator})
 		}
 		if err = s.RecordIntegrationEvidence(ctx, goal.ID, branchSHA, records); err != nil {
 			return err
@@ -2449,6 +2468,11 @@ func goalShow(ctx context.Context, s *store.Store) error {
 	}
 	if err != nil {
 		return fmt.Errorf("find active goal: %w", err)
+	}
+	// Evidence that no longer describes the current tree or gates stops
+	// counting here rather than at whichever write last remembered to say so.
+	if _, err = app.RefreshEvidence(ctx, s, p); err != nil {
+		return err
 	}
 	detail, err := s.GoalProgressDetail(ctx, g)
 	if err != nil {

@@ -305,6 +305,25 @@ func TestCLIEvidenceAndPreviewLifecycle(t *testing.T) {
 	if !strings.Contains(integrationOut, "integration verified") {
 		t.Fatalf("integration verification:\n%s", integrationOut)
 	}
+	if verified := runCLI(t, ctx, "status"); !strings.Contains(verified, "[v]") {
+		t.Fatalf("integration evidence should satisfy the criterion:\n%s", verified)
+	}
+
+	// AT-10: changing the code the integration check measured must invalidate
+	// its evidence. Relying on each mutation site to declare that is how
+	// evidence outlives the thing it describes.
+	if err := os.WriteFile(filepath.Join(repo, "unverified.go"), []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := runCLI(t, ctx, "status")
+	if !strings.Contains(stale, "[~]") || !strings.Contains(stale, "재검증 필요") {
+		t.Fatalf("evidence must go stale once the measured tree changes:\n%s", stale)
+	}
+	// Re-running the check against the current tree restores it.
+	runCLI(t, ctx, "verify", "integration")
+	if refreshed := runCLI(t, ctx, "status"); !strings.Contains(refreshed, "[v]") {
+		t.Fatalf("re-verification should restore the evidence:\n%s", refreshed)
+	}
 
 	// The evidence bundle is written and carries the decision and the gate.
 	evidenceDir := filepath.Join(t.TempDir(), "evidence")

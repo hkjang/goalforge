@@ -225,8 +225,15 @@ workspace, stops the planner from claiming the item, and on return re-runs the
 gates so a hand edit is verified like any other change.
 
 A passing verification result is a statement about a particular tree checked by
-a particular command. When the gate changes, or work is merged into the default
-branch, the affected evidence is marked as needing re-verification and stops
+a particular command, so each result records both: the workspace and tree it
+measured, and a fingerprint of the gate that measured it. Staleness is then
+detected wherever current state is read — `status`, `plan`, the dashboard —
+rather than depending on every write that changes the inputs remembering to
+declare it. Evidence from a work item's isolated worktree is never compared
+against the default branch, because it was never a statement about it; that is
+what integration verification is for. When the gate changes, or work is merged
+into the default branch, the affected evidence is marked as needing
+re-verification and stops
 counting toward completion until it is re-run — `verify integration` records
 the integrated result as the new current evidence. Changes that make passing
 easier rather than making the result better — a lowered threshold, a required
