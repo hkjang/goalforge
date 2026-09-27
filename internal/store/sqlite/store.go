@@ -104,6 +104,13 @@ CREATE TABLE IF NOT EXISTS evaluation_results (
  cost_usd REAL NOT NULL DEFAULT 0, interventions INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS evaluation_trials (
+ id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES evaluation_cases(id), label TEXT NOT NULL,
+ repetition INTEGER NOT NULL DEFAULT 1, condition_hash TEXT NOT NULL DEFAULT '',
+ clean_tree_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+ completed INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0,
+ interventions INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS takeovers (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), work_item_id TEXT NOT NULL,
  reason TEXT NOT NULL DEFAULT '', workspace TEXT NOT NULL DEFAULT '', stopped_run_id TEXT NOT NULL DEFAULT '',
@@ -321,6 +328,11 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	}
 	if err := s.ensureColumn(ctx, "verification_results", "stale", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, definition string }{{"fixture", "TEXT NOT NULL DEFAULT ''"}, {"fixture_ref", "TEXT NOT NULL DEFAULT ''"}, {"clean_tree_id", "TEXT NOT NULL DEFAULT ''"}, {"criteria_json", "TEXT NOT NULL DEFAULT ''"}, {"gates_json", "TEXT NOT NULL DEFAULT ''"}, {"token_budget", "INTEGER NOT NULL DEFAULT 0"}, {"cost_budget_usd", "REAL NOT NULL DEFAULT 0"}, {"timeout_seconds", "INTEGER NOT NULL DEFAULT 0"}} {
+		if err := s.ensureColumn(ctx, "evaluation_cases", column.name, column.definition); err != nil {
+			return err
+		}
 	}
 	for _, column := range []struct{ name, definition string }{{"objective", "TEXT NOT NULL DEFAULT ''"}, {"acceptance", "TEXT NOT NULL DEFAULT ''"}, {"blocked_reason", "TEXT NOT NULL DEFAULT ''"}, {"owner", "TEXT NOT NULL DEFAULT 'AI'"}} {
 		if err := s.ensureColumn(ctx, "work_items", column.name, column.definition); err != nil {

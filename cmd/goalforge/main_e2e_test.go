@@ -355,3 +355,87 @@ func TestCLIEvidenceAndPreviewLifecycle(t *testing.T) {
 		t.Fatal("model advice produced no selection")
 	}
 }
+
+// TestCLIEvaluationRunner exercises EVA-01 through the real CLI: a case is
+// pinned to a fixture, re-executed in clean environments, and the trials are
+// aggregated. It is the difference between recording that a run happened and
+// being able to re-run the task, which is what any comparison rests on.
+func TestCLIEvaluationRunner(t *testing.T) {
+	ctx := context.Background()
+
+	// The fixture is the repository a trial starts from. It is separate from
+	// the operator's project: a trial must not run in the user's tree.
+	fixture := t.TempDir()
+	gitIn(t, fixture, "init", "-b", "main")
+	gitIn(t, fixture, "config", "user.email", "fixture@example.invalid")
+	gitIn(t, fixture, "config", "user.name", "Fixture")
+	gate := testscript.Write(t, fixture, "verify-gate", "grep goalforge hello.txt", "findstr goalforge hello.txt")
+	if err := os.WriteFile(filepath.Join(fixture, "README.md"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, fixture, "add", "-A")
+	gitIn(t, fixture, "commit", "-m", "fixture base")
+	fixtureHead := gitIn(t, fixture, "rev-parse", "HEAD")
+
+	repo := t.TempDir()
+	gitIn(t, repo, "init", "-b", "main")
+	gitIn(t, repo, "config", "user.email", "e2e@example.invalid")
+	gitIn(t, repo, "config", "user.name", "E2E")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-m", "base")
+
+	solving := testscript.Write(t, t.TempDir(), "claude",
+		strings.Join([]string{
+			`case "$*" in *--version*|*--help*) echo "fake --output-format --resume --settings --permission-mode --json-schema --no-session-persistence"; exit 0;; esac`,
+			"cat >/dev/null",
+			"printf 'hello goalforge\\n' > hello.txt",
+			`printf '{"type":"system","subtype":"init","session_id":"sess-eval"}\n'`,
+			`printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-eval","total_cost_usd":0.003,"usage":{"input_tokens":300,"output_tokens":90}}\n'`,
+		}, "\n"), "exit /b 0")
+
+	t.Setenv("GOALFORGE_CLAUDE_BIN", solving)
+	t.Setenv("GOALFORGE_DB", filepath.Join(t.TempDir(), "state.db"))
+	t.Chdir(repo)
+	runCLI(t, ctx, "project", "init", "--name", "evalhost", "--provider", "claude", "--model", "haiku")
+
+	caseOut := runCLI(t, ctx, "eval", "add", "--name", "greeting", "--kind", "feature",
+		"--goal", "write hello.txt", "--objective", "hello.txt 에 goalforge 를 쓴다")
+	caseID := regexp.MustCompile(`EVAL-\d+`).FindString(caseOut)
+	if caseID == "" {
+		t.Fatalf("no case ID in %q", caseOut)
+	}
+
+	// A case with no fixture cannot be re-executed, and says so rather than
+	// pretending to measure something.
+	if output, err := runCLIWithError(t, ctx, "eval", "run", "--case", caseID, "--label", "baseline"); err == nil {
+		t.Fatalf("running an unpinned case must fail:\n%s", output)
+	}
+
+	runCLI(t, ctx, "eval", "spec", "--case", caseID, "--fixture", fixture, "--ref", fixtureHead,
+		"--criterion", "build_passed=true",
+		"--work", "create hello.txt", "--work-scope", "hello.txt",
+		"--gate-type", "build_passed", "--gate-command-json", `["`+strings.ReplaceAll(gate, `\`, `\\`)+`"]`,
+		"--token-budget", "100000", "--timeout-seconds", "120")
+
+	runOut := runCLI(t, ctx, "eval", "run", "--case", caseID, "--label", "baseline", "--repeat", "2")
+	if strings.Count(runOut, "PASSED") != 2 {
+		t.Fatalf("both repetitions should complete the task:\n%s", runOut)
+	}
+	// The trials ran against the fixture, not the operator's repository.
+	if _, err := os.Stat(filepath.Join(repo, "hello.txt")); !os.IsNotExist(err) {
+		t.Fatalf("an evaluation trial wrote into the operator's repository: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture, "hello.txt")); !os.IsNotExist(err) {
+		t.Fatalf("an evaluation trial wrote into the fixture: %v", err)
+	}
+
+	compareOut := runCLI(t, ctx, "eval", "compare", "--case", caseID)
+	for _, expected := range []string{"baseline", "stability"} {
+		if !strings.Contains(compareOut, expected) {
+			t.Fatalf("comparison missing %q:\n%s", expected, compareOut)
+		}
+	}
+}
