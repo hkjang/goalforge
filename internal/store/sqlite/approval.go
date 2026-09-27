@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/audit"
@@ -115,10 +116,35 @@ func (s *Store) Approve(ctx context.Context, projectID, approvalID string) error
 	return nil
 }
 
+// RejectionCategories are the reasons a person turns work down. Recording
+// which one applies is what turns individual rejections into a signal about
+// where the automation is actually weak.
+var RejectionCategories = []string{"code_quality", "misunderstood_requirement", "too_broad", "insufficient_evidence", "not_needed", "other"}
+
+func ValidRejectionCategory(category string) bool {
+	for _, candidate := range RejectionCategories {
+		if candidate == category {
+			return true
+		}
+	}
+	return false
+}
+
 // RejectApproval declines a pending approval; rejected approvals can never
 // be consumed by a run.
 func (s *Store) RejectApproval(ctx context.Context, projectID, approvalID string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='REJECTED',approved_at=? WHERE id=? AND project_id=? AND status='PENDING'`, time.Now().UTC().Format(time.RFC3339Nano), approvalID, projectID)
+	return s.RejectApprovalWithReason(ctx, projectID, approvalID, "", "")
+}
+
+// RejectApprovalWithReason records why the work was turned down. Without the
+// reason a rejection only stops one change; with it, the pattern of rejections
+// says what to fix.
+func (s *Store) RejectApprovalWithReason(ctx context.Context, projectID, approvalID, category, note string) error {
+	if category != "" && !ValidRejectionCategory(category) {
+		return fmt.Errorf("rejection category must be one of %s", strings.Join(RejectionCategories, ", "))
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='REJECTED',approved_at=?,rejection_category=?,rejection_note=? WHERE id=? AND project_id=? AND status='PENDING'`,
+		time.Now().UTC().Format(time.RFC3339Nano), category, audit.RedactString(note), approvalID, projectID)
 	if err != nil {
 		return err
 	}
@@ -283,4 +309,35 @@ func (s *Store) ApprovalByID(ctx context.Context, projectID, approvalID string) 
 	approval.RequestedAt, _ = time.Parse(time.RFC3339Nano, requested)
 	approval.ApprovedAt, _ = time.Parse(time.RFC3339Nano, approved)
 	return approval, nil
+}
+
+// RejectionStat counts rejections by category so the recurring reason is
+// visible rather than buried in individual approvals.
+type RejectionStat struct {
+	Category string
+	Count    int
+	Examples []string
+}
+
+func (s *Store) RejectionStats(ctx context.Context, projectID string) ([]RejectionStat, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT COALESCE(NULLIF(rejection_category,''),'unrecorded'),COUNT(*),COALESCE(GROUP_CONCAT(NULLIF(rejection_note,''),'|'),'') FROM approvals WHERE project_id=? AND status='REJECTED' GROUP BY 1 ORDER BY 2 DESC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []RejectionStat
+	for rows.Next() {
+		var stat RejectionStat
+		var notes string
+		if err = rows.Scan(&stat.Category, &stat.Count, &notes); err != nil {
+			return nil, err
+		}
+		for _, note := range strings.Split(notes, "|") {
+			if trimmed := strings.TrimSpace(note); trimmed != "" && len(stat.Examples) < 3 {
+				stat.Examples = append(stat.Examples, trimmed)
+			}
+		}
+		result = append(result, stat)
+	}
+	return result, rows.Err()
 }

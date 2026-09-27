@@ -17,6 +17,20 @@ type ActivityReport struct {
 	WorkCompleted int64
 	Unresolved    []UnresolvedItem
 	Approvals     []PendingApproval
+	// Effect measures what the automation actually delivered against what it
+	// cost in rework and human attention.
+	Effect AutomationEffect
+}
+
+// AutomationEffect separates verified delivery from the work spent getting
+// there. A run count on its own says nothing about whether the automation is
+// helping.
+type AutomationEffect struct {
+	VerifiedRuns, RepairRuns   int64
+	ReworkRate                 float64
+	Takeovers, ApprovalsNeeded int64
+	MedianApprovalWaitSeconds  float64
+	BlockedForUser             int64
 }
 
 type ProjectActivity struct {
@@ -109,6 +123,55 @@ ORDER BY r.started_at DESC LIMIT 50`, start)
 	if err = unresolved.Err(); err != nil {
 		return report, err
 	}
+	if report.Effect, err = s.automationEffect(ctx, start); err != nil {
+		return report, err
+	}
 	report.Approvals, err = s.ListAllPendingApprovals(ctx)
 	return report, err
+}
+
+func (s *Store) automationEffect(ctx context.Context, start string) (AutomationEffect, error) {
+	var effect AutomationEffect
+	if err := s.db.QueryRowContext(ctx, `SELECT
+COALESCE(SUM(CASE WHEN state IN ('CHECKPOINTING','COMPLETED') THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN state IN ('REPAIR_REQUIRED','FAILED') THEN 1 ELSE 0 END),0)
+FROM runs WHERE started_at>=?`, start).Scan(&effect.VerifiedRuns, &effect.RepairRuns); err != nil {
+		return effect, err
+	}
+	if total := effect.VerifiedRuns + effect.RepairRuns; total > 0 {
+		effect.ReworkRate = float64(effect.RepairRuns) / float64(total) * 100
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM takeovers WHERE taken_at>=?`, start).Scan(&effect.Takeovers); err != nil {
+		return effect, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals WHERE requested_at>=?`, start).Scan(&effect.ApprovalsNeeded); err != nil {
+		return effect, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM repair_attempts WHERE created_at>=? AND decision<>?`, start, RepairRetry).Scan(&effect.BlockedForUser); err != nil {
+		return effect, err
+	}
+	// The median rather than the mean: one approval left overnight should not
+	// be reported as the typical wait.
+	rows, err := s.db.QueryContext(ctx, `SELECT (julianday(approved_at)-julianday(requested_at))*86400 FROM approvals WHERE requested_at>=? AND approved_at IS NOT NULL AND approved_at<>'' ORDER BY 1`, start)
+	if err != nil {
+		return effect, err
+	}
+	defer rows.Close()
+	var waits []float64
+	for rows.Next() {
+		var seconds float64
+		if err = rows.Scan(&seconds); err != nil {
+			return effect, err
+		}
+		if seconds >= 0 {
+			waits = append(waits, seconds)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return effect, err
+	}
+	if len(waits) > 0 {
+		effect.MedianApprovalWaitSeconds = waits[len(waits)/2]
+	}
+	return effect, nil
 }

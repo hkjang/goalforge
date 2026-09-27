@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS integration_checks (
  last_passed INTEGER NOT NULL DEFAULT 0, last_sha TEXT NOT NULL DEFAULT '',
  last_details TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS evaluation_cases (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, kind TEXT NOT NULL,
+ repository TEXT NOT NULL DEFAULT '', goal_title TEXT NOT NULL DEFAULT '', goal_objective TEXT NOT NULL DEFAULT '',
+ notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, UNIQUE(project_id,name)
+);
+CREATE TABLE IF NOT EXISTS evaluation_results (
+ id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES evaluation_cases(id), label TEXT NOT NULL,
+ run_id TEXT NOT NULL, project_id TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '',
+ config_version TEXT NOT NULL DEFAULT '', passed INTEGER NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
+ cost_usd REAL NOT NULL DEFAULT 0, interventions INTEGER NOT NULL DEFAULT 0, duration_seconds REAL NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS takeovers (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), work_item_id TEXT NOT NULL,
  reason TEXT NOT NULL DEFAULT '', workspace TEXT NOT NULL DEFAULT '', stopped_run_id TEXT NOT NULL DEFAULT '',
@@ -184,6 +196,7 @@ CREATE TABLE IF NOT EXISTS approvals (
  reason TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('PENDING','APPROVED','CONSUMED','REJECTED')),
  requested_at TEXT NOT NULL, approved_at TEXT, consumed_run_id TEXT,
  work_item_id TEXT NOT NULL DEFAULT '', source_branch TEXT NOT NULL DEFAULT '',
+ rejection_category TEXT NOT NULL DEFAULT '', rejection_note TEXT NOT NULL DEFAULT '',
  target_ref TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '',
  files_changed INTEGER NOT NULL DEFAULT 0
 );
@@ -288,6 +301,9 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "runs", "task_type", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "runs", "config_version", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "projects", "fallback_model", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -310,7 +326,7 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 			return err
 		}
 	}
-	for _, column := range []struct{ name, definition string }{{"work_item_id", "TEXT NOT NULL DEFAULT ''"}, {"source_branch", "TEXT NOT NULL DEFAULT ''"}, {"target_ref", "TEXT NOT NULL DEFAULT ''"}, {"commit_sha", "TEXT NOT NULL DEFAULT ''"}, {"files_changed", "INTEGER NOT NULL DEFAULT 0"}} {
+	for _, column := range []struct{ name, definition string }{{"rejection_category", "TEXT NOT NULL DEFAULT ''"}, {"rejection_note", "TEXT NOT NULL DEFAULT ''"}, {"work_item_id", "TEXT NOT NULL DEFAULT ''"}, {"source_branch", "TEXT NOT NULL DEFAULT ''"}, {"target_ref", "TEXT NOT NULL DEFAULT ''"}, {"commit_sha", "TEXT NOT NULL DEFAULT ''"}, {"files_changed", "INTEGER NOT NULL DEFAULT 0"}} {
 		if err := s.ensureColumn(ctx, "approvals", column.name, column.definition); err != nil {
 			return err
 		}
@@ -717,6 +733,10 @@ func criterionMet(expected, actual string) bool {
 type RunRecord struct {
 	ID, ProjectID, WorkItemID, Provider, Model, State string
 	TaskType                                          string
+	// ConfigVersion identifies the configuration this run executed under, so
+	// a later change in success rate or cost can be attributed rather than
+	// guessed at.
+	ConfigVersion string
 }
 
 type SessionRecord struct {
@@ -778,7 +798,7 @@ func (s *Store) StartRun(ctx context.Context, run RunRecord) error {
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project is not runnable")
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,started_at) VALUES(?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,config_version,started_at) VALUES(?,?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, run.ConfigVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()

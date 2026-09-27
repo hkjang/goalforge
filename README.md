@@ -101,6 +101,10 @@ goalforge decision list [--all]            # settled architecture, inherited by 
 goalforge reproduce --run RUN-1 [--out ./repro]   # commit, workspace, gate commands, logs, environment
 goalforge takeover --work-item WORK-1 --reason "..."        # stop automation and take the workspace
 goalforge takeover return --work-item WORK-1 --summary "..." # re-verify and hand it back
+goalforge eval add --name N --kind bug_fix|feature|refactor|docs --objective "..."
+goalforge eval record --case EVAL-1 --label "haiku+v2" --run RUN-1
+goalforge eval compare [--case EVAL-1]     # pass rate, cost per run, manual interventions by label
+goalforge approval reject APR-1 --category code_quality --note "..."
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
@@ -184,6 +188,18 @@ is requested. An approval therefore covers one reviewed change: it cannot be
 spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
+
+Improving the automation needs a fixed yardstick, so a prompt, model, or
+policy change can be told apart from the work that happened to come up.
+`goalforge eval` registers representative cases by kind, attaches completed
+runs to them under a configuration label, and compares labels by the verified
+pass rate, the cost per run, and the manual interventions each needed —
+passing means every required gate passed, not that the run finished. Every run
+is stamped with a fingerprint of the configuration it executed under.
+Rejections record why the work was turned down, so the recurring reason is
+visible rather than buried in individual approvals, and `goalforge report` adds
+the rework rate, how often automation stopped for a person, and the median
+approval wait.
 
 When automation cannot finish something, two things make handing it to a person
 cheap. `goalforge reproduce` writes the commit, the workspace, the exact gate

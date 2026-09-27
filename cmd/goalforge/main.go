@@ -148,6 +148,19 @@ func run(ctx context.Context, args []string) error {
 		return activityReport(ctx, s, args[1:])
 	case "models":
 		return modelAdvice(ctx, s, args[1:])
+	case "eval":
+		if len(args) > 1 && args[1] == "add" {
+			return evalAdd(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "list" {
+			return evalList(ctx, s)
+		}
+		if len(args) > 1 && args[1] == "record" {
+			return evalRecord(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "compare" {
+			return evalCompare(ctx, s, args[2:])
+		}
 	case "takeover":
 		if len(args) > 1 && args[1] == "return" {
 			return takeoverReturn(ctx, s, args[2:])
@@ -813,6 +826,113 @@ func printRepair(plan store.RepairPlan) {
 	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
 }
 
+// evalAdd registers a fixed task used to compare configurations. Comparing
+// before and after on whatever work happened to come up measures the work, not
+// the change.
+func evalAdd(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval add", flag.ContinueOnError)
+	name := f.String("name", "", "case name")
+	kind := f.String("kind", "", "bug_fix, feature, refactor, or docs")
+	title := f.String("goal", "", "goal title the case works toward")
+	objective := f.String("objective", "", "what the case asks for")
+	notes := f.String("notes", "", "how to judge the result")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	evaluation, err := s.AddEvaluationCase(ctx, store.EvaluationCase{ProjectID: p.ID, Name: *name, Kind: *kind,
+		Repository: p.RepositoryPath, GoalTitle: *title, GoalObjective: *objective, Notes: *notes})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("evaluation case added: %s %s (%s)\n", evaluation.ID, evaluation.Name, evaluation.Kind)
+	return nil
+}
+
+func evalList(ctx context.Context, s *store.Store) error {
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	cases, err := s.ListEvaluationCases(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(cases) == 0 {
+		fmt.Println("no evaluation cases; add one with `goalforge eval add --name ... --kind bug_fix`")
+		return nil
+	}
+	for _, evaluation := range cases {
+		fmt.Printf("%-22s %-10s %s\n  %s\n", evaluation.ID, evaluation.Kind, evaluation.Name, evaluation.GoalObjective)
+	}
+	return nil
+}
+
+func evalRecord(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval record", flag.ContinueOnError)
+	caseID := f.String("case", "", "evaluation case ID")
+	label := f.String("label", "", "configuration label being measured")
+	runID := f.String("run", "", "run that executed the case")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *caseID == "" || *label == "" || *runID == "" {
+		return errors.New("--case, --label, and --run are required")
+	}
+	if _, err := currentProject(ctx, s); err != nil {
+		return err
+	}
+	result, err := s.RecordEvaluationResult(ctx, *caseID, *label, *runID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("recorded: %s passed=%t tokens=%d cost=$%.4f interventions=%d config=%s\n",
+		result.ID, result.Passed, result.Tokens, result.CostUSD, result.Interventions, result.ConfigVersion)
+	return nil
+}
+
+func evalCompare(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval compare", flag.ContinueOnError)
+	caseID := f.String("case", "", "restrict to one case")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	summaries, err := s.CompareEvaluations(ctx, p.ID, *caseID)
+	if err != nil {
+		return err
+	}
+	if len(summaries) == 0 {
+		fmt.Println("no evaluation results recorded")
+		return nil
+	}
+	fmt.Printf("%-24s %6s %9s %12s %14s %10s\n", "label", "runs", "pass", "cost/run", "interventions", "avg sec")
+	for _, summary := range summaries {
+		fmt.Printf("%-24s %6d %8.0f%% %12.4f %14.1f %10.0f\n",
+			summary.Label, summary.Runs, summary.PassRate, summary.AverageCostUSD, summary.AverageInterventions, summary.AverageSeconds)
+	}
+	rejections, err := s.RejectionStats(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if len(rejections) > 0 {
+		fmt.Println("\nrejections by reason:")
+		for _, stat := range rejections {
+			fmt.Printf("  %-26s %d\n", stat.Category, stat.Count)
+			for _, example := range stat.Examples {
+				fmt.Printf("    - %s\n", example)
+			}
+		}
+	}
+	return nil
+}
+
 // takeoverStart hands a work item to a person. Stopping the run comes first:
 // handing over a workspace a provider session is still writing to produces a
 // conflict neither side can explain.
@@ -1266,7 +1386,11 @@ func activityReport(ctx context.Context, s *store.Store, args []string) error {
 		return nil
 	}
 	fmt.Printf("GoalForge report: %s ~ %s (%s)\n", report.Since.Format(time.RFC3339), report.Until.Format(time.RFC3339), *since)
-	fmt.Printf("runs=%d work_verified=%d tokens=%d cost_usd=%.4f\n\n", report.Runs, report.WorkCompleted, report.Tokens, report.CostUSD)
+	fmt.Printf("runs=%d work_verified=%d tokens=%d cost_usd=%.4f\n", report.Runs, report.WorkCompleted, report.Tokens, report.CostUSD)
+	effect := report.Effect
+	fmt.Printf("rework=%.0f%% (%d verified / %d needing repair) blocked_for_user=%d takeovers=%d approvals=%d median_approval_wait=%s\n\n",
+		effect.ReworkRate, effect.VerifiedRuns, effect.RepairRuns, effect.BlockedForUser, effect.Takeovers, effect.ApprovalsNeeded,
+		(time.Duration(effect.MedianApprovalWaitSeconds) * time.Second).Round(time.Second))
 	for _, project := range report.Projects {
 		if project.Runs == 0 && project.WorkCompleted == 0 {
 			continue
@@ -1408,17 +1532,30 @@ func approvalApprove(ctx context.Context, s *store.Store, args []string) error {
 }
 
 func approvalReject(ctx context.Context, s *store.Store, args []string) error {
-	if len(args) != 1 {
+	f := flag.NewFlagSet("approval reject", flag.ContinueOnError)
+	category := f.String("category", "", "why it was turned down: "+strings.Join(store.RejectionCategories, ", "))
+	note := f.String("note", "", "what specifically was wrong")
+	approvalID, rest := splitLeadingArg(args)
+	if err := f.Parse(rest); err != nil {
+		return err
+	}
+	if approvalID == "" && f.NArg() == 1 {
+		approvalID = f.Arg(0)
+	}
+	if approvalID == "" {
 		return errors.New("approval reject requires an approval ID")
 	}
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return err
 	}
-	if err = s.RejectApproval(ctx, p.ID, args[0]); err != nil {
+	if err = s.RejectApprovalWithReason(ctx, p.ID, approvalID, *category, *note); err != nil {
 		return err
 	}
-	fmt.Printf("approval rejected: %s\n", args[0])
+	fmt.Printf("approval rejected: %s\n", approvalID)
+	if *category == "" {
+		fmt.Println("  tip: --category records why, which is what turns one rejection into a signal about where automation is weak")
+	}
 	return nil
 }
 

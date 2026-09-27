@@ -332,7 +332,11 @@ func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request) {
 	projectID, approvalID := r.PathValue("id"), r.PathValue("approvalID")
 	var err error
 	if strings.HasSuffix(r.URL.Path, "/reject") {
-		err = s.store.RejectApproval(r.Context(), projectID, approvalID)
+		// The reason is optional so a rejection is never blocked, but it is
+		// accepted here because a rejection with a recorded cause is the only
+		// kind that says anything about where automation keeps failing.
+		category, note := r.URL.Query().Get("category"), r.URL.Query().Get("note")
+		err = s.store.RejectApprovalWithReason(r.Context(), projectID, approvalID, category, note)
 	} else {
 		err = s.store.Approve(r.Context(), projectID, approvalID)
 	}

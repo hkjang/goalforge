@@ -104,7 +104,14 @@ func (o *Orchestrator) Run(ctx context.Context, request Request) (Result, error)
 			return result, fmt.Errorf("load provider handoff: %w", handoffErr)
 		}
 	}
-	if err := o.store.StartRun(ctx, store.RunRecord{ID: request.RunID, ProjectID: request.Project.ID, WorkItemID: request.WorkItemID, Provider: p.Name(), Model: request.Project.Model, TaskType: request.TaskType}); err != nil {
+	// Stamping the configuration on the run is what later lets a change in
+	// success rate or cost be attributed to a configuration change.
+	gates, gateErr := o.store.ListGates(ctx, request.Project.ID)
+	if gateErr != nil {
+		return result, gateErr
+	}
+	configVersion := store.ConfigFingerprint(p.Name(), request.Project.Model, request.Project.WIPLimit, store.DefaultRepairPolicy(), gates)
+	if err := o.store.StartRun(ctx, store.RunRecord{ID: request.RunID, ProjectID: request.Project.ID, WorkItemID: request.WorkItemID, Provider: p.Name(), Model: request.Project.Model, TaskType: request.TaskType, ConfigVersion: configVersion}); err != nil {
 		return result, err
 	}
 	if err := o.store.RecordPrompt(ctx, request.RunID, request.PromptTemplate, request.Prompt); err != nil {
