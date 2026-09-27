@@ -107,7 +107,11 @@ goalforge takeover --work-item WORK-1 --reason "..."        # stop automation an
 goalforge takeover return --work-item WORK-1 --summary "..." # re-verify and hand it back
 goalforge eval add --name N --kind bug_fix|feature|refactor|docs --objective "..."
 goalforge eval record --case EVAL-1 --label "haiku+v2" --run RUN-1
-goalforge eval compare [--case EVAL-1]     # pass rate, cost per run, manual interventions by label
+goalforge eval spec --case EVAL-1 --fixture ./fixture --ref COMMIT --criterion build_passed=true
+                    --work "작업 제목" --gate-type build_passed --gate-command-json '["go","test","./..."]'
+                    [--token-budget N] [--cost-budget-usd N] [--timeout-seconds N]
+goalforge eval run --case EVAL-1 --label "haiku+v2" --repeat 3   # clean environment per repetition
+goalforge eval compare [--case EVAL-1]     # pass rate, repetition stability, cost per success
 goalforge approval reject APR-1 --category code_quality --note "..."
 goalforge pr --work-item WORK-1            # a PR body carrying the goal, criteria, and evidence
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
@@ -205,10 +209,26 @@ what was achieved and how it was proven without reconstructing it from commits.
 
 Improving the automation needs a fixed yardstick, so a prompt, model, or
 policy change can be told apart from the work that happened to come up.
-`goalforge eval` registers representative cases by kind, attaches completed
-runs to them under a configuration label, and compares labels by the verified
-pass rate, the cost per run, and the manual interventions each needed —
-passing means every required gate passed, not that the run finished. Every run
+`goalforge eval spec` pins a case to a fixture repository at one commit, with
+the criteria and gates that judge it and the limits it runs under, and
+`goalforge eval run` re-executes it — each repetition in a freshly cloned
+workspace with a state database that has never seen another trial. Reusing
+either is how a previous attempt's answer, or its recorded state, leaks into
+the next measurement. A workspace that does not start from the pinned state is
+recorded as an invalid trial rather than scored or silently dropped.
+
+Trials and attached runs are reported separately and never averaged together:
+a trial measures the configuration, an attached run measures the run that was
+attached. Repetition stability — the share of cases where every repetition
+passed — is reported next to the single-run rate, because a tool that succeeds
+once and one that succeeds every time are not equally trustworthy. Trials that
+could not be measured are excluded from the rate and counted on their own, and
+cost per success includes the failed attempts.
+
+A case that seeds its starting backlog measures implementation; one that leaves
+it empty measures the configuration's own goal decomposition too. Which of the
+two a suite is doing is part of the pinned case rather than a runtime default.
+`goalforge eval` also still attaches completed runs to cases under a label — Every run
 is stamped with a fingerprint of the configuration it executed under.
 Rejections record why the work was turned down, so the recurring reason is
 visible rather than buried in individual approvals, and `goalforge report` adds

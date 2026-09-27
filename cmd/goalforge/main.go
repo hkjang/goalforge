@@ -21,6 +21,7 @@ import (
 	"github.com/goalforge/goalforge/internal/api"
 	"github.com/goalforge/goalforge/internal/app"
 	"github.com/goalforge/goalforge/internal/diagnostics"
+	"github.com/goalforge/goalforge/internal/evaluation"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/mcp"
 	"github.com/goalforge/goalforge/internal/model"
@@ -196,6 +197,12 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "compare" {
 			return evalCompare(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "spec" {
+			return evalSpec(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "run" {
+			return evalRun(ctx, s, args[2:])
 		}
 	case "takeover":
 		if len(args) > 1 && args[1] == "return" {
@@ -1140,6 +1147,136 @@ func evalRecord(ctx context.Context, s *store.Store, args []string) error {
 	return nil
 }
 
+// evalSpec pins what a case starts from and what judges it, which is what
+// turns a record of past runs into something re-executable.
+func evalSpec(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval spec", flag.ContinueOnError)
+	caseID := f.String("case", "", "evaluation case ID")
+	fixture := f.String("fixture", "", "repository the task starts from")
+	ref := f.String("ref", "", "commit or branch pinning the fixture")
+	criteria := f.String("criterion", "", "comma-separated type=value completion criteria")
+	gateType := f.String("gate-type", "", "criterion the gate measures")
+	gateCommand := f.String("gate-command-json", "", "JSON command array for the gate")
+	gateValue := f.String("gate-success-value", "true", "value the gate must reach")
+	seedTitle := f.String("work", "", "seed the trial's backlog with this work item (repeatable via comma separation)")
+	seedScope := f.String("work-scope", "", "declared change scope for the seeded work")
+	tokens := f.Int64("token-budget", 0, "token ceiling for one trial")
+	cost := f.Float64("cost-budget-usd", 0, "cost ceiling for one trial")
+	timeout := f.Int("timeout-seconds", 0, "wall-clock ceiling for one trial")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *caseID == "" || *fixture == "" {
+		return errors.New("--case and --fixture are required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	spec, err := s.CaseSpec(ctx, p.ID, *caseID)
+	if err != nil {
+		return err
+	}
+	absolute, err := filepath.Abs(*fixture)
+	if err != nil {
+		return err
+	}
+	spec.Fixture, spec.Ref = absolute, *ref
+	spec.TokenBudget, spec.CostBudgetUSD, spec.TimeoutSeconds = *tokens, *cost, *timeout
+	for _, pair := range splitList(*criteria) {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("criterion %q must be type=value", pair)
+		}
+		spec.Criteria = append(spec.Criteria, evaluation.Criterion{Type: parts[0], ExpectedValue: parts[1]})
+	}
+	for _, title := range splitList(*seedTitle) {
+		spec.SeedWork = append(spec.SeedWork, evaluation.SeedWorkItem{Title: title, ChangeScope: *seedScope, Priority: 50})
+	}
+	if *gateType != "" {
+		var command []string
+		if err = json.Unmarshal([]byte(*gateCommand), &command); err != nil {
+			return fmt.Errorf("decode --gate-command-json: %w", err)
+		}
+		if err = policy.ValidateCommand(command); err != nil {
+			return fmt.Errorf("gate command rejected: %w", err)
+		}
+		spec.Gates = append(spec.Gates, evaluation.Gate{Type: *gateType, Command: command, Required: true, SuccessValue: *gateValue})
+	}
+	// The clean state is recorded from the fixture as it stands now, so a
+	// later trial starting from anything else is detectable.
+	if spec.Ref != "" {
+		if _, err = gitops.HeadCommit(ctx, absolute, spec.Ref); err != nil {
+			return fmt.Errorf("pin %s in %s: %w", spec.Ref, absolute, err)
+		}
+	}
+	if err = s.SaveCaseSpec(ctx, *caseID, spec); err != nil {
+		return err
+	}
+	fmt.Printf("case pinned: %s fixture=%s ref=%s criteria=%d gates=%d seed_work=%d\n",
+		*caseID, spec.Fixture, orNone(spec.Ref), len(spec.Criteria), len(spec.Gates), len(spec.SeedWork))
+	if len(spec.SeedWork) == 0 {
+		fmt.Println("  note: 초기 작업이 없으면 이 케이스는 구현뿐 아니라 목표 분해까지 측정합니다 (--work 로 고정 가능)")
+	}
+	if len(spec.Criteria) == 0 {
+		fmt.Println("  warning: 완료 조건이 없으면 시행을 판정할 수 없습니다 (--criterion type=value)")
+	}
+	return nil
+}
+
+func orNone(value string) string {
+	if value == "" {
+		return "(default branch)"
+	}
+	return value
+}
+
+// evalRun re-executes a case in a clean environment the requested number of
+// times. Attaching an existing run measures that run; this measures the
+// configuration, which is the only thing a comparison can be about.
+func evalRun(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval run", flag.ContinueOnError)
+	caseID := f.String("case", "", "evaluation case ID")
+	label := f.String("label", "", "configuration label being measured")
+	repeat := f.Int("repeat", 1, "repetitions, run in separate clean environments")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *caseID == "" || *label == "" {
+		return errors.New("--case and --label are required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	spec, err := s.CaseSpec(ctx, p.ID, *caseID)
+	if err != nil {
+		return err
+	}
+	if spec.Fixture == "" {
+		return fmt.Errorf("case %s has no fixture; pin one with `goalforge eval spec --case %s --fixture DIR`", *caseID, *caseID)
+	}
+	runner := evaluation.Runner{Executor: app.ServiceExecutor{
+		Provider: p.Provider, Model: p.Model,
+		NewSession: func(ctx context.Context, env evaluation.Environment, project model.Project) (evaluation.Session, error) {
+			return newTrialSession(ctx, env, project)
+		},
+	}}
+	trials, err := runner.Run(ctx, spec, *label, *repeat)
+	for _, trial := range trials {
+		if recordErr := s.RecordTrial(ctx, trial); recordErr != nil {
+			return recordErr
+		}
+		fmt.Printf("%-16s #%d %-16s %6d tokens $%.4f %5.0fs  %s\n",
+			trial.Label, trial.Repetition, trial.Status, trial.Tokens, trial.CostUSD, trial.DurationSeconds, trial.Detail)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\n%d trials recorded for %s. Compare with `goalforge eval compare --case %s`\n", len(trials), *caseID, *caseID)
+	return nil
+}
+
 func evalCompare(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("eval compare", flag.ContinueOnError)
 	caseID := f.String("case", "", "restrict to one case")
@@ -1150,25 +1287,49 @@ func evalCompare(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	summaries, err := s.CompareEvaluations(ctx, p.ID, *caseID)
+	// Re-executed trials and attached runs answer different questions, so they
+	// are never averaged together: a trial measures the configuration, an
+	// attached run measures the run that happened to be attached.
+	trials, err := s.CompareTrials(ctx, p.ID, *caseID)
 	if err != nil {
 		return err
 	}
-	if len(summaries) == 0 {
+	if len(trials) > 0 {
+		fmt.Println("re-executed trials (clean environment per repetition)")
+		fmt.Printf("  %-20s %6s %8s %9s %12s %14s %10s\n", "label", "trials", "pass", "stability", "cost/success", "interventions", "avg sec")
+		for _, summary := range trials {
+			fmt.Printf("  %-20s %6d %7.0f%% %8.0f%% %12.4f %14.1f %10.0f\n",
+				summary.Label, summary.Trials, summary.PassRate, summary.StableCases,
+				summary.CostPerSuccessUSD, summary.AverageInterventions, summary.AverageSeconds)
+			if summary.Invalid > 0 || summary.Errored > 0 {
+				fmt.Printf("  %-20s   측정 불가 %d건, 오류 %d건 (성공률 분모에서 제외)\n", "", summary.Invalid, summary.Errored)
+			}
+		}
+		fmt.Println()
+	}
+	attached, err := s.CompareEvaluations(ctx, p.ID, *caseID)
+	if err != nil {
+		return err
+	}
+	if len(attached) > 0 {
+		fmt.Println("attached runs (measure the run that was attached, not a re-execution)")
+		fmt.Printf("  %-20s %6s %9s %12s %14s %10s\n", "label", "runs", "pass", "cost/run", "interventions", "avg sec")
+		for _, summary := range attached {
+			fmt.Printf("  %-20s %6d %8.0f%% %12.4f %14.1f %10.0f\n",
+				summary.Label, summary.Runs, summary.PassRate, summary.AverageCostUSD, summary.AverageInterventions, summary.AverageSeconds)
+		}
+		fmt.Println()
+	}
+	if len(trials) == 0 && len(attached) == 0 {
 		fmt.Println("no evaluation results recorded")
 		return nil
-	}
-	fmt.Printf("%-24s %6s %9s %12s %14s %10s\n", "label", "runs", "pass", "cost/run", "interventions", "avg sec")
-	for _, summary := range summaries {
-		fmt.Printf("%-24s %6d %8.0f%% %12.4f %14.1f %10.0f\n",
-			summary.Label, summary.Runs, summary.PassRate, summary.AverageCostUSD, summary.AverageInterventions, summary.AverageSeconds)
 	}
 	rejections, err := s.RejectionStats(ctx, p.ID)
 	if err != nil {
 		return err
 	}
 	if len(rejections) > 0 {
-		fmt.Println("\nrejections by reason:")
+		fmt.Println("rejections by reason:")
 		for _, stat := range rejections {
 			fmt.Printf("  %-26s %d\n", stat.Category, stat.Count)
 			for _, example := range stat.Examples {
@@ -2603,4 +2764,49 @@ func printBlockers(ctx context.Context, s *store.Store, p model.Project, g model
 		fmt.Printf("  - %s\n", blocker)
 	}
 	return nil
+}
+
+// trialSession runs work inside one evaluation trial, against that trial's own
+// state database rather than the operator's. Sharing the operator database
+// would let one trial see another's runs, and would put evaluation traffic in
+// the record of real work.
+type trialSession struct {
+	db      *store.Store
+	service *app.Service
+	cleanup func()
+}
+
+func newTrialSession(ctx context.Context, env evaluation.Environment, project model.Project) (evaluation.Session, error) {
+	db, err := store.Open(env.StateDB)
+	if err != nil {
+		return nil, err
+	}
+	service, cleanup, err := runtimeService(ctx, db, project)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &trialSession{db: db, service: service, cleanup: cleanup}, nil
+}
+
+func (t *trialSession) Continue(ctx context.Context, project model.Project) (evaluation.Progress, error) {
+	result, err := t.service.Continue(ctx, project)
+	progress := evaluation.Progress{RunID: result.Run.RunID, Completed: result.Verification.GoalCompleted}
+	if usage, usageErr := t.db.RunUsage(ctx, result.Run.RunID); usageErr == nil {
+		progress.Tokens = usage.InputTokens + usage.OutputTokens + usage.CachedInputTokens + usage.ReasoningTokens
+		progress.CostUSD = usage.CostUSD
+	}
+	if err != nil {
+		progress.Detail = err.Error()
+	}
+	return progress, err
+}
+
+func (t *trialSession) Close() {
+	if t.cleanup != nil {
+		t.cleanup()
+	}
+	if t.db != nil {
+		t.db.Close()
+	}
 }
