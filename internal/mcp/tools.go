@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goalforge/goalforge/internal/diagnostics"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
@@ -62,6 +63,11 @@ func toolDescriptors() []toolDescriptor {
 		{"runs_recent", "Recent runs with task type, work item, tokens, and state.", schema(nil, map[string]any{"project": projectProperty, "limit": numberProperty("Maximum runs to return (default 10).")})},
 		{"run_detail", "Replay one run from audit records: prompt template and hash, usage, gates, file changes, commit.", schema([]string{"run_id"}, map[string]any{"project": projectProperty, "run_id": stringProperty("Run ID (RUN-...).")})},
 		{"continue_enqueue", "Schedule a persistent CONTINUE job so a running `goalforge worker` executes work items one at a time toward the goal.", schema(nil, map[string]any{"project": projectProperty})},
+		{"project_readiness", "Check whether a project could ever complete: goal, criteria, gates, whether every criterion has a gate that measures it, gate commands on PATH, budget, and pending integration verification.", schema(nil, map[string]any{"project": projectProperty})},
+		{"work_item_detail", "One work item with its specification, what is blocking it (dependencies, WIP limit, scope approval, human takeover), its run history, and the model that would execute it.", schema([]string{"work_item_id"}, map[string]any{"project": projectProperty, "work_item_id": stringProperty("Work item ID (WORK-...).")})},
+		{"decisions_list", "Settled design decisions with what was rejected and why. Treat these as already agreed rather than re-deriving them.", schema(nil, map[string]any{"project": projectProperty, "all": stringProperty("true to include superseded decisions.")})},
+		{"decision_add", "Record a design decision: what was decided, what was considered and rejected, and what it commits the project to.", schema([]string{"title", "decision"}, map[string]any{"project": projectProperty, "title": stringProperty("Short name."), "decision": stringProperty("What was decided."), "context": stringProperty("What problem forced it."), "alternatives": stringProperty("What was rejected and why."), "consequences": stringProperty("What this commits to."), "work_item_id": stringProperty("Work item it came out of.")})},
+		{"activity_report", "What ran in a window, what stopped and why, what is waiting on a decision, and the cost.", schema(nil, map[string]any{"since": stringProperty("Duration such as 24h or 7d (default 24h).")})},
 		{"checkpoint_create", "Create a manual recovery checkpoint (also writes the CONTINUITY.md companion).", schema([]string{"next_action"}, map[string]any{"project": projectProperty, "next_action": stringProperty("The first concrete step on resume."), "completed": stringProperty("What was completed."), "remaining": stringProperty("What remains."), "risks": stringProperty("Open risks.")})},
 	}
 }
@@ -78,6 +84,11 @@ type toolArgs struct {
 	EstimatedTokens int64    `json:"estimated_tokens"`
 	WorkItemID      string   `json:"work_item_id"`
 	Remote          string   `json:"remote"`
+	Since           string   `json:"since"`
+	All             string   `json:"all"`
+	Context         string   `json:"context"`
+	Alternatives    string   `json:"alternatives"`
+	Consequences    string   `json:"consequences"`
 	Status          string   `json:"status"`
 	Action          string   `json:"action"`
 	ApprovalID      string   `json:"approval_id"`
@@ -126,6 +137,16 @@ func (s *Server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		return s.runDetail(ctx, args)
 	case "continue_enqueue":
 		return s.continueEnqueue(ctx, args)
+	case "project_readiness":
+		return s.projectReadiness(ctx, args)
+	case "work_item_detail":
+		return s.workItemDetail(ctx, args)
+	case "decisions_list":
+		return s.decisionsList(ctx, args)
+	case "decision_add":
+		return s.decisionAdd(ctx, args)
+	case "activity_report":
+		return s.activityReport(ctx, args)
 	case "checkpoint_create":
 		return s.checkpointCreate(ctx, args)
 	default:
@@ -450,20 +471,20 @@ func (s *Server) runDetail(ctx context.Context, args toolArgs) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	runs, err := s.store.ListRecentRuns(ctx, project.ID, 1000)
+	run, err := s.store.RunByID(ctx, project.ID, args.RunID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", fmt.Errorf("run %q not found", args.RunID)
+	}
 	if err != nil {
 		return "", err
 	}
-	detail := map[string]any{}
-	found := false
-	for _, run := range runs {
-		if run.ID == args.RunID {
-			detail["run"], found = run, true
-			break
-		}
-	}
-	if !found {
-		return "", fmt.Errorf("run %q not found", args.RunID)
+	detail := map[string]any{"run": run}
+	// The repair decision is why a failed run stopped where it did; without it
+	// an agent reading this tool can see the failure but not what to do next.
+	if plan, planErr := s.store.RepairPlanForRun(ctx, args.RunID); planErr == nil {
+		detail["repair"] = plan
+	} else if !errors.Is(planErr, store.ErrNotFound) {
+		return "", planErr
 	}
 	if prompt, promptErr := s.store.PromptForRun(ctx, args.RunID); promptErr == nil {
 		preview := prompt.RedactedPrompt
@@ -532,4 +553,92 @@ func (s *Server) checkpointCreate(ctx context.Context, args toolArgs) (string, e
 		return "", err
 	}
 	return fmt.Sprintf(`{"checkpoint":%q,"continuity":%q}`, created.ID, s.store.ContinuityPath(project.ID)), nil
+}
+
+// projectReadiness answers whether a project could ever finish, which is a
+// different question from whether the machine can run anything and the one a
+// misconfigured project fails silently.
+func (s *Server) projectReadiness(ctx context.Context, args toolArgs) (string, error) {
+	project, err := s.resolveProject(ctx, args.Project)
+	if err != nil {
+		return "", err
+	}
+	input, err := s.store.ReadinessInput(ctx, project.ID)
+	if err != nil {
+		return "", err
+	}
+	checks := diagnostics.CheckReadiness(input)
+	blocking := 0
+	for _, check := range checks {
+		if check.Level == diagnostics.LevelFail {
+			blocking++
+		}
+	}
+	return marshal(map[string]any{"project": project.ID, "checks": checks, "blocking": blocking, "ready": blocking == 0}, nil)
+}
+
+// workItemDetail gives an agent what a person sees on the work item page:
+// the specification and the concrete reason it cannot run now.
+func (s *Server) workItemDetail(ctx context.Context, args toolArgs) (string, error) {
+	project, err := s.resolveProject(ctx, args.Project)
+	if err != nil {
+		return "", err
+	}
+	goal, err := s.store.CurrentGoal(ctx, project.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		goal, err = s.store.LatestGoal(ctx, project.ID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("active goal required: %w", err)
+	}
+	detail, err := s.store.WorkItemDetails(ctx, project.ID, goal.ID, args.WorkItemID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", fmt.Errorf("work item %q not found", args.WorkItemID)
+	}
+	if err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"item": detail.Item, "blockers": detail.Blockers, "dependencies": detail.Dependencies,
+		"runs": detail.Runs, "commit": detail.Commit, "forecast": detail.Forecast, "model": detail.Model,
+		"takeover": detail.Takeover, "actionable": len(detail.Blockers) == 0}, nil)
+}
+
+func (s *Server) decisionsList(ctx context.Context, args toolArgs) (string, error) {
+	project, err := s.resolveProject(ctx, args.Project)
+	if err != nil {
+		return "", err
+	}
+	return marshal(s.store.ListDecisions(ctx, project.ID, args.All == "true"))
+}
+
+func (s *Server) decisionAdd(ctx context.Context, args toolArgs) (string, error) {
+	project, err := s.resolveProject(ctx, args.Project)
+	if err != nil {
+		return "", err
+	}
+	if args.Title == "" || args.Decision == "" {
+		return "", errors.New("title and decision are required")
+	}
+	goalID := ""
+	if goal, goalErr := s.store.CurrentGoal(ctx, project.ID); goalErr == nil {
+		goalID = goal.ID
+	} else if !errors.Is(goalErr, store.ErrNotFound) {
+		return "", goalErr
+	}
+	baseCommit, _ := gitops.HeadCommit(ctx, project.RepositoryPath, project.DefaultBranch)
+	return marshal(s.store.RecordDecision(ctx, store.DesignDecision{ProjectID: project.ID, GoalID: goalID,
+		WorkItem: args.WorkItemID, Title: args.Title, Decision: args.Decision, Context: args.Context,
+		Alternatives: args.Alternatives, Consequences: args.Consequences, BaseCommit: baseCommit}))
+}
+
+func (s *Server) activityReport(ctx context.Context, args toolArgs) (string, error) {
+	window := 24 * time.Hour
+	if args.Since != "" {
+		parsed, err := time.ParseDuration(args.Since)
+		if err != nil || parsed <= 0 {
+			return "", fmt.Errorf("since must be a positive duration such as 24h, got %q", args.Since)
+		}
+		window = parsed
+	}
+	return marshal(s.store.Activity(ctx, time.Now().UTC().Add(-window)))
 }

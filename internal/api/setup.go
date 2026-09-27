@@ -53,7 +53,21 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, diagnostics.Run(r.Context(), options))
+	report := diagnostics.Run(r.Context(), options)
+	if projectID := strings.TrimSpace(r.URL.Query().Get("project")); projectID != "" {
+		readiness, err := s.store.ReadinessInput(r.Context(), projectID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, check := range diagnostics.CheckReadiness(readiness) {
+			report.Checks = append(report.Checks, check)
+			if check.Level == diagnostics.LevelFail {
+				report.Failed++
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 type createProjectRequest struct {

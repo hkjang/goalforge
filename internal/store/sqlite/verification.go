@@ -126,7 +126,7 @@ func (s *Store) FinalizeCheckpoint(ctx context.Context, projectID, goalID string
 		return err
 	}
 	if complete {
-		_ = notify.Post(ctx, notify.Event{Project: projectID, State: "COMPLETED", Reason: "all completion criteria satisfied"})
+		_ = notify.Post(ctx, notify.Event{Project: projectID, Name: s.projectName(ctx, projectID), State: "COMPLETED", Reason: "all completion criteria satisfied"})
 	}
 	return nil
 }

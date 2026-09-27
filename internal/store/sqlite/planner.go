@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -101,7 +100,7 @@ func (s *Store) BlockProjectForLoop(ctx context.Context, projectID string) error
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 1 {
-		_ = notify.Post(ctx, notify.Event{Project: projectID, State: "BLOCKED", Reason: "repeated loop signals require user review"})
+		_ = notify.Post(ctx, notify.Event{Project: projectID, Name: s.projectName(ctx, projectID), State: "BLOCKED", Reason: "repeated loop signals require user review"})
 		return nil
 	}
 	var state string
@@ -120,6 +119,20 @@ func (s *Store) CountUnimplemented(ctx context.Context, goalID string) (int, err
 	return count, err
 }
 
+// ErrAllCandidatesConflict means there is executable work, but every candidate
+// overlaps something already being implemented. It is distinct from ErrNotFound
+// ("there is no work") because it clears on its own once a run finishes, so a
+// worker should wait rather than hand control back.
+var ErrAllCandidatesConflict = errors.New("all claimable work overlaps items already in progress")
+
+// claimCandidateLimit bounds how far down the priority order a claim will look
+// for work that does not collide with what is already running.
+const claimCandidateLimit = 50
+
+// ClaimNextWorkItem takes the highest-priority item that can actually run now.
+// Candidates whose declared change scope overlaps work already in progress are
+// skipped rather than refused: stopping at the first conflict made a raised WIP
+// limit inert, because one busy area of the tree blocked the whole backlog.
 func (s *Store) ClaimNextWorkItem(ctx context.Context, goalID string) (model.WorkItem, error) {
 	var w model.WorkItem
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -127,31 +140,53 @@ func (s *Store) ClaimNextWorkItem(ctx context.Context, goalID string) (model.Wor
 		return w, err
 	}
 	defer tx.Rollback()
-	var active, limit int
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items WHERE goal_id=? AND status='IN_PROGRESS'`, goalID).Scan(&active); err != nil {
-		return w, err
-	}
-	if err = tx.QueryRowContext(ctx, `SELECT COALESCE(p.wip_limit,1) FROM goals g JOIN projects p ON p.id=g.project_id WHERE g.id=?`, goalID).Scan(&limit); err != nil {
-		return w, err
-	}
-	if limit <= 0 {
-		limit = 1
-	}
-	if active >= limit {
-		return w, fmt.Errorf("implementation WIP limit reached: %d of %d items in progress", active, limit)
-	}
-	err = tx.QueryRowContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.risk,w.change_scope,w.weight,w.estimated_tokens,w.objective,w.acceptance,w.blocked_reason FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(w.owner,'AI')='AI' AND COALESCE(i.approval_required,0)=0 AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d LEFT JOIN work_items p ON p.id=d.depends_on_id WHERE d.work_item_id=w.id AND COALESCE(p.status,'')<>'DONE') ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT 1`, goalID).Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason)
-	if errors.Is(err, sql.ErrNoRows) {
-		return w, ErrNotFound
-	}
+	limit, err := s.wipLimit(ctx, tx, goalID)
 	if err != nil {
 		return w, err
 	}
-	if active > 0 {
-		if err = s.checkConcurrency(ctx, tx, goalID, w.ID); err != nil {
-			return w, err
+	active, err := s.activeWorkItems(ctx, tx, goalID, "")
+	if err != nil {
+		return w, err
+	}
+	agentHeld := 0
+	for _, item := range active {
+		if item.Owner != OwnerHuman {
+			agentHeld++
 		}
 	}
+	if agentHeld >= limit {
+		return w, fmt.Errorf("implementation WIP limit reached: %d of %d items in progress", agentHeld, limit)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT w.id,w.goal_id,COALESCE(w.milestone_id,''),w.type,w.title,w.priority,w.status,w.risk,w.change_scope,w.weight,w.estimated_tokens,w.objective,w.acceptance,w.blocked_reason FROM work_items w LEFT JOIN idea_scores i ON i.work_item_id=w.id WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(w.owner,'AI')='AI' AND COALESCE(i.approval_required,0)=0 AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d LEFT JOIN work_items p ON p.id=d.depends_on_id WHERE d.work_item_id=w.id AND COALESCE(p.status,'')<>'DONE') ORDER BY CASE w.status WHEN 'APPROVED' THEN 0 ELSE 1 END,w.priority DESC,w.id LIMIT ?`, goalID, claimCandidateLimit)
+	if err != nil {
+		return w, err
+	}
+	var candidates []model.WorkItem
+	for rows.Next() {
+		var candidate model.WorkItem
+		if err = rows.Scan(&candidate.ID, &candidate.GoalID, &candidate.MilestoneID, &candidate.Type, &candidate.Title, &candidate.Priority, &candidate.Status, &candidate.Risk, &candidate.ChangeScope, &candidate.Weight, &candidate.EstimatedTokens, &candidate.Objective, &candidate.Acceptance, &candidate.BlockedReason); err != nil {
+			rows.Close()
+			return w, err
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err = rows.Close(); err != nil {
+		return w, err
+	}
+	if len(candidates) == 0 {
+		return w, ErrNotFound
+	}
+	chosen := -1
+	for i, candidate := range candidates {
+		if len(scopeConflicts(candidate.ChangeScope, active)) == 0 {
+			chosen = i
+			break
+		}
+	}
+	if chosen < 0 {
+		return w, ErrAllCandidatesConflict
+	}
+	w = candidates[chosen]
 	result, err := tx.ExecContext(ctx, `UPDATE work_items SET status='IN_PROGRESS' WHERE id=? AND status=?`, w.ID, w.Status)
 	if err != nil {
 		return w, err
@@ -160,5 +195,8 @@ func (s *Store) ClaimNextWorkItem(ctx context.Context, goalID string) (model.Wor
 		return w, errors.New("work item claim lost")
 	}
 	w.Status = "IN_PROGRESS"
+	if w.Dependencies, err = s.dependenciesOf(ctx, tx, w.ID); err != nil {
+		return w, err
+	}
 	return w, tx.Commit()
 }

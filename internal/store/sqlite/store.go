@@ -1104,3 +1104,13 @@ func (s *Store) UpsertQuotaWindow(ctx context.Context, q QuotaWindow) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO quota_windows(provider,account_id,limit_type,status,used_percent,detected_at,quota_reset_at,resume_at,source,confidence,raw_message) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,account_id,limit_type) DO UPDATE SET status=excluded.status,used_percent=excluded.used_percent,detected_at=excluded.detected_at,quota_reset_at=excluded.quota_reset_at,resume_at=excluded.resume_at,source=excluded.source,confidence=excluded.confidence,raw_message=excluded.raw_message`, q.Provider, q.AccountID, q.LimitType, q.Status, q.UsedPercent, q.DetectedAt.Format(time.RFC3339Nano), reset, resume, q.Source, q.Confidence, audit.RedactString(q.RawMessage))
 	return err
 }
+
+// projectName resolves a project's display name for notifications, falling
+// back to the ID so a lookup failure never blocks the notification itself.
+func (s *Store) projectName(ctx context.Context, projectID string) string {
+	var name string
+	if err := s.db.QueryRowContext(ctx, `SELECT name FROM projects WHERE id=?`, projectID).Scan(&name); err != nil || name == "" {
+		return projectID
+	}
+	return name
+}

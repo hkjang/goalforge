@@ -38,7 +38,7 @@ goalforge status
 ### Setup and planning
 
 ```sh
-goalforge doctor [--probe-auth]        # environment diagnostics before anything runs
+goalforge doctor [--probe-auth]        # environment and project-readiness diagnostics
 goalforge project init --name N [--repo .] [--provider codex|claude|qwen|opencode] [--model M]
                        [--fallback-model M] [--worktrees] [--auto-commit]
 goalforge project budget --tokens 2000000 --cost-usd 100 --daily-runs 20 --daily-tokens 250000 --daily-cost-usd 15
@@ -243,6 +243,15 @@ verification is never relaxed. Decisions are recorded rather than deleted; one
 is superseded by another, because the record of what was rejected is what stops
 it being proposed again.
 
+`goalforge doctor` checks two different things. The environment checks ask
+whether this machine can run anything; the readiness checks ask whether this
+project could ever finish, which is where the silent misconfiguration lives: a
+completion criterion with no gate of the same name accumulates no evidence, so
+the goal runs forever while everything looks healthy. Readiness also catches a
+goal with no criteria, gates that are all optional, and gate commands that are
+not on PATH, and warns about an unset budget, stale evidence, and pending
+integration verification.
+
 Work items may declare several predecessors, and a dependency that would close
 a cycle is refused where it is created. `project concurrency --wip N` raises
 how many items may be implemented at once, but items still only run together
@@ -300,9 +309,19 @@ change review: verdict, gates with full output, changed files, the diff, and
 the prompt that caused it. An approval opens with its grounds: the commit, the
 files, the gates, the destination, and how to undo it.
 
-`status` remains available after goal completion and reports weighted progress,
-run success/failure and average duration, work-item outcomes, verification pass
-rate, active session count, token categories, and accumulated cost.
+`status` remains available after goal completion. It reports weighted progress
+with the baseline it was computed over, each completion criterion with the
+evidence that decided it (met, short of the threshold, needing re-verification,
+or never measured), run and work outcomes, verification pass rate, session
+count, token categories, and cost. It ends with what needs a person —
+approvals, a stopped repair, pending integration verification, work a person
+has taken over — so the answer to "what now" does not have to be inferred from
+a state code.
+
+Webhook notifications suppress an identical project/state/reason for 30 minutes
+(`GOALFORGE_WEBHOOK_REPEAT_WINDOW`, 0 to disable) and carry the project name: a
+blocked project re-reports on every worker tick, and a channel that repeats
+itself is one people learn to ignore.
 
 ## Codex App Server transport
 
