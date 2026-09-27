@@ -215,6 +215,30 @@ html+='<tr><td>'+esc(c.Type)+'</td><td class="mono">'+esc(c.ExpectedValue)+'</td
 return html+'</table></section>'}
 // planTab is the whole backlog with search and status filters; the kanban only
 // ever showed four items per column and offered no way to the rest.
+// decisionsPanel keeps settled architecture visible where planning happens,
+// so a decision is inherited rather than re-derived by the next session.
+function decisionsPanel(){return'<section class="panel"><div class="row"><h2 style="margin:0">설계 결정</h2><button onclick="toggleDecisionForm()">결정 기록</button></div>'+
+'<div id="decision-form" style="display:none;margin-top:10px">'+
+'<label for="dec-title">제목</label><input id="dec-title" style="width:100%">'+
+'<label for="dec-decision">결정한 내용</label><textarea id="dec-decision"></textarea>'+
+'<label for="dec-context">왜 결정이 필요했는가</label><textarea id="dec-context"></textarea>'+
+'<label for="dec-alternatives">검토했지만 제외한 대안과 이유</label><textarea id="dec-alternatives"></textarea>'+
+'<label for="dec-consequences">이 결정이 감수하는 것</label><textarea id="dec-consequences"></textarea>'+
+'<div class="actions"><button onclick="saveDecision()">저장</button><button onclick="toggleDecisionForm()">취소</button></div></div>'+
+'<div id="decision-list" class="sub" style="margin-top:8px">불러오는 중…</div></section>'}
+function toggleDecisionForm(){var box=document.querySelector('#decision-form');if(box)box.style.display=box.style.display==='none'?'block':'none'}
+async function loadDecisions(){var box=document.querySelector('#decision-list');if(!box)return;
+try{var data=await api('/api/v1/projects/'+encodeURIComponent(detailCache.project.ID)+'/decisions');var list=data.decisions||[];
+if(!list.length){box.innerHTML='기록된 설계 결정이 없습니다. 구조를 정할 때 남겨 두면 이후 실행이 같은 결론을 다시 도출하지 않습니다.';return}
+var html='';list.forEach(function(dec){html+='<div class="attn warn" style="background:var(--card);border-color:var(--line)"><strong>'+esc(dec.Title)+'</strong> <span class="badge">'+esc(dec.Status)+'</span>'+
+'<div style="margin-top:4px">'+esc(dec.Decision)+'</div>'+
+(dec.Alternatives?'<div class="sub" style="margin-top:4px">제외한 대안: '+esc(dec.Alternatives)+'</div>':'')+
+(dec.Consequences?'<div class="sub">영향: '+esc(dec.Consequences)+'</div>':'')+
+'<div class="sub mono" style="margin-top:4px;font-size:11px">'+esc(dec.ID)+(dec.BaseCommit?' @ '+shortSHA(dec.BaseCommit):'')+' · '+fmtTime(dec.CreatedAt)+'</div></div>'});
+box.innerHTML=html}catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}}
+async function saveDecision(){var body={title:document.querySelector('#dec-title').value,decision:document.querySelector('#dec-decision').value,context:document.querySelector('#dec-context').value,alternatives:document.querySelector('#dec-alternatives').value,consequences:document.querySelector('#dec-consequences').value};
+if(!body.title||!body.decision){alert('제목과 결정 내용이 필요합니다');return}
+try{await api('/api/v1/projects/'+encodeURIComponent(detailCache.project.ID)+'/decisions',{method:'POST',body:JSON.stringify(body)});route()}catch(e){alert(e.message)}}
 function planTab(d){var p=d.project;
 var statuses=['BACKLOG','APPROVED','IN_PROGRESS','VERIFYING','DONE','BLOCKED','DISCARDED'];
 var html='<section class="panel"><h2>백로그</h2><div class="filters"><input type="search" id="wq" placeholder="제목·ID·범위 검색 ( / )" value="'+esc(planQuery)+'" onkeyup="if(event.key===\'Enter\')loadPlan()"><select id="wstatus" onchange="loadPlan()"><option value="">전체 상태</option>';
@@ -224,7 +248,7 @@ var cols=[['대기',['BACKLOG','APPROVED']],['진행 중',['IN_PROGRESS']],['검
 html+='<section class="panel"><h2>상태별 요약</h2><div class="kanban">';cols.forEach(function(col){var items=(d.work_items||[]).filter(function(w){return col[1].indexOf(w.Status)>=0});html+='<div class="col"><h3>'+col[0]+' · '+items.length+'</h3>';items.slice(0,4).forEach(function(w){html+='<div class="item">'+workLink(p.ID,w)+'<br><small>'+(w.Priority?'P'+w.Priority:'')+(w.EstimatedTokens?' · '+fmtTokens(w.EstimatedTokens)+' 토큰':'')+'</small></div>'});if(items.length>4)html+='<div class="sub" style="font-size:11px"><a class="plain" href="#" onclick="filterStatus(\''+col[1][0]+'\');return false">+'+(items.length-4)+'건 더 보기</a></div>';html+='</div>'});html+='</div></section>';
 var triage=(d.work_items||[]).filter(function(w){return d.idea_scores&&d.idea_scores[w.ID]&&(w.Status==='BACKLOG'||w.Status==='BLOCKED')});triage.sort(function(a,b){return d.idea_scores[b.ID].PriorityScore-d.idea_scores[a.ID].PriorityScore});
 if(triage.length){html+='<section class="panel"><h2>아이디어 triage · '+triage.length+'건</h2>';triage.forEach(function(w){var sc=d.idea_scores[w.ID];html+='<div class="approve" style="background:var(--card);border-color:var(--line)"><div class="row"><div><strong>'+workLink(p.ID,w)+'</strong> <span class="pill">점수 '+sc.PriorityScore.toFixed(1)+'</span>'+(sc.ScopeExpansion?' <span class="pill" style="color:var(--warn);border-color:#6b5416">범위 확장</span>':'')+(w.Status==='BLOCKED'?' <span class="pill" style="color:var(--bad)">보류됨</span>':'')+'<div class="sub" style="margin-top:4px">기여 '+sc.GoalContribution.toFixed(0)+' · 가치 '+sc.UserValue.toFixed(0)+' · 운영 '+sc.OperationalNeed.toFixed(0)+' · 가능성 '+sc.Feasibility.toFixed(0)+' · 난이도 '+sc.Difficulty.toFixed(0)+(sc.ExpectedChangeScope?' · 범위 '+esc(sc.ExpectedChangeScope):'')+'</div></div><div style="display:flex;gap:6px;flex-shrink:0"><button onclick="decideWork(\''+esc(p.ID)+'\',\''+esc(w.ID)+'\',\'APPROVED\',\'아이디어 승인\')">승인</button>'+(w.Status==='BACKLOG'?'<button onclick="decideWork(\''+esc(p.ID)+'\',\''+esc(w.ID)+'\',\'BLOCKED\',\'아이디어 보류\')">보류</button>':'')+'<button onclick="decideWork(\''+esc(p.ID)+'\',\''+esc(w.ID)+'\',\'DISCARDED\',\'아이디어 폐기\')">폐기</button></div></div></div>'});html+='</section>'}
-return html}
+return html+decisionsPanel()}
 var planQuery='',planStatus='';
 function filterStatus(st){planStatus=st;location.hash='#/project/'+encodeURIComponent(detailCache.project.ID)+'/tab/plan';if(document.querySelector('#worklist'))loadPlan()}
 async function loadPlan(){var box=document.querySelector('#worklist');if(!box)return;var qEl=document.querySelector('#wq'),sEl=document.querySelector('#wstatus');planQuery=qEl?qEl.value:planQuery;planStatus=sEl?sEl.value:planStatus;
@@ -267,7 +291,7 @@ else if(tab==='verify')body=verifyTab(d);
 else if(tab==='cost')body=costTab(d);
 else{var o=overviewTab(d);body=o.html;live=o.live}
 view.innerHTML=goalHead(d,tab)+body;countdown();
-if(tab==='plan')loadPlan();
+if(tab==='plan'){loadPlan();loadDecisions()}
 if(live)startLive(p.ID,live)}
 // renderWork is the work item as an executable specification rather than a
 // title: why it exists, what "done" means, what blocks it, and every attempt.

@@ -147,6 +147,16 @@ func run(ctx context.Context, args []string) error {
 		return activityReport(ctx, s, args[1:])
 	case "models":
 		return modelAdvice(ctx, s, args[1:])
+	case "decision":
+		if len(args) > 1 && args[1] == "add" {
+			return decisionAdd(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "list" {
+			return decisionList(ctx, s, args[2:])
+		}
+		if len(args) > 2 && args[1] == "supersede" {
+			return decisionSupersede(ctx, s, args[2:])
+		}
 	case "cancel":
 		return cancelScheduled(ctx, s)
 	case "pause":
@@ -787,6 +797,97 @@ func printRepair(plan store.RepairPlan) {
 		return
 	}
 	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
+}
+
+// decisionAdd records why a structure was chosen and what was ruled out, so
+// later sessions inherit the reasoning instead of re-deriving it or quietly
+// reversing it.
+func decisionAdd(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("decision add", flag.ContinueOnError)
+	title := f.String("title", "", "short name for the decision")
+	decision := f.String("decision", "", "what was decided")
+	context_ := f.String("context", "", "what problem forced the decision")
+	alternatives := f.String("alternatives", "", "what was considered and rejected, and why")
+	consequences := f.String("consequences", "", "what this commits the project to")
+	workItem := f.String("work-item", "", "work item the decision came out of")
+	supersedes := f.String("supersedes", "", "decision ID this replaces")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *title == "" || *decision == "" {
+		return errors.New("--title and --decision are required")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	goalID := ""
+	if goal, goalErr := s.CurrentGoal(ctx, p.ID); goalErr == nil {
+		goalID = goal.ID
+	} else if !errors.Is(goalErr, store.ErrNotFound) {
+		return goalErr
+	}
+	baseCommit, _ := gitops.HeadCommit(ctx, p.RepositoryPath, p.DefaultBranch)
+	record, err := s.RecordDecision(ctx, store.DesignDecision{ProjectID: p.ID, GoalID: goalID, WorkItem: *workItem,
+		Title: *title, Context: *context_, Decision: *decision, Alternatives: *alternatives,
+		Consequences: *consequences, BaseCommit: baseCommit})
+	if err != nil {
+		return err
+	}
+	if *supersedes != "" {
+		if err = s.SupersedeDecision(ctx, p.ID, *supersedes, record.ID); err != nil {
+			return fmt.Errorf("record %s but could not supersede %s: %w", record.ID, *supersedes, err)
+		}
+		fmt.Printf("decision recorded: %s (supersedes %s)\n", record.ID, *supersedes)
+		return nil
+	}
+	fmt.Printf("decision recorded: %s\n", record.ID)
+	return nil
+}
+
+func decisionList(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("decision list", flag.ContinueOnError)
+	all := f.Bool("all", false, "include superseded decisions")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	decisions, err := s.ListDecisions(ctx, p.ID, *all)
+	if err != nil {
+		return err
+	}
+	if len(decisions) == 0 {
+		fmt.Println("no design decisions recorded")
+		return nil
+	}
+	for _, decision := range decisions {
+		fmt.Printf("%s  %-10s %s\n  %s\n", decision.ID, decision.Status, decision.Title, decision.Decision)
+		if decision.Alternatives != "" {
+			fmt.Printf("  제외: %s\n", decision.Alternatives)
+		}
+		if decision.SupersededBy != "" {
+			fmt.Printf("  대체됨: %s\n", decision.SupersededBy)
+		}
+	}
+	return nil
+}
+
+func decisionSupersede(ctx context.Context, s *store.Store, args []string) error {
+	if len(args) != 2 {
+		return errors.New("decision supersede requires the old and the new decision ID")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	if err = s.SupersedeDecision(ctx, p.ID, args[0], args[1]); err != nil {
+		return err
+	}
+	fmt.Printf("decision %s superseded by %s\n", args[0], args[1])
+	return nil
 }
 
 // verifyIntegration runs the project's gates against the default branch. Work

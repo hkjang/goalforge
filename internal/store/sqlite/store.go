@@ -78,6 +78,14 @@ CREATE TABLE IF NOT EXISTS work_items (
  objective TEXT NOT NULL DEFAULT '', acceptance TEXT NOT NULL DEFAULT '',
  blocked_reason TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS design_decisions (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), goal_id TEXT NOT NULL DEFAULT '',
+ work_item_id TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, context TEXT NOT NULL DEFAULT '',
+ decision TEXT NOT NULL, alternatives TEXT NOT NULL DEFAULT '', consequences TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL DEFAULT 'ACCEPTED', superseded_by TEXT NOT NULL DEFAULT '',
+ base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
 CREATE TABLE IF NOT EXISTS integration_checks (
  project_id TEXT PRIMARY KEY REFERENCES projects(id), pending INTEGER NOT NULL DEFAULT 0,
  reason TEXT NOT NULL DEFAULT '', target_sha TEXT NOT NULL DEFAULT '',

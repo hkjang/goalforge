@@ -96,6 +96,8 @@ goalforge status | usage | sessions | logs [--limit 50]
 goalforge report [--since 24h] [--json]    # what ran, what stopped and why, what awaits you
 goalforge models [--task-type CONTINUE_GOAL]  # model records, the next choice and why, cost forecast
 goalforge verify integration               # verify the merged result on the default branch
+goalforge decision add --title T --decision "..." [--alternatives "..."] [--consequences "..."] [--supersedes DEC-1]
+goalforge decision list [--all]            # settled architecture, inherited by every later session
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
@@ -179,6 +181,17 @@ is requested. An approval therefore covers one reviewed change: it cannot be
 spent by another work item, and if the work item is re-run and produces a new
 commit the approval is reported as stale so the new change is reviewed instead
 of inheriting the old decision.
+
+Every execution prompt now carries an assembled context package for its work
+item: the settled design decisions with the commit they were made against, the
+change constraints, what previous attempts at the same item actually failed on,
+and the gates and criteria that will judge the result — each line with its
+source and date. It is appended with the rules that make it usable: a decision
+is settled unless the session proposes changing it as its next action, a
+previously failed approach may not be retried without saying what changed, and
+verification is never relaxed. Decisions are recorded rather than deleted; one
+is superseded by another, because the record of what was rejected is what stops
+it being proposed again.
 
 Work items may declare several predecessors, and a dependency that would close
 a cycle is refused where it is created. `project concurrency --wip N` raises

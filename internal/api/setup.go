@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/goalforge/goalforge/internal/diagnostics"
+	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
@@ -286,4 +287,74 @@ func (s *Server) activityReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) listDecisions(w http.ResponseWriter, r *http.Request) {
+	includeSuperseded := r.URL.Query().Get("all") == "true"
+	decisions, err := s.store.ListDecisions(r.Context(), r.PathValue("id"), includeSuperseded)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if decisions == nil {
+		decisions = []store.DesignDecision{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"decisions": decisions})
+}
+
+type decisionRequest struct {
+	Title        string `json:"title"`
+	Context      string `json:"context"`
+	Decision     string `json:"decision"`
+	Alternatives string `json:"alternatives"`
+	Consequences string `json:"consequences"`
+	WorkItemID   string `json:"work_item_id"`
+	Supersedes   string `json:"supersedes"`
+}
+
+// recordDecision stores why a structure was chosen. Decisions are never
+// deleted — one is superseded by another — because the record of what was
+// rejected is what stops it being proposed again.
+func (s *Server) recordDecision(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	project, err := s.store.ProjectByID(r.Context(), projectID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	var request decisionRequest
+	if decodeErr := decodeBody(w, r, &request); decodeErr != nil {
+		writeError(w, http.StatusBadRequest, decodeErr.Error())
+		return
+	}
+	if strings.TrimSpace(request.Title) == "" || strings.TrimSpace(request.Decision) == "" {
+		writeError(w, http.StatusBadRequest, "제목과 결정 내용이 필요합니다")
+		return
+	}
+	goalID := ""
+	if goal, goalErr := s.goalForProject(r, projectID); goalErr == nil {
+		goalID = goal.ID
+	} else if !errors.Is(goalErr, store.ErrNotFound) {
+		writeError(w, http.StatusInternalServerError, goalErr.Error())
+		return
+	}
+	baseCommit, _ := gitops.HeadCommit(r.Context(), project.RepositoryPath, project.DefaultBranch)
+	decision, err := s.store.RecordDecision(r.Context(), store.DesignDecision{ProjectID: projectID, GoalID: goalID,
+		WorkItem: request.WorkItemID, Title: request.Title, Context: request.Context, Decision: request.Decision,
+		Alternatives: request.Alternatives, Consequences: request.Consequences, BaseCommit: baseCommit})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if request.Supersedes != "" {
+		if err = s.store.SupersedeDecision(r.Context(), projectID, request.Supersedes, decision.ID); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"decision": decision})
 }

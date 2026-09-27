@@ -385,6 +385,13 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 		}
 	}
 	rendered := prompt.Execution(goal, result.WorkItem, prompt.Budget{TokenLimit: budget.TokenLimit, TokensUsed: budget.TokensUsed, CostLimitUSD: budget.CostLimitUSD, CostUsedUSD: budget.CostUsedUSD})
+	// The assembled context is what keeps a fresh session from re-deriving
+	// settled decisions and repeating fixes that have already failed.
+	contextPackage, err := s.store.BuildContextPackage(ctx, project, goal, result.WorkItem)
+	if err != nil {
+		return result, err
+	}
+	rendered = prompt.WithContext(rendered, contextSections(contextPackage))
 	result.Run, err = s.orchestrator.Run(ctx, orchestrator.Request{RunID: runID, WorkItemID: result.WorkItem.ID, Prompt: rendered, PromptTemplate: "work_item_execution", TaskType: taskType, Project: executionProject, WorkspaceWrite: true, EstimatedTokens: estimatedTokens})
 	auditErr := s.recordWorkspaceChanges(ctx, executionProject.RepositoryPath, runID, workspaceBefore)
 	if err != nil || auditErr != nil {
@@ -416,6 +423,27 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 		err = s.commitVerifiedRun(ctx, project, executionProject.RepositoryPath, goal.ID, result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID)
 	}
 	return result, err
+}
+
+// contextSections converts an assembled context package into prompt sections.
+func contextSections(pkg store.ContextPackage) []prompt.ContextSection {
+	section := func(heading string, items []store.ContextItem) prompt.ContextSection {
+		lines := make([]prompt.ContextLine, 0, len(items))
+		for _, item := range items {
+			line := prompt.ContextLine{Title: item.Title, Body: item.Body, Source: item.Source}
+			if !item.AsOf.IsZero() {
+				line.AsOf = item.AsOf.Format("2006-01-02")
+			}
+			lines = append(lines, line)
+		}
+		return prompt.ContextSection{Heading: heading, Items: lines}
+	}
+	return []prompt.ContextSection{
+		section("이미 내려진 설계 결정", pkg.Decisions),
+		section("변경 제약", pkg.Constraints),
+		section("이 작업의 이전 실패", pkg.PastFailures),
+		section("검증 방법", pkg.Verification),
+	}
 }
 
 // commitVerifiedRun commits a verified run's changes with Goal/Work/Run
