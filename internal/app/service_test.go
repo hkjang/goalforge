@@ -598,3 +598,136 @@ func TestContinueBlocksUnapprovedProtectedFileChange(t *testing.T) {
 		t.Fatalf("protected file was not restored: content=%q err=%v", restored, err)
 	}
 }
+
+// AT-09: a session that rewrites its own gate must not be able to certify
+// itself. The gate is restored before verification, so the verdict comes from
+// what was agreed — and a genuinely broken change still fails.
+func TestRunCannotCertifyItselfByRewritingItsGate(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := model.Project{ID: "P1", Name: "demo", RepositoryPath: root, DefaultBranch: "main", Provider: "fake"}
+	if err = db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := db.SetGoal(ctx, project.ID, "ship", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature", ChangeScope: "**"}); err != nil {
+		t.Fatal(err)
+	}
+	// The gate demands a marker the run never writes, so honest work fails it.
+	gate := testscript.Write(t, root, "verify", "grep -q expected result.txt", "findstr expected result.txt")
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "t@example.invalid"}, {"config", "user.name", "T"}, {"add", "-A"}, {"commit", "-m", "fixture"}} {
+		if output, gitErr := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); gitErr != nil {
+			t.Skipf("git %v: %v %s", args, gitErr, output)
+		}
+	}
+	// The gate is named relative to the workspace, which is what puts it
+	// inside the tree the session can edit. An absolute path into the base
+	// repository would execute the original either way.
+	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed",
+		Command: []string{"./" + filepath.Base(gate)}, Timeout: 5 * time.Second, Required: true}); err != nil {
+		t.Fatal(err)
+	}
+	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
+	// The session rewrites the gate to pass unconditionally instead of doing
+	// the work.
+	fake := &fakeProvider{onStart: func(request provider.RunRequest) {
+		script := filepath.Join(request.WorkDir, filepath.Base(gate))
+		if writeErr := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); writeErr != nil {
+			t.Fatalf("provider write: %v", writeErr)
+		}
+	}}
+	runner, _ := orchestrator.New(db, fake)
+	verify, _ := verification.New(db, 4096)
+	service, _ := New(db, plannerService, runner, verify, func() string { return "RUN-1" })
+	result, err := service.Continue(ctx, project)
+	if err != nil {
+		t.Fatalf("the run itself should complete: %v", err)
+	}
+	if result.Verification.Passed {
+		t.Fatal("a run must not pass by rewriting the gate that judges it")
+	}
+	relaxations, err := db.ListRelaxations(ctx, project.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recorded bool
+	for _, relaxation := range relaxations {
+		if relaxation.Kind == "gate_modified_in_run" {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Fatalf("the tampering must be recorded for review: %+v", relaxations)
+	}
+	// The agreed gate is back on disk, not the one the session wrote.
+	worktree := root + ".goalforge-worktrees"
+	restored, readErr := os.ReadFile(filepath.Join(worktree, "W1", filepath.Base(gate)))
+	if readErr == nil && strings.Contains(string(restored), "exit 0") && !strings.Contains(string(restored), "expected") {
+		t.Fatal("the session's gate survived instead of the agreed one")
+	}
+}
+
+// AT-09, second half: deleting tests that already existed is not a decision a
+// run may make for itself while being judged by what remains.
+func TestRunBlocksWhenItDeletesExistingTests(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	project := model.Project{ID: "P1", Name: "demo", RepositoryPath: root, DefaultBranch: "main", Provider: "fake"}
+	if err = db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	goal, err := db.SetGoal(ctx, project.ID, "ship", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W1", GoalID: goal.ID, Type: "IMPLEMENT", Title: "feature", ChangeScope: "**"}); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "feature_test.go"), []byte("package main\n// a failing test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gate := testscript.Write(t, root, "verify", "exit 0", "exit /b 0")
+	for _, args := range [][]string{{"init", "-b", "main"}, {"config", "user.email", "t@example.invalid"}, {"config", "user.name", "T"}, {"add", "-A"}, {"commit", "-m", "fixture"}} {
+		if output, gitErr := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); gitErr != nil {
+			t.Skipf("git %v: %v %s", args, gitErr, output)
+		}
+	}
+	if err = db.UpsertGate(ctx, project.ID, store.GateConfig{Type: "build_passed", Command: []string{gate}, Timeout: 5 * time.Second, Required: true}); err != nil {
+		t.Fatal(err)
+	}
+	plannerService, _ := planner.NewService(db, planner.DefaultPolicy())
+	fake := &fakeProvider{onStart: func(request provider.RunRequest) {
+		if removeErr := os.Remove(filepath.Join(request.WorkDir, "feature_test.go")); removeErr != nil {
+			t.Fatalf("provider remove: %v", removeErr)
+		}
+	}}
+	runner, _ := orchestrator.New(db, fake)
+	verify, _ := verification.New(db, 4096)
+	service, _ := New(db, plannerService, runner, verify, func() string { return "RUN-1" })
+	if _, err = service.Continue(ctx, project); err == nil {
+		t.Fatal("deleting an existing test without approval must stop the run")
+	}
+	if !strings.Contains(err.Error(), "tests removed") {
+		t.Fatalf("the reason must name what happened: %v", err)
+	}
+	current, err := db.ProjectByID(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.State != "BLOCKED" {
+		t.Fatalf("the project should be blocked for review, got %s", current.State)
+	}
+}

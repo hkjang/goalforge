@@ -368,6 +368,7 @@ func (s *Server) approvalRequest(ctx context.Context, args toolArgs) (string, er
 	}
 	actions := map[string]string{
 		"protected-files": store.ApprovalProtectedFiles, store.ApprovalProtectedFiles: store.ApprovalProtectedFiles,
+		"remove-tests": store.ApprovalRemoveTests, store.ApprovalRemoveTests: store.ApprovalRemoveTests,
 		"merge-branch": store.ApprovalMergeBranch, store.ApprovalMergeBranch: store.ApprovalMergeBranch,
 		"publish-branch": store.ApprovalPublishBranch, store.ApprovalPublishBranch: store.ApprovalPublishBranch,
 	}

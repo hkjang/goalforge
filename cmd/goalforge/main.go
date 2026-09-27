@@ -211,6 +211,8 @@ func run(ctx context.Context, args []string) error {
 		return takeoverStart(ctx, s, args[1:])
 	case "evidence":
 		return evidenceExport(ctx, s, args[1:])
+	case "effects":
+		return effectsShow(ctx, s, args[1:])
 	case "reproduce":
 		return reproduceRun(ctx, s, args[1:])
 	case "decision":
@@ -377,8 +379,24 @@ func mergeWork(ctx context.Context, s *store.Store, args []string) error {
 			shortSHA(commit.CommitSHA), project.DefaultBranch, *workItemID)
 	}
 	message := "Merge verified work " + *workItemID + "\n\nGoal-ID: " + commit.GoalID + "\nWork-Item-ID: " + commit.WorkItemID + "\nRun-ID: " + commit.RunID + "\n"
+	effect := store.ExternalEffect{ProjectID: project.ID, RunID: commit.RunID, WorkItemID: *workItemID,
+		Kind: store.EffectMergeBranch, Target: project.DefaultBranch, Branch: commit.Branch, RequestHash: commit.CommitSHA,
+		Key: store.EffectKey(store.EffectMergeBranch, project.ID, *workItemID, project.DefaultBranch, commit.CommitSHA)}
+	if guardErr := app.GuardEffect(ctx, s, project, effect); guardErr != nil {
+		if errors.Is(guardErr, app.ErrEffectAlreadyApplied) {
+			fmt.Printf("already merged: %v\n", guardErr)
+			return nil
+		}
+		return guardErr
+	}
 	sha, err := gitops.MergeVerified(ctx, project.RepositoryPath, project.DefaultBranch, commit.Branch, message)
 	if err != nil {
+		if settleErr := s.SettleEffect(ctx, effect.Key, store.EffectUnknown, err.Error()); settleErr != nil {
+			return errors.Join(err, settleErr)
+		}
+		return err
+	}
+	if err = s.SettleEffect(ctx, effect.Key, store.EffectSucceeded, "merged as "+sha); err != nil {
 		return err
 	}
 	if err = s.MarkIntegrationPending(ctx, project.ID, "병합 후 통합 검증이 필요합니다: "+*workItemID, sha); err != nil {
@@ -428,7 +446,29 @@ func publishWork(ctx context.Context, s *store.Store, args []string) error {
 		return fmt.Errorf("publishing %s to %s requires approval of that commit: run `goalforge approval request --action publish-branch --work-item %s --remote %s --reason ...` and approve it first",
 			shortSHA(commit.CommitSHA), *remote, *workItemID, *remote)
 	}
+	// Pushing is an effect outside this database: a crash between doing it and
+	// recording it leaves the two disagreeing, so the ledger is consulted
+	// first and the remote is asked when a previous attempt is unresolved.
+	effect := store.ExternalEffect{ProjectID: project.ID, RunID: commit.RunID, WorkItemID: *workItemID,
+		Kind: store.EffectPublishBranch, Target: *remote, Branch: commit.Branch, RequestHash: commit.CommitSHA,
+		Key: store.EffectKey(store.EffectPublishBranch, project.ID, *workItemID, *remote, commit.CommitSHA)}
+	if guardErr := app.GuardEffect(ctx, s, project, effect); guardErr != nil {
+		if errors.Is(guardErr, app.ErrEffectAlreadyApplied) {
+			fmt.Printf("already published: %v\n", guardErr)
+			return nil
+		}
+		return guardErr
+	}
 	if err = gitops.PushBranch(ctx, project.RepositoryPath, *remote, commit.Branch); err != nil {
+		// The push may have reached the remote before the failure, so the
+		// outcome is unknown rather than failed: retrying a failure is safe,
+		// retrying something that may have succeeded is not.
+		if settleErr := s.SettleEffect(ctx, effect.Key, store.EffectUnknown, err.Error()); settleErr != nil {
+			return errors.Join(err, settleErr)
+		}
+		return err
+	}
+	if err = s.SettleEffect(ctx, effect.Key, store.EffectSucceeded, fmt.Sprintf("pushed %s to %s", commit.Branch, *remote)); err != nil {
 		return err
 	}
 	fmt.Printf("published: branch=%s commit=%s remote=%s work=%s\n", commit.Branch, commit.CommitSHA, *remote, *workItemID)
@@ -1454,6 +1494,55 @@ func takeoverReturn(ctx context.Context, s *store.Store, args []string) error {
 	return nil
 }
 
+// effectsShow lists what GoalForge changed outside its own database and
+// settles anything whose outcome was never recorded. A retry that skips this
+// is how the same push or merge happens twice.
+func effectsShow(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("effects", flag.ContinueOnError)
+	reconcile := f.Bool("reconcile", false, "ask the remote about anything unresolved and settle it")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	if *reconcile {
+		results, reconcileErr := app.ReconcileAll(ctx, s, p)
+		if reconcileErr != nil {
+			return reconcileErr
+		}
+		if len(results) == 0 {
+			fmt.Println("nothing unresolved")
+		}
+		for _, result := range results {
+			verdict := "확인 불가"
+			switch {
+			case result.Resolved && result.Applied:
+				verdict = "이미 반영됨"
+			case result.Resolved:
+				verdict = "반영되지 않음"
+			}
+			fmt.Printf("%-16s %-14s %s — %s\n", result.Effect.Kind, verdict, result.Effect.Branch, result.Detail)
+		}
+		fmt.Println()
+	}
+	effects, err := s.ListEffects(ctx, p.ID, 50)
+	if err != nil {
+		return err
+	}
+	if len(effects) == 0 {
+		fmt.Println("no external effects recorded")
+		return nil
+	}
+	fmt.Printf("%-16s %-12s %-10s %-24s %s\n", "kind", "state", "attempts", "target", "detail")
+	for _, effect := range effects {
+		fmt.Printf("%-16s %-12s %-10d %-24s %s\n", effect.Kind, effect.State, effect.Attempts,
+			effect.Target+"/"+effect.Branch, effect.Result)
+	}
+	return nil
+}
+
 // reproduceRun writes everything needed to put a failure back in front of a
 // developer under the same conditions: the commit, the workspace, the exact
 // gate commands, and what they printed. It deliberately does not try to make
@@ -1863,7 +1952,7 @@ func workerProviders(ctx context.Context) ([]provider.Provider, func(), error) {
 
 func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("approval request", flag.ContinueOnError)
-	action := f.String("action", "protected-files", "protected-files, publish-branch, or merge-branch")
+	action := f.String("action", "protected-files", "protected-files, remove-tests, publish-branch, or merge-branch")
 	reason := f.String("reason", "", "reason for approval")
 	workItemID := f.String("work-item", "", "work item whose verified commit is being approved (required for publish-branch and merge-branch)")
 	remote := f.String("remote", "origin", "git remote the publish approval applies to")
@@ -1877,6 +1966,8 @@ func approvalRequest(ctx context.Context, s *store.Store, args []string) error {
 	switch *action {
 	case "protected-files", store.ApprovalProtectedFiles:
 		actionType = store.ApprovalProtectedFiles
+	case "remove-tests", store.ApprovalRemoveTests:
+		actionType = store.ApprovalRemoveTests
 	case "publish-branch", store.ApprovalPublishBranch:
 		actionType = store.ApprovalPublishBranch
 	case "merge-branch", store.ApprovalMergeBranch:
