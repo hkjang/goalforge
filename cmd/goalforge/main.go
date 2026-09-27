@@ -77,6 +77,45 @@ evaluate   eval add | eval list | eval record | eval compare
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
            checkpoint --next-action TEXT`
 
+// privilegedCommands decide whether work is acceptable or what it is allowed
+// to do. An implementation session may change the repository; it may not
+// change the gates that judge it, the approvals that release it, or its own
+// budget and permissions. Keeping the list in one place is what stops a new
+// command becoming reachable from inside a session by omission.
+var privilegedCommands = map[string]string{
+	"approval approve":         "승인",
+	"approval reject":          "승인 반려",
+	"approval request":         "승인 요청",
+	"goal set":                 "목표 변경",
+	"verify gate add":          "검증 게이트 변경",
+	"verify template":          "검증 게이트 일괄 설정",
+	"project budget":           "예산 변경",
+	"project profile":          "운영 정책 변경",
+	"project runtime":          "실행 제한 변경",
+	"project concurrency":      "동시 실행 한도 변경",
+	"project provider set":     "제공자·모델 변경",
+	"merge":                    "기본 브랜치 병합",
+	"publish":                  "원격 게시",
+	"eval spec":                "평가 기준 변경",
+	"takeover":                 "작업 인계",
+	"storage postgres migrate": "저장소 마이그레이션",
+}
+
+// commandAuthority names the operation for a command line, or an empty string
+// when the command is one an implementation session may run.
+func commandAuthority(args []string) (string, string) {
+	for _, width := range []int{3, 2, 1} {
+		if len(args) < width {
+			continue
+		}
+		key := strings.Join(args[:width], " ")
+		if operation, ok := privilegedCommands[key]; ok {
+			return key, operation
+		}
+	}
+	return "", ""
+}
+
 func run(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return usage()
@@ -90,6 +129,13 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("--db requires a path and command")
 		}
 		dbPath, args = args[1], args[2:]
+	}
+	// The authority check happens before anything is opened or dispatched, so
+	// a privileged command cannot take effect part-way before being refused.
+	if _, operation := commandAuthority(args); operation != "" {
+		if err := policy.RequireOperator(operation); err != nil {
+			return err
+		}
 	}
 	if len(args) > 2 && args[0] == "storage" && args[1] == "postgres" && args[2] == "migrate" {
 		return postgresMigrate(ctx, args[3:])

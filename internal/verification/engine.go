@@ -218,7 +218,9 @@ func (e *Engine) runGate(parent context.Context, workDir string, gate Gate) (Res
 	defer cancel()
 	cmd := exec.CommandContext(ctx, gate.Command[0], gate.Command[1:]...)
 	cmd.Dir = workDir
-	cmd.Env = os.Environ()
+	// A gate is still work the session's change can influence, so it runs with
+	// the same reduced environment rather than the operator's.
+	cmd.Env = policy.SessionEnvironment(os.Environ(), policy.RoleImplementation)
 	procctl.SetGroup(cmd)
 	cmd.Cancel = func() error {
 		return procctl.KillGroup(cmd)

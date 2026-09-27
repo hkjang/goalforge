@@ -12,6 +12,7 @@ import (
 	"github.com/goalforge/goalforge/internal/diagnostics"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/policy"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
@@ -103,7 +104,21 @@ type toolArgs struct {
 	Risks           string   `json:"risks"`
 }
 
+// privilegedTools decide whether work is acceptable. An implementation session
+// reaching GoalForge over MCP is still the implementation, so the same
+// separation applies on this path as on the CLI.
+var privilegedTools = map[string]string{
+	"approval_decide":  "승인",
+	"approval_request": "승인 요청",
+	"goal_set":         "목표 변경",
+}
+
 func (s *Server) callTool(ctx context.Context, name string, rawArgs json.RawMessage) (string, error) {
+	if operation, ok := privilegedTools[name]; ok {
+		if err := policy.RequireOperator(operation); err != nil {
+			return "", err
+		}
+	}
 	var args toolArgs
 	if len(rawArgs) > 0 {
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
