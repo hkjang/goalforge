@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goalforge/goalforge/internal/app"
 	"github.com/goalforge/goalforge/internal/diagnostics"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
@@ -63,6 +64,7 @@ func toolDescriptors() []toolDescriptor {
 		{"runs_recent", "Recent runs with task type, work item, tokens, and state.", schema(nil, map[string]any{"project": projectProperty, "limit": numberProperty("Maximum runs to return (default 10).")})},
 		{"run_detail", "Replay one run from audit records: prompt template and hash, usage, gates, file changes, commit.", schema([]string{"run_id"}, map[string]any{"project": projectProperty, "run_id": stringProperty("Run ID (RUN-...).")})},
 		{"continue_enqueue", "Schedule a persistent CONTINUE job so a running `goalforge worker` executes work items one at a time toward the goal.", schema(nil, map[string]any{"project": projectProperty})},
+		{"plan_preview", "What the next run would do, without doing it: the work item that would be chosen and why others were skipped, the model, expected tokens and cost against the remaining budget, the gates that would judge it, and every precondition that would refuse it.", schema(nil, map[string]any{"project": projectProperty})},
 		{"project_readiness", "Check whether a project could ever complete: goal, criteria, gates, whether every criterion has a gate that measures it, gate commands on PATH, budget, and pending integration verification.", schema(nil, map[string]any{"project": projectProperty})},
 		{"work_item_detail", "One work item with its specification, what is blocking it (dependencies, WIP limit, scope approval, human takeover), its run history, and the model that would execute it.", schema([]string{"work_item_id"}, map[string]any{"project": projectProperty, "work_item_id": stringProperty("Work item ID (WORK-...).")})},
 		{"decisions_list", "Settled design decisions with what was rejected and why. Treat these as already agreed rather than re-deriving them.", schema(nil, map[string]any{"project": projectProperty, "all": stringProperty("true to include superseded decisions.")})},
@@ -137,6 +139,8 @@ func (s *Server) callTool(ctx context.Context, name string, rawArgs json.RawMess
 		return s.runDetail(ctx, args)
 	case "continue_enqueue":
 		return s.continueEnqueue(ctx, args)
+	case "plan_preview":
+		return s.planPreview(ctx, args)
 	case "project_readiness":
 		return s.projectReadiness(ctx, args)
 	case "work_item_detail":
@@ -641,4 +645,18 @@ func (s *Server) activityReport(ctx context.Context, args toolArgs) (string, err
 		window = parsed
 	}
 	return marshal(s.store.Activity(ctx, time.Now().UTC().Add(-window)))
+}
+
+// planPreview lets an agent check what a run would cost and whether it would
+// be refused before spending a model call to find out.
+func (s *Server) planPreview(ctx context.Context, args toolArgs) (string, error) {
+	project, err := s.resolveProject(ctx, args.Project)
+	if err != nil {
+		return "", err
+	}
+	plan, err := app.BuildPlan(ctx, s.store, project)
+	if err != nil {
+		return "", err
+	}
+	return marshal(map[string]any{"plan": plan, "runnable": plan.Runnable()}, nil)
 }

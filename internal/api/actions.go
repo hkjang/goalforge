@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/goalforge/goalforge/internal/app"
+	"github.com/goalforge/goalforge/internal/report"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
@@ -75,5 +77,52 @@ func (s *Server) projectAction(w http.ResponseWriter, r *http.Request) {
 			Detail: "실행 중인 세션이 없어 예약된 작업을 취소했습니다."})
 	default:
 		writeError(w, http.StatusBadRequest, "지원하지 않는 동작입니다: "+action)
+	}
+}
+
+// projectPlan answers "what would happen if I started work now" without
+// starting it: the item that would be chosen, the model, the expected cost
+// against the remaining budget, and every precondition that would refuse it.
+func (s *Server) projectPlan(w http.ResponseWriter, r *http.Request) {
+	project, err := s.store.ProjectByID(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	plan, err := app.BuildPlan(r.Context(), s.store, project)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"plan": plan, "runnable": plan.Runnable()})
+}
+
+// evidenceBundle serves the handover document. HTML is the default because
+// the common use is sending someone a page they can read; JSON is there for
+// anything that needs to process it.
+func (s *Server) evidenceBundle(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	bundle, err := s.store.BuildEvidenceBundle(r.Context(), projectID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "project or goal not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if r.URL.Query().Get("format") == "json" {
+		writeJSON(w, http.StatusOK, bundle)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="evidence.html"`)
+	if err = report.EvidenceHTML(w, bundle); err != nil {
+		// The status is already sent, so the only useful thing left is to stop.
+		return
 	}
 }

@@ -107,6 +107,8 @@ func New(s *store.Store, bearerToken string) (*Server, error) {
 	server.mux.HandleFunc("POST /api/v1/projects", server.createProject)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/goal", server.setGoal)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/policy", server.setPolicy)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/plan", server.projectPlan)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/evidence", server.evidenceBundle)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}/work", server.workItems)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}/work/{workID}", server.workItemDetail)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/plan", server.updateWorkPlan)

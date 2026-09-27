@@ -33,6 +33,7 @@ import (
 	"github.com/goalforge/goalforge/internal/provider/codex"
 	"github.com/goalforge/goalforge/internal/provider/opencode"
 	"github.com/goalforge/goalforge/internal/provider/qwen"
+	"github.com/goalforge/goalforge/internal/report"
 	"github.com/goalforge/goalforge/internal/scheduler"
 	pgstore "github.com/goalforge/goalforge/internal/store/postgres"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
@@ -136,6 +137,8 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "template" {
 			return verifyTemplate(ctx, s, args[2:])
 		}
+	case "plan":
+		return planPreview(ctx, s, args[1:])
 	case "continue":
 		return continueGoal(ctx, s, args[1:], false)
 	case "develop":
@@ -178,6 +181,8 @@ func run(ctx context.Context, args []string) error {
 			return takeoverReturn(ctx, s, args[2:])
 		}
 		return takeoverStart(ctx, s, args[1:])
+	case "evidence":
+		return evidenceExport(ctx, s, args[1:])
 	case "reproduce":
 		return reproduceRun(ctx, s, args[1:])
 	case "decision":
@@ -857,6 +862,109 @@ func printRepair(plan store.RepairPlan) {
 		return
 	}
 	fmt.Printf("repair: decision=%s kind=%s attempt=%d\n  %s\n  %s\n", plan.Decision, plan.FailureKind, plan.Attempt, plan.Reason, plan.Summary)
+}
+
+// evidenceExport writes the case for what a goal achieved and how it was
+// proven. It is assembled from records written as the work happened, including
+// the approvals that were refused and the checks that were relaxed: a bundle
+// that only keeps the good news describes a different project.
+func evidenceExport(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("evidence export", flag.ContinueOnError)
+	out := f.String("out", "", "directory to write evidence.html and evidence.json to")
+	// Go's flag package stops parsing at the first positional argument, so the
+	// "export" verb is taken off before the flags are read rather than
+	// silently swallowing everything after it.
+	verb, rest := splitLeadingArg(args)
+	if verb != "" && verb != "export" {
+		return fmt.Errorf("unknown evidence subcommand %q; use: goalforge evidence export --out DIR", verb)
+	}
+	if err := f.Parse(rest); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	bundle, err := s.BuildEvidenceBundle(ctx, p.ID)
+	if err != nil {
+		return err
+	}
+	if *out == "" {
+		fmt.Printf("%s — %s\n진행률 %.1f%% · 완료 조건 충족 %t\n작업 %d건 · 승인 %d건 · 설계 결정 %d건 · 기준 완화 %d건\n",
+			bundle.Project.Name, bundle.Goal.Title, bundle.Progress.Percent, bundle.Progress.Complete,
+			len(bundle.WorkItems), len(bundle.Approvals), len(bundle.Decisions), len(bundle.Relaxations))
+		fmt.Println("\n--out DIR 로 evidence.html 과 evidence.json 을 씁니다")
+		return nil
+	}
+	if err = os.MkdirAll(*out, 0o750); err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(bundle, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(filepath.Join(*out, "evidence.json"), encoded, 0o600); err != nil {
+		return err
+	}
+	page, err := os.OpenFile(filepath.Join(*out, "evidence.html"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer page.Close()
+	if err = report.EvidenceHTML(page, bundle); err != nil {
+		return err
+	}
+	fmt.Printf("evidence written: %s\n  evidence.html  evidence.json\n", *out)
+	return nil
+}
+
+// planPreview shows what the next run would do without doing any of it.
+// Spending a model call to discover that the budget is exhausted or a gate is
+// missing is the expensive way to learn it.
+func planPreview(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("plan", flag.ContinueOnError)
+	asJSON := f.Bool("json", false, "emit JSON instead of text")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	service, cleanup, err := runtimeService(ctx, s, p)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	plan, err := service.Plan(ctx, p)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		encoded, encodeErr := json.MarshalIndent(plan, "", "  ")
+		if encodeErr != nil {
+			return encodeErr
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	fmt.Printf("%s — %s\n", plan.ProjectName, plan.GoalTitle)
+	if plan.WorkItem != nil {
+		fmt.Printf("다음 작업: %s %s\n  %s\n", plan.WorkItem.ID, plan.WorkItem.Title, plan.SelectionReason)
+	}
+	for _, skipped := range plan.Skipped {
+		fmt.Printf("  건너뜀: %s %s — %s\n", skipped.WorkItemID, skipped.Title, skipped.Reason)
+	}
+	fmt.Println()
+	for _, check := range plan.Checks {
+		fmt.Printf("%-5s %-22s %s\n", check.Level, check.Name, check.Detail)
+	}
+	fmt.Println()
+	if plan.Runnable() {
+		fmt.Println("이 상태로 `goalforge continue` 를 실행하면 위 작업이 수행됩니다.")
+		return nil
+	}
+	return errors.New("지금은 실행할 수 없습니다. 위의 BLOCK 항목을 먼저 해결하세요")
 }
 
 // verifyTemplate installs a starting set of gates for a kind of project. A
