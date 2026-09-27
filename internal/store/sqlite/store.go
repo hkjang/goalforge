@@ -941,6 +941,20 @@ func (s *Store) SetProjectBudget(ctx context.Context, projectID string, tokenLim
 	_, err := s.db.ExecContext(ctx, `INSERT INTO project_budgets(project_id,token_limit,cost_limit_usd,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET token_limit=excluded.token_limit,cost_limit_usd=excluded.cost_limit_usd,updated_at=excluded.updated_at`, projectID, tokenLimit, costLimit, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
+
+// ProjectBudgetConfig reads every configured limit without usage. Editing one
+// limit needs the rest of them, and the usage query returns only the two
+// totals it joins over.
+func (s *Store) ProjectBudgetConfig(ctx context.Context, projectID string) (ProjectBudget, error) {
+	var b ProjectBudget
+	err := s.db.QueryRowContext(ctx, `SELECT token_limit,cost_limit_usd,daily_run_limit,daily_token_limit,daily_cost_limit_usd FROM project_budgets WHERE project_id=?`, projectID).
+		Scan(&b.TokenLimit, &b.CostLimitUSD, &b.DailyRunLimit, &b.DailyTokenLimit, &b.DailyCostLimitUSD)
+	if errors.Is(err, sql.ErrNoRows) {
+		return b, ErrNotFound
+	}
+	return b, err
+}
+
 func (s *Store) ProjectBudgetUsage(ctx context.Context, projectID string) (ProjectBudget, error) {
 	var b ProjectBudget
 	err := s.db.QueryRowContext(ctx, `SELECT b.token_limit,b.cost_limit_usd,COALESCE(SUM(CASE WHEN l.token_type<>'cost_usd' THEN l.amount ELSE 0 END),0),COALESCE(SUM(l.cost),0) FROM project_budgets b LEFT JOIN runs r ON r.project_id=b.project_id LEFT JOIN usage_ledger l ON l.run_id=r.id WHERE b.project_id=? GROUP BY b.project_id,b.token_limit,b.cost_limit_usd`, projectID).Scan(&b.TokenLimit, &b.CostLimitUSD, &b.TokensUsed, &b.CostUsedUSD)

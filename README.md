@@ -183,6 +183,12 @@ with `--value-pattern` records the value it measured from its own output and
 fails when that value is below `--success-value`, so numeric criteria such as
 coverage are proven by measurement rather than by configuration.
 
+A first project can be set up from the dashboard as well as the CLI: the
+`#/new` flow walks repository → environment diagnosis (the same checks as
+`goalforge doctor`, which now blocks on a directory that is not a repository)
+→ goal → completion criteria → execution policy, and refuses to continue while
+a blocking diagnostic stands.
+
 The dashboard at `serve` follows the decision, not the data model. The home
 view leads with what needs a decision — approvals, projects needing repair,
 budgets near a limit — each with its cause, effect, and recommended action. A

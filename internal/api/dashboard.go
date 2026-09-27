@@ -119,7 +119,7 @@ return html+'</section>'}
 async function renderList(){document.querySelector('#crumb').textContent='목표 중심 AI 개발 오케스트레이터';var status=document.querySelector('#status'),view=document.querySelector('#view');status.textContent='불러오는 중…';view.innerHTML='';var data=await api('/api/v1/projects');var inbox=await api('/api/v1/approvals');status.className='sub';status.textContent=data.projects.length+'개 프로젝트';
 var html=attentionCards(data.projects,inbox.approvals);
 if(!data.projects.length)html+='<section class="panel"><h2>아직 프로젝트가 없습니다</h2><div class="sub">저장소에서 <code>goalforge project init --name 이름 --provider claude</code> 로 시작하고, <code>goalforge doctor</code> 로 환경을 먼저 진단하세요.</div></section>';
-html+='<div id="projects">';for(var i=0;i<data.projects.length;i++){var x=data.projects[i],p=x.project,m=x.metrics,g=x.goal||{};html+='<a class="card" href="#/project/'+encodeURIComponent(p.ID)+'"><div class="row"><div><strong>'+esc(p.Name)+'</strong><div class="sub">'+esc(p.Provider)+' · '+esc(p.Model||'default')+'</div></div>'+stateChip(p.State)+'</div><h3>'+esc(g.Title||'목표 미등록')+'</h3><div class="bar"><span class="'+progressClass(x.complete)+'" style="width:'+pct(x.progress_percent)+'%"></span></div><div class="row sub"><span>진행률'+(x.pending_approvals_count?' · 승인 대기 '+x.pending_approvals_count+'건':'')+'</span><span>'+x.progress_percent.toFixed(1)+'%</span></div><div class="metrics"><div class="metric"><b>'+m.RunsTotal+'</b><small>실행</small></div><div class="metric"><b>'+m.WorkDone+'</b><small>완료 작업</small></div><div class="metric"><b>'+fmtUSD(m.CostUSD)+'</b><small>비용</small></div></div></a>'}view.innerHTML=html+'</div>'}
+html+='<div class="actions" style="margin-bottom:14px"><a class="plain" href="#/new">+ 새 프로젝트 설정</a> <span class="sub"><span class="kbd">/</span> 백로그 검색 · <span class="kbd">Esc</span> 뒤로 · <span class="kbd">r</span> 새로고침</span></div>';html+='<div id="projects">';for(var i=0;i<data.projects.length;i++){var x=data.projects[i],p=x.project,m=x.metrics,g=x.goal||{};html+='<a class="card" href="#/project/'+encodeURIComponent(p.ID)+'"><div class="row"><div><strong>'+esc(p.Name)+'</strong><div class="sub">'+esc(p.Provider)+' · '+esc(p.Model||'default')+'</div></div>'+stateChip(p.State)+'</div><h3>'+esc(g.Title||'목표 미등록')+'</h3><div class="bar"><span class="'+progressClass(x.complete)+'" style="width:'+pct(x.progress_percent)+'%"></span></div><div class="row sub"><span>진행률'+(x.pending_approvals_count?' · 승인 대기 '+x.pending_approvals_count+'건':'')+'</span><span>'+x.progress_percent.toFixed(1)+'%</span></div><div class="metrics"><div class="metric"><b>'+m.RunsTotal+'</b><small>실행</small></div><div class="metric"><b>'+m.WorkDone+'</b><small>완료 작업</small></div><div class="metric"><b>'+fmtUSD(m.CostUSD)+'</b><small>비용</small></div></div></a>'}view.innerHTML=html+'</div>'}
 var detailCache=null;
 function goalHead(d,tab){var p=d.project,g=d.goal||{};
 var deadline='';var candidates=[];(d.quota_windows||[]).forEach(function(q){if(q.ResumeAt)candidates.push(q.ResumeAt)});(d.scheduler_jobs||[]).forEach(function(j){if(j.Status==='PENDING'&&(j.Type==='RESUME'||j.Type==='CONTINUE'))candidates.push(j.RunAt)});candidates=candidates.filter(function(t){return new Date(t).getTime()>Date.now()}).sort();if(candidates.length)deadline=candidates[0];
@@ -216,6 +216,61 @@ if(tab==='plan')loadPlan();
 if(live){pollLive(p.ID,live);liveTimer=setInterval(function(){pollLive(p.ID,live)},3000)}}
 // renderWork is the work item as an executable specification rather than a
 // title: why it exists, what "done" means, what blocks it, and every attempt.
+// The setup flow follows the order the decisions actually happen in:
+// repository → environment diagnosis → goal → completion criteria → execution
+// policy. Each step is only reachable once the previous one holds, so a
+// project cannot be created against a directory that is not a repository.
+var setup={step:1,project:null,criteria:[{type:'build_passed',value:'true'}]};
+function setupCriteriaHTML(){var html='';setup.criteria.forEach(function(c,i){html+='<div style="display:flex;gap:6px;margin-bottom:6px"><input value="'+esc(c.type)+'" placeholder="조건 이름 (예: build_passed)" oninput="setup.criteria['+i+'].type=this.value" style="flex:2"><input value="'+esc(c.value)+'" placeholder="기준값" oninput="setup.criteria['+i+'].value=this.value" style="flex:1"><button onclick="setup.criteria.splice('+i+',1);renderSetup()">삭제</button></div>'});
+return html+'<button onclick="setup.criteria.push({type:\'\',value:\'\'});renderSetup()">조건 추가</button>'}
+async function renderSetup(){var status=document.querySelector('#status'),view=document.querySelector('#view');status.className='sub';status.textContent='';
+document.querySelector('#crumb').innerHTML='<a class="sub" href="#">프로젝트</a> / 새 프로젝트';
+var steps=['저장소','환경 진단','목표','완료 조건','실행 정책'];
+var html='<div class="tabs">';steps.forEach(function(name,i){html+='<a class="'+(setup.step===i+1?'on':'')+'" href="#/new">'+(i+1)+'. '+name+'</a>'});html+='</div>';
+if(setup.step===1){html+='<section class="panel"><h2>1. 저장소 선택</h2>'+
+'<label for="s-repo">저장소 경로</label><input id="s-repo" style="width:100%" placeholder="/path/to/repo" value="'+esc(setup.repo||'')+'">'+
+'<label for="s-name">프로젝트 이름</label><input id="s-name" style="width:100%" value="'+esc(setup.name||'')+'">'+
+'<div class="grid2"><div><label for="s-provider">제공자</label><select id="s-provider" style="width:100%">'+['codex','claude','qwen','opencode'].map(function(pv){return'<option value="'+pv+'"'+(setup.provider===pv?' selected':'')+'>'+pv+'</option>'}).join('')+'</select></div>'+
+'<div><label for="s-model">모델 (선택)</label><input id="s-model" style="width:100%" value="'+esc(setup.model||'')+'"></div></div>'+
+'<div class="actions"><button onclick="setupDiagnose()">환경 진단하기</button></div>'+
+'<div class="why">GoalForge 는 저장소를 직접 수정하지 않습니다. 작업은 격리된 worktree 에서 실행되고, 기본 브랜치 반영은 승인이 필요합니다.</div></section>'}
+if(setup.step===2){html+='<section class="panel"><h2>2. 환경 진단</h2><div id="doctor">진단 중…</div>'+
+'<div class="actions"><button onclick="setup.step=1;renderSetup()">이전</button><button id="s-next2" onclick="setup.step=3;renderSetup()" disabled>목표 작성으로</button></div></section>'}
+if(setup.step===3){html+='<section class="panel"><h2>3. 목표</h2>'+
+'<label for="s-title">목표 제목</label><input id="s-title" style="width:100%" value="'+esc(setup.title||'')+'">'+
+'<label for="s-objective">무엇을 달성하는가</label><textarea id="s-objective">'+esc(setup.objective||'')+'</textarea>'+
+'<div class="actions"><button onclick="setup.step=2;renderSetup()">이전</button><button onclick="setupCaptureGoal()">완료 조건으로</button></div></section>'}
+if(setup.step===4){html+='<section class="panel"><h2>4. 완료 조건</h2><div class="why">완료 조건이 없으면 목표는 완료로 판정되지 않습니다. 각 조건은 같은 이름의 검증 게이트가 만든 증거로 판정됩니다.</div>'+setupCriteriaHTML()+
+'<div class="actions"><button onclick="setup.step=3;renderSetup()">이전</button><button onclick="setupCreate()">프로젝트 만들기</button></div></section>'}
+if(setup.step===5){var p=setup.project;html+='<section class="panel"><h2>5. 실행 정책</h2><div class="sub">'+esc(p.Name)+' 이(가) 생성되었습니다. 예산은 모든 실행의 상한이며 비워 두면 제한 없이 실행됩니다.</div>'+
+'<div class="grid2"><div><label for="s-tokens">토큰 예산</label><input id="s-tokens" type="number" min="0" value="2000000" style="width:100%">'+
+'<label for="s-cost">비용 예산 (USD)</label><input id="s-cost" type="number" min="0" step="1" value="50" style="width:100%"></div>'+
+'<div><label for="s-dailyruns">하루 최대 실행</label><input id="s-dailyruns" type="number" min="0" value="20" style="width:100%">'+
+'<label for="s-turn">턴 / 실행 제한 시간</label><div style="display:flex;gap:6px"><input id="s-turn" value="30m" style="width:50%"><input id="s-run" value="2h" style="width:50%"></div></div></div>'+
+'<div class="actions"><button onclick="setupPolicy()">저장하고 프로젝트 열기</button><button onclick="location.hash=\'#/project/\'+encodeURIComponent(setup.project.ID)">건너뛰기</button></div>'+
+'<div class="why">다음 단계: 검증 게이트를 등록해야 실행이 검증될 수 있습니다 — <code>goalforge verify gate add --type build_passed --command-json \'["go","build","./..."]\'</code></div></section>'}
+view.innerHTML=html;
+if(setup.step===2)runDoctor()}
+function setupField(id){var el=document.querySelector(id);return el?el.value.trim():''}
+async function setupDiagnose(){setup.repo=setupField('#s-repo');setup.name=setupField('#s-name');setup.provider=setupField('#s-provider');setup.model=setupField('#s-model');
+if(!setup.repo||!setup.name){alert('저장소 경로와 프로젝트 이름이 필요합니다');return}
+setup.step=2;renderSetup()}
+async function runDoctor(){var box=document.querySelector('#doctor');if(!box)return;
+try{var r=await api('/api/v1/doctor?repo='+encodeURIComponent(setup.repo)+'&provider='+encodeURIComponent(setup.provider));
+var html='<table>';(r.Checks||[]).forEach(function(c){var cls=c.Level==='OK'?'st-ok':(c.Level==='FAIL'?'st-bad':'st-warn');html+='<tr><td style="width:80px"><span class="state '+cls+'">'+esc(c.Level)+'</span></td><td>'+esc(c.Name)+'</td><td class="sub">'+esc(c.Detail)+'</td></tr>'});
+box.innerHTML=html+'</table>'+(r.Failed?'<div class="why">차단 문제 '+r.Failed+'건을 먼저 해결해야 합니다.</div>':'<div class="why">차단 문제가 없습니다.</div>');
+var next=document.querySelector('#s-next2');if(next)next.disabled=r.Failed>0}catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}}
+function setupCaptureGoal(){setup.title=setupField('#s-title');setup.objective=setupField('#s-objective');
+if(!setup.title||!setup.objective){alert('목표 제목과 내용이 필요합니다');return}
+setup.step=4;renderSetup()}
+async function setupCreate(){var criteria=setup.criteria.filter(function(c){return c.type&&c.value});
+if(!criteria.length){alert('완료 조건이 최소 1개 필요합니다');return}
+try{var created=await api('/api/v1/projects',{method:'POST',body:JSON.stringify({name:setup.name,repository_path:setup.repo,provider:setup.provider,model:setup.model,worktrees:true,auto_commit:true})});
+setup.project=created.project;
+await api('/api/v1/projects/'+encodeURIComponent(setup.project.ID)+'/goal',{method:'POST',body:JSON.stringify({title:setup.title,objective:setup.objective,criteria:criteria.map(function(c){return{type:c.type,expected_value:c.value}})})});
+setup.step=5;renderSetup()}catch(e){alert(e.message)}}
+async function setupPolicy(){try{await api('/api/v1/projects/'+encodeURIComponent(setup.project.ID)+'/policy',{method:'POST',body:JSON.stringify({token_limit:parseInt(setupField('#s-tokens'),10)||0,cost_limit_usd:parseFloat(setupField('#s-cost'))||0,daily_run_limit:parseInt(setupField('#s-dailyruns'),10)||0,turn_timeout:setupField('#s-turn'),run_timeout:setupField('#s-run')})});
+location.hash='#/project/'+encodeURIComponent(setup.project.ID)}catch(e){alert(e.message)}}
 async function renderWork(projectID,workID){var status=document.querySelector('#status'),view=document.querySelector('#view');status.textContent='불러오는 중…';view.innerHTML='';
 var d=await api('/api/v1/projects/'+encodeURIComponent(projectID)+'/work/'+encodeURIComponent(workID));var w=d.item;
 status.className='sub';status.textContent='';
@@ -305,6 +360,7 @@ if(failed.length){var first=failed[0];return{ok:false,title:'검증 실패 — �
 return{ok:true,title:'검증 통과 — 필수 게이트 '+results.filter(function(v){return v.Required}).length+'개',detail:d.commit?'변경은 작업 브랜치에 커밋되었습니다. 기본 브랜치 반영은 승인이 필요합니다.':'변경이 커밋되지 않았습니다 (auto-commit 미설정).'}}
 async function route(){var status=document.querySelector('#status');if(timer){clearInterval(timer);timer=null}if(liveTimer){clearInterval(liveTimer);liveTimer=null}
 try{var h=location.hash;
+if(h==='#/new'){await renderSetup();return}
 var runMatch=h.match(/^#\/project\/([^\/]+)\/run\/(.+)$/);if(runMatch){await renderRun(decodeURIComponent(runMatch[1]),decodeURIComponent(runMatch[2]));return}
 var workMatch=h.match(/^#\/project\/([^\/]+)\/work\/(.+)$/);if(workMatch){await renderWork(decodeURIComponent(workMatch[1]),decodeURIComponent(workMatch[2]));return}
 var aprMatch=h.match(/^#\/project\/([^\/]+)\/approval\/(.+)$/);if(aprMatch){await renderApproval(decodeURIComponent(aprMatch[1]),decodeURIComponent(aprMatch[2]));return}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/goalforge/goalforge/internal/api"
 	"github.com/goalforge/goalforge/internal/app"
+	"github.com/goalforge/goalforge/internal/diagnostics"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/mcp"
 	"github.com/goalforge/goalforge/internal/model"
@@ -509,36 +510,11 @@ func runUntilQuota(ctx context.Context, s *store.Store, args []string) error {
 	return fmt.Errorf("maximum consecutive run limit reached: %d", *maxRuns)
 }
 
-// requiredProviderFlags are the CLI flags each adapter passes; a provider
-// binary whose help output lacks one would fail on every run, so doctor
-// verifies them up front.
-var requiredProviderFlags = map[string][]string{
-	"claude":   {"--output-format", "--resume", "--settings", "--permission-mode", "--json-schema", "--no-session-persistence"},
-	"codex":    {"--json", "--sandbox", "--output-schema"},
-	"qwen":     {"--output-format", "--resume", "--approval-mode", "--model"},
-	"opencode": {"run", "--format", "--session", "--agent", "--model"},
-}
+func providerBinary(providerName string) string { return diagnostics.Binary(providerName) }
 
-var supportedProviders = []string{"codex", "claude", "qwen", "opencode"}
+func isSupportedProvider(name string) bool { return diagnostics.IsSupported(name) }
 
-func providerBinary(providerName string) string {
-	overrides := map[string]string{"claude": "GOALFORGE_CLAUDE_BIN", "codex": "GOALFORGE_CODEX_BIN", "qwen": "GOALFORGE_QWEN_BIN", "opencode": "GOALFORGE_OPENCODE_BIN"}
-	if env, ok := overrides[providerName]; ok {
-		if bin := os.Getenv(env); bin != "" {
-			return bin
-		}
-	}
-	return providerName
-}
-
-func isSupportedProvider(name string) bool {
-	for _, candidate := range supportedProviders {
-		if candidate == name {
-			return true
-		}
-	}
-	return false
-}
+var supportedProviders = diagnostics.Supported
 
 // runDoctor diagnoses the failure modes that otherwise only surface mid-run:
 // missing tools, unauthenticated or incompatible provider CLIs, and an
@@ -549,77 +525,25 @@ func runDoctor(ctx context.Context, s *store.Store, args []string) error {
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	failed := 0
-	report := func(level, name, detail string) {
-		if level == "FAIL" {
-			failed++
-		}
-		fmt.Printf("%-4s %-16s %s\n", level, name, detail)
-	}
-	if output, err := exec.CommandContext(ctx, "git", "--version").Output(); err != nil {
-		report("FAIL", "git", "git is required but not found: "+err.Error())
-	} else {
-		report("OK", "git", strings.TrimSpace(string(output)))
-	}
-	report("OK", "database", "state store opened")
-	providers := supportedProviders
-	// Without a registered project every provider is optional: only the
-	// provider a project actually uses can block readiness.
-	missingLevel := "WARN"
+	options := diagnostics.Options{ProbeAuth: *probeAuth}
 	cwd, _ := os.Getwd()
 	project, projectErr := s.ProjectByPath(ctx, cwd)
-	if projectErr == nil {
-		report("OK", "project", fmt.Sprintf("%s provider=%s model=%s state=%s", project.Name, project.Provider, project.Model, project.State))
-		providers = []string{project.Provider}
-		missingLevel = "FAIL"
-	} else if errors.Is(projectErr, store.ErrNotFound) {
-		report("WARN", "project", "no project registered for this directory (goalforge project init)")
-	} else {
+	switch {
+	case projectErr == nil:
+		options.ProjectLevel, options.StrictCLI = diagnostics.LevelOK, true
+		options.Providers = []string{project.Provider}
+		options.ProjectNote = fmt.Sprintf("%s provider=%s model=%s state=%s", project.Name, project.Provider, project.Model, project.State)
+	case errors.Is(projectErr, store.ErrNotFound):
+		options.ProjectNote = "no project registered for this directory (goalforge project init)"
+	default:
 		return projectErr
 	}
-	for _, name := range providers {
-		binary := providerBinary(name)
-		resolved, err := exec.LookPath(binary)
-		if err != nil {
-			report(missingLevel, name+" cli", fmt.Sprintf("%s not found in PATH", binary))
-			continue
-		}
-		version := "version unknown"
-		if output, versionErr := exec.CommandContext(ctx, resolved, "--version").Output(); versionErr == nil {
-			version = strings.TrimSpace(strings.Split(string(output), "\n")[0])
-		}
-		report("OK", name+" cli", resolved+" ("+version+")")
-		if help, helpErr := exec.CommandContext(ctx, resolved, "--help").CombinedOutput(); helpErr == nil {
-			var missing []string
-			for _, flagName := range requiredProviderFlags[name] {
-				if !strings.Contains(string(help), flagName) {
-					missing = append(missing, flagName)
-				}
-			}
-			if len(missing) > 0 {
-				report("FAIL", name+" flags", "CLI does not support required flags: "+strings.Join(missing, ", "))
-			} else {
-				report("OK", name+" flags", "all adapter flags supported")
-			}
-		} else {
-			report("WARN", name+" flags", "could not read CLI help to verify flag support")
-		}
-		if *probeAuth && name == "claude" {
-			probe := exec.CommandContext(ctx, resolved, "-p", "--output-format", "json", "--model", "haiku")
-			probe.Stdin = strings.NewReader("reply with the single word ok")
-			output, probeErr := probe.CombinedOutput()
-			switch {
-			case strings.Contains(string(output), "\"is_error\":true") || strings.Contains(string(output), "401"):
-				report("FAIL", name+" auth", "authentication failed; run `claude /login` in a terminal")
-			case probeErr != nil:
-				report("FAIL", name+" auth", "probe failed: "+probeErr.Error())
-			default:
-				report("OK", name+" auth", "authenticated")
-			}
-		}
+	report := diagnostics.Run(ctx, options)
+	for _, check := range report.Checks {
+		fmt.Printf("%-4s %-16s %s\n", check.Level, check.Name, check.Detail)
 	}
-	if failed > 0 {
-		return fmt.Errorf("doctor found %d blocking problem(s)", failed)
+	if !report.Ready() {
+		return fmt.Errorf("doctor found %d blocking problem(s)", report.Failed)
 	}
 	fmt.Println("doctor: environment looks ready")
 	return nil
