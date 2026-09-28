@@ -17,7 +17,13 @@ rather than the source of truth.
 Writable mappings deliberately avoid each tool's broadest permission mode
 (`--yolo`, `--dangerously-skip-permissions`); verification gates run under
 GoalForge's own policy-checked engine either way. Run `goalforge doctor` to
-verify the installed CLI supports every flag the adapter passes.
+check the installed CLI against every flag the adapter passes. The check reads
+the CLI's own help, including the subcommand pages — codex documents `--json`
+and `--output-schema` only under `codex exec --help`, opencode `--format` only
+under `opencode run --help` — and a flag it cannot find there is reported as
+unverified rather than unsupported, because absence from the documentation is
+not absence from the CLI: qwen accepts `--approval-mode` and documents it on no
+page at all.
 
 ## 설치
 
