@@ -81,6 +81,7 @@ evaluate   eval add | eval list | eval spec | eval from-failure --run ID | --app
            eval run [--arm baseline] | eval record | eval compare
 operate    backup --out FILE | restore --from FILE --to PATH | effects [--reconcile]
            service systemd [--scope user|system] [--out FILE]
+           storage usage | storage prune --older-than 30d [--apply] [--vacuum]
            integrity verify
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
            checkpoint --next-action TEXT
@@ -191,6 +192,13 @@ func run(ctx context.Context, args []string) error {
 		}
 	case "tui":
 		return runTUI(ctx, s, args[1:])
+	case "storage":
+		if len(args) > 1 && args[1] == "usage" {
+			return storageUsage(ctx, s)
+		}
+		if len(args) > 1 && args[1] == "prune" {
+			return storagePrune(ctx, s, args[2:])
+		}
 	case "integrity":
 		if len(args) > 1 && args[1] == "verify" {
 			return integrityVerify(ctx, s, args[2:])
@@ -3787,4 +3795,120 @@ func serviceSystemd(ctx context.Context, s *store.Store, args []string) error {
 		fmt.Fprintln(os.Stderr, note)
 	}
 	return nil
+}
+
+// storageUsage says where the database's space went, so pruning is a decision
+// rather than a ritual.
+func storageUsage(ctx context.Context, s *store.Store) error {
+	breakdown, err := s.Storage(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("상태 데이터베이스: %s\n\n", humanBytes(breakdown.Total))
+	fmt.Printf("  %-22s %10s %12s\n", "표", "행", "본문")
+	for _, row := range breakdown.Rows {
+		body := "—"
+		if row.Bytes > 0 {
+			body = humanBytes(row.Bytes)
+		}
+		fmt.Printf("  %-22s %10d %12s\n", row.Table, row.Rows, body)
+	}
+	fmt.Println("\n본문이 큰 쪽이 실제로 자라는 부분입니다. goalforge storage prune --older-than 30d 로 확인하세요.")
+	return nil
+}
+
+// storagePrune drops the bulk of finished runs. It reports before it removes,
+// because audit data deleted on a typo does not come back.
+func storagePrune(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("storage prune", flag.ContinueOnError)
+	olderThan := f.String("older-than", "30d", "remove bodies from runs that ended before this long ago (30d, 12w, 720h)")
+	apply := f.Bool("apply", false, "actually remove; without it this only reports")
+	vacuum := f.Bool("vacuum", false, "return the freed space to the filesystem afterwards")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	window, err := dayDuration(*olderThan)
+	if err != nil {
+		return err
+	}
+	if window <= 0 {
+		return errors.New("--older-than must be positive")
+	}
+	report, err := s.Prune(ctx, time.Now().UTC().Add(-window), *apply)
+	if err != nil {
+		return err
+	}
+	verb := "제거 대상"
+	if report.Applied {
+		verb = "제거함"
+	}
+	fmt.Printf("%s 이전에 끝난 실행 (%s 기준)\n", report.Before.Local().Format("2006-01-02 15:04"), verb)
+	fmt.Printf("  제공자 이벤트 본문  %8d건  %s\n", report.EventBodies, humanBytes(report.EventBytes))
+	fmt.Printf("  프롬프트 본문       %8d건  %s\n", report.PromptBodies, humanBytes(report.PromptBytes))
+	fmt.Printf("  만료된 세션 기록    %8d건\n", report.SessionsDropped)
+	if report.Empty() {
+		fmt.Println("\n지울 것이 없습니다.")
+		return nil
+	}
+	// What survives matters more than what goes, because it decides whether
+	// the operator can still answer the questions they will be asked.
+	fmt.Println("\n남는 것: 이벤트와 프롬프트의 기록 자체(시각·종류·해시), 검증 증거, 승인, 무결성 사슬.")
+	fmt.Println("사라지는 것: 이벤트 원문과 프롬프트 본문. 무슨 일이 언제 있었는지는 답할 수 있고, 정확히 어떤 문장이었는지는 답할 수 없게 됩니다.")
+	if !report.Applied {
+		fmt.Printf("\n실제로 지우려면 --apply 를 붙이세요. 지운 감사 자료는 돌아오지 않습니다.\n")
+		return nil
+	}
+	fmt.Printf("\n데이터베이스: %s → %s\n", humanBytes(report.SizeBefore), humanBytes(report.SizeAfter))
+	if !*vacuum {
+		fmt.Println("빈 공간은 아직 파일 시스템에 반환되지 않았습니다. --vacuum 으로 되돌릴 수 있습니다 (데이터베이스 전체를 다시 씁니다).")
+		return nil
+	}
+	before, after, err := s.Vacuum(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("vacuum: %s → %s\n", humanBytes(before), humanBytes(after))
+	return nil
+}
+
+// humanBytes keeps sizes readable without implying precision the number does
+// not need.
+func humanBytes(count int64) string {
+	switch {
+	case count >= 1<<30:
+		return fmt.Sprintf("%.1f GiB", float64(count)/(1<<30))
+	case count >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(count)/(1<<20))
+	case count >= 1<<10:
+		return fmt.Sprintf("%.0f KiB", float64(count)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", count)
+	}
+}
+
+// dayDuration parses a retention window, accepting days and weeks.
+//
+// Go's own parser stops at hours, so "30d" — the unit anyone reaches for when
+// talking about how long to keep logs — is a parse error. Writing "720h" in
+// the documentation instead would be correct and would make every reader do
+// arithmetic to check it.
+func dayDuration(value string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0, errors.New("기간이 필요합니다 (예: 30d, 12w, 720h)")
+	}
+	for suffix, unit := range map[string]time.Duration{"d": 24 * time.Hour, "w": 7 * 24 * time.Hour} {
+		if number, found := strings.CutSuffix(trimmed, suffix); found {
+			count, err := strconv.ParseFloat(number, 64)
+			if err != nil {
+				return 0, fmt.Errorf("기간 %q 를 읽을 수 없습니다", value)
+			}
+			return time.Duration(count * float64(unit)), nil
+		}
+	}
+	parsed, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("기간 %q 를 읽을 수 없습니다 (예: 30d, 12w, 720h)", value)
+	}
+	return parsed, nil
 }
