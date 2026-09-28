@@ -15,6 +15,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/goalforge/goalforge/internal/scheduler"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
@@ -22,19 +23,25 @@ const protocolVersion = "2025-06-18"
 
 type Server struct {
 	store   *store.Store
+	queue   scheduler.Queue
 	version string
 	mu      sync.Mutex
 	out     io.Writer
 }
 
-func New(s *store.Store, version string) (*Server, error) {
+// New builds the MCP server. The queue is explicit for the same reason as the
+// API's: enqueueing somewhere the worker does not drain is worse than refusing.
+func New(s *store.Store, version string, queue scheduler.Queue) (*Server, error) {
 	if s == nil {
 		return nil, errors.New("store is required")
+	}
+	if queue == nil {
+		return nil, errors.New("job queue is required")
 	}
 	if version == "" {
 		version = "dev"
 	}
-	return &Server{store: s, version: version}, nil
+	return &Server{store: s, queue: queue, version: version}, nil
 }
 
 type request struct {

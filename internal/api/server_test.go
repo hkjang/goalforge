@@ -32,7 +32,7 @@ func apiFixture(t *testing.T, token string) (*Server, *store.Store) {
 	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-API", GoalID: goal.ID, Type: "IMPLEMENT", Title: "dashboard", ChangeScope: "internal/api/**"}); err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(db, token)
+	server, err := New(db, token, db)
 	if err != nil {
 		t.Fatal(err)
 	}

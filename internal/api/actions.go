@@ -37,7 +37,7 @@ func (s *Server) projectAction(w http.ResponseWriter, r *http.Request) {
 	}
 	switch action {
 	case "continue":
-		job, err := s.store.ScheduleRecurringJob(r.Context(), store.SchedulerJob{ProjectID: projectID, Type: "CONTINUE",
+		job, err := s.queue.ScheduleRecurringJob(r.Context(), store.SchedulerJob{ProjectID: projectID, Type: "CONTINUE",
 			RunAt: time.Now().UTC(), IdempotencyKey: "continue:" + projectID})
 		if err != nil {
 			writeError(w, http.StatusConflict, err.Error())

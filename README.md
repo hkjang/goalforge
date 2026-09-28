@@ -162,6 +162,34 @@ goalforge approval approve APR-ID
 GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
 ```
 
+### Sharing the job queue across machines
+
+By default the job queue lives in the same SQLite database as everything else,
+so `goalforge worker` only sees work enqueued on its own machine. Setting
+`GOALFORGE_POSTGRES_DSN` moves the queue and the project leases to a shared
+PostgreSQL server, which is what lets a worker on one machine pick up work a
+dashboard on another requested.
+
+```sh
+export GOALFORGE_POSTGRES_DSN='postgres://user:pass@host/goalforge?sslmode=require'
+goalforge storage postgres migrate     # once, to create the tables
+goalforge serve                        # enqueues into PostgreSQL
+goalforge worker                       # drains PostgreSQL
+```
+
+Every process in the deployment must see the same value. `worker`, `serve`,
+`mcp`, and `continue --enqueue` each resolve the queue once at startup and say
+which one they are using, because a deployment where the dashboard enqueues
+into one queue and the worker drains another has a button that reports success
+and never runs. For the same reason a DSN that is set but unreachable is a
+startup error rather than a quiet fall back to the local queue.
+
+PostgreSQL coordinates *who runs what*. Goals, work items, runs, and
+verification evidence remain in each machine's SQLite database — it is not yet
+the store of record for project state, so the shared queue is for a pool of
+workers against shared checkouts, not for splitting one project's history
+across machines.
+
 ### MCP server
 
 GoalForge management is exposed over the Model Context Protocol, so MCP

@@ -13,11 +13,13 @@ import (
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/provider"
+	"github.com/goalforge/goalforge/internal/scheduler"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
 type Server struct {
 	store *store.Store
+	queue scheduler.Queue
 	token string
 	mux   *http.ServeMux
 }
@@ -88,11 +90,18 @@ type JobView struct {
 	Attempts                    int
 }
 
-func New(s *store.Store, bearerToken string) (*Server, error) {
+// New builds the dashboard and JSON API. The queue is passed in rather than
+// taken from the store because the process that enqueues work and the worker
+// that drains it must agree on one queue: an enqueue that lands somewhere the
+// worker never reads is a button that silently does nothing.
+func New(s *store.Store, bearerToken string, queue scheduler.Queue) (*Server, error) {
 	if s == nil {
 		return nil, errors.New("store is required")
 	}
-	server := &Server{store: s, token: bearerToken, mux: http.NewServeMux()}
+	if queue == nil {
+		return nil, errors.New("job queue is required")
+	}
+	server := &Server{store: s, queue: queue, token: bearerToken, mux: http.NewServeMux()}
 	server.mux.HandleFunc("GET /healthz", server.health)
 	server.mux.HandleFunc("GET /metrics", server.metrics)
 	server.mux.HandleFunc("GET /api/v1/projects", server.projects)

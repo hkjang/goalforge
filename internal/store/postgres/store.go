@@ -73,6 +73,35 @@ func (s *Store) ScheduleJob(ctx context.Context, job store.SchedulerJob) (store.
 	return job, err
 }
 
+// ScheduleRecurringJob schedules a job like ScheduleJob but revives a prior
+// FAILED or COMPLETED job with the same idempotency key, so recurring intents
+// (CONTINUE) can be re-enqueued after they finish or fail. PENDING and RUNNING
+// jobs are left untouched, which is what stops a second request re-arming work
+// that is already on its way.
+func (s *Store) ScheduleRecurringJob(ctx context.Context, job store.SchedulerJob) (store.SchedulerJob, error) {
+	if job.ProjectID == "" || job.Type == "" || job.IdempotencyKey == "" || job.RunAt.IsZero() {
+		return job, errors.New("job project, type, idempotency key, and run time are required")
+	}
+	if job.ID == "" {
+		job.ID = store.NewID("JOB")
+	}
+	if job.Payload == "" {
+		job.Payload = "{}"
+	}
+	err := s.db.QueryRowContext(ctx, `INSERT INTO scheduler_jobs(id,project_id,job_type,run_at,idempotency_key,status,payload)
+VALUES($1,$2,$3,$4,$5,'PENDING',$6::jsonb)
+ON CONFLICT(idempotency_key) DO UPDATE SET
+ run_at=excluded.run_at,
+ payload=excluded.payload,
+ updated_at=now(),
+ status=CASE WHEN scheduler_jobs.status IN ('PENDING','RUNNING') THEN scheduler_jobs.status ELSE 'PENDING' END,
+ last_error=CASE WHEN scheduler_jobs.status IN ('PENDING','RUNNING') THEN scheduler_jobs.last_error ELSE '' END
+RETURNING id,project_id,job_type,run_at,idempotency_key,status,payload::text,attempts,owner,COALESCE(lease_until,'epoch'),last_error`,
+		job.ID, job.ProjectID, job.Type, job.RunAt.UTC(), job.IdempotencyKey, job.Payload).
+		Scan(&job.ID, &job.ProjectID, &job.Type, &job.RunAt, &job.IdempotencyKey, &job.Status, &job.Payload, &job.Attempts, &job.Owner, &job.LeaseUntil, &job.LastError)
+	return job, err
+}
+
 func (s *Store) ClaimDueJob(ctx context.Context, now time.Time, owner string, lease time.Duration) (store.SchedulerJob, error) {
 	var job store.SchedulerJob
 	if owner == "" || lease <= 0 {

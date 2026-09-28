@@ -340,6 +340,39 @@ func run(ctx context.Context, args []string) error {
 	return usage()
 }
 
+// coordination holds the job queue every process in this deployment shares and
+// the job store the worker drains. They are resolved together, once, because a
+// deployment where the dashboard enqueues into one queue and the worker drains
+// another has a button that silently does nothing.
+//
+// With GOALFORGE_POSTGRES_DSN set, both are the shared PostgreSQL server, which
+// is what makes a worker on one machine pick up work requested on another.
+// Without it, both are the local SQLite database. Project state itself stays in
+// SQLite either way: PostgreSQL coordinates *who runs what*, it is not yet the
+// store of record for goals, work items, or evidence.
+type coordination struct {
+	queue scheduler.Queue
+	jobs  scheduler.JobStore
+	close func() error
+	// Shared is true when the queue is reachable by other machines.
+	Shared bool
+}
+
+func openCoordination(ctx context.Context, s *store.Store) (coordination, error) {
+	dsn := strings.TrimSpace(os.Getenv("GOALFORGE_POSTGRES_DSN"))
+	if dsn == "" {
+		return coordination{queue: s, jobs: s, close: func() error { return nil }}, nil
+	}
+	pg, err := pgstore.Open(ctx, dsn)
+	if err != nil {
+		// Falling back to SQLite here would split the queue in the one
+		// configuration that exists to share it, and the symptom would be work
+		// that is requested and never runs. Refusing is the safer failure.
+		return coordination{}, fmt.Errorf("GOALFORGE_POSTGRES_DSN is set but the server could not be opened: %w", err)
+	}
+	return coordination{queue: pg, jobs: pg, close: pg.Close, Shared: true}, nil
+}
+
 func postgresMigrate(ctx context.Context, args []string) error {
 	f := flag.NewFlagSet("storage postgres migrate", flag.ContinueOnError)
 	dsn := f.String("dsn", os.Getenv("GOALFORGE_POSTGRES_DSN"), "PostgreSQL DSN (or GOALFORGE_POSTGRES_DSN)")
@@ -352,6 +385,12 @@ func postgresMigrate(ctx context.Context, args []string) error {
 	}
 	defer s.Close()
 	fmt.Println("PostgreSQL GoalForge scheduler schema is current")
+	// Say what the schema is for, and what it is not for. The tables coordinate
+	// which machine runs which job; goals, work items, and evidence stay in the
+	// local SQLite database.
+	fmt.Println("이 스키마는 작업 큐와 프로젝트 점유(lease)를 여러 기계가 공유하기 위한 것입니다.")
+	fmt.Println("GOALFORGE_POSTGRES_DSN 을 설정한 프로세스만 이 큐를 사용합니다 — worker, serve, mcp, continue --enqueue 모두 같은 값을 보도록 맞추세요.")
+	fmt.Println("목표·작업 항목·검증 증거는 여전히 각 기계의 SQLite 에 있습니다. PostgreSQL 은 '무엇을' 이 아니라 '누가 실행하는지'를 조율합니다.")
 	return nil
 }
 
@@ -375,9 +414,17 @@ func serveAPI(ctx context.Context, s *store.Store, args []string) error {
 	if !loopback && token == "" {
 		return errors.New("GOALFORGE_API_TOKEN is required for non-loopback listen addresses")
 	}
-	handler, err := api.New(s, token)
+	coord, err := openCoordination(ctx, s)
 	if err != nil {
 		return err
+	}
+	defer coord.close()
+	handler, err := api.New(s, token, coord.queue)
+	if err != nil {
+		return err
+	}
+	if coord.Shared {
+		fmt.Println("job queue: PostgreSQL (shared with workers on other machines)")
 	}
 	server := &http.Server{Addr: *addr, Handler: handler.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: time.Minute}
 	shutdownDone := make(chan struct{})
@@ -806,7 +853,12 @@ func mcpServe(ctx context.Context, s *store.Store, args []string) error {
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	server, err := mcp.New(s, "")
+	coord, err := openCoordination(ctx, s)
+	if err != nil {
+		return err
+	}
+	defer coord.close()
+	server, err := mcp.New(s, "", coord.queue)
 	if err != nil {
 		return err
 	}
@@ -869,10 +921,18 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	owner := fmt.Sprintf("goalforge-worker-%d", os.Getpid())
-	worker, err := scheduler.New(s, owner, *lease)
+	coord, err := openCoordination(ctx, s)
 	if err != nil {
 		return err
+	}
+	defer coord.close()
+	owner := fmt.Sprintf("goalforge-worker-%d", os.Getpid())
+	worker, err := scheduler.New(coord.jobs, owner, *lease)
+	if err != nil {
+		return err
+	}
+	if coord.Shared {
+		fmt.Println("job queue: PostgreSQL (shared with other machines)")
 	}
 	if err = worker.Handle("RESUME", runner.ResumeHandler(orchestrator.ResumeConfig{Owner: owner + "-project", LeaseDuration: *lease, Policy: usagepolicy.DefaultPolicy(), Inspector: gitops.GitInspector{}})); err != nil {
 		return err
@@ -2734,11 +2794,20 @@ func continueGoal(ctx context.Context, s *store.Store, args []string, developSel
 		return err
 	}
 	if *enqueue {
-		job, jobErr := s.ScheduleRecurringJob(ctx, store.SchedulerJob{ProjectID: p.ID, Type: "CONTINUE", RunAt: time.Now().UTC(), IdempotencyKey: "continue:" + p.ID})
+		coord, coordErr := openCoordination(ctx, s)
+		if coordErr != nil {
+			return coordErr
+		}
+		defer coord.close()
+		job, jobErr := coord.queue.ScheduleRecurringJob(ctx, store.SchedulerJob{ProjectID: p.ID, Type: "CONTINUE", RunAt: time.Now().UTC(), IdempotencyKey: "continue:" + p.ID})
 		if jobErr != nil {
 			return jobErr
 		}
-		fmt.Printf("continue job scheduled: %s (run `goalforge worker` to process it)\n", job.ID)
+		where := "run `goalforge worker` to process it"
+		if coord.Shared {
+			where = "queued in PostgreSQL; any worker on this deployment can process it"
+		}
+		fmt.Printf("continue job scheduled: %s (%s)\n", job.ID, where)
 		return nil
 	}
 	service, cleanup, err := runtimeService(ctx, s, p)
