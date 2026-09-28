@@ -111,7 +111,11 @@ func (o *Orchestrator) Run(ctx context.Context, request Request) (Result, error)
 		return result, gateErr
 	}
 	configVersion := store.ConfigFingerprint(p.Name(), request.Project.Model, request.Project.WIPLimit, store.DefaultRepairPolicy(), gates)
-	if err := o.store.StartRun(ctx, store.RunRecord{ID: request.RunID, ProjectID: request.Project.ID, WorkItemID: request.WorkItemID, Provider: p.Name(), Model: request.Project.Model, TaskType: request.TaskType, ConfigVersion: configVersion}); err != nil {
+	// Where the run begins is recorded before it begins. A run that only
+	// records what it produced cannot be re-run, and a failed run produces
+	// nothing at all — which is exactly the run worth re-running.
+	baseCommit, _ := gitops.HeadCommit(ctx, request.Project.RepositoryPath, "HEAD")
+	if err := o.store.StartRun(ctx, store.RunRecord{ID: request.RunID, ProjectID: request.Project.ID, WorkItemID: request.WorkItemID, Provider: p.Name(), Model: request.Project.Model, TaskType: request.TaskType, ConfigVersion: configVersion, BaseCommit: baseCommit}); err != nil {
 		return result, err
 	}
 	if err := o.store.RecordPrompt(ctx, request.RunID, request.PromptTemplate, request.Prompt); err != nil {

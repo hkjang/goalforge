@@ -161,6 +161,8 @@ goalforge eval record --case EVAL-1 --label "haiku+v2" --run RUN-1
 goalforge eval spec --case EVAL-1 --fixture ./fixture --ref COMMIT --criterion build_passed=true
                     --work "작업 제목" --gate-type build_passed --gate-command-json '["go","test","./..."]'
                     [--token-budget N] [--cost-budget-usd N] [--timeout-seconds N]
+goalforge eval from-failure --run RUN-1                          # turn a real failure into a case
+goalforge eval from-failure --approval APR-1                     # turn a rejection into a case
 goalforge eval run --case EVAL-1 --label "haiku+v2" --repeat 3   # clean environment per repetition
 goalforge eval run --case EVAL-1 --label "haiku+v2" --repeat 3 --arm baseline  # same model, no GoalForge
 goalforge eval compare [--case EVAL-1]     # pass rate, stability, cost per success, and the baseline delta
@@ -340,6 +342,16 @@ what was achieved and how it was proven without reconstructing it from commits.
 
 Improving the automation needs a fixed yardstick, so a prompt, model, or
 policy change can be told apart from the work that happened to come up.
+`goalforge eval from-failure` closes the improvement loop. Until a real
+failure becomes a repeatable case, "we fixed the prompt" is a claim about a run
+that can never be run again: the repository has moved on and the only record is
+a log. The case pins the commit the failed run *started* from — not the current
+state, where the fix may already be present — together with the goal's
+criteria, the gates that were in force, and the work item that failed, and it
+records what kind of failure it was so a suite says where a configuration is
+weak rather than only that it is. A rejected approval makes a case too, and a
+more valuable one: the gates passed and a person still said no.
+
 "GoalForge completes N% of tasks" is not a claim about GoalForge unless
 something else was measured the same way. `--arm baseline` runs the same case
 with the same model, tools, workspace, and budget, given the task directly —

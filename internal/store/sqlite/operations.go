@@ -273,7 +273,12 @@ func (s *Store) PromptForRun(ctx context.Context, runID string) (PromptView, err
 }
 
 func (s *Store) VerificationsForRun(ctx context.Context, runID string) ([]VerificationRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT check_type,status,actual_value,command,exit_code,duration_ms,required,output FROM verification_results WHERE run_id=? ORDER BY id`, runID)
+	// The failure classification travels with the result. Without it a caller
+	// can see that a gate failed but not what kind of failure it was, which is
+	// the difference between "the build broke" and "the environment is wrong"
+	// — and between an evaluation case that says something and one that says
+	// a run went badly.
+	rows, err := s.db.QueryContext(ctx, `SELECT check_type,status,actual_value,command,exit_code,duration_ms,required,output,COALESCE(failure_kind,''),COALESCE(repair_mode,''),COALESCE(evidence_kind,'') FROM verification_results WHERE run_id=? ORDER BY id`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +287,7 @@ func (s *Store) VerificationsForRun(ctx context.Context, runID string) ([]Verifi
 	for rows.Next() {
 		var record VerificationRecord
 		var durationMS int64
-		if err = rows.Scan(&record.CheckType, &record.Status, &record.ActualValue, &record.Command, &record.ExitCode, &durationMS, &record.Required, &record.Output); err != nil {
+		if err = rows.Scan(&record.CheckType, &record.Status, &record.ActualValue, &record.Command, &record.ExitCode, &durationMS, &record.Required, &record.Output, &record.FailureKind, &record.RepairMode, &record.EvidenceKind); err != nil {
 			return nil, err
 		}
 		record.RunID = runID
