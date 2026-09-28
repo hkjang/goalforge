@@ -43,7 +43,8 @@ func (e ServiceExecutor) Execute(ctx context.Context, env evaluation.Environment
 	}
 	criteria := make([]model.Criterion, 0, len(spec.Criteria))
 	for _, criterion := range spec.Criteria {
-		criteria = append(criteria, model.Criterion{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue})
+		criteria = append(criteria, model.Criterion{Type: criterion.Type, ExpectedValue: criterion.ExpectedValue,
+			RequiredKind: criterion.RequiredKind})
 	}
 	if len(criteria) == 0 {
 		return outcome, errors.New("evaluation case needs completion criteria; without them nothing can judge the trial")
@@ -60,12 +61,10 @@ func (e ServiceExecutor) Execute(ctx context.Context, env evaluation.Environment
 		}
 	}
 	for _, gate := range spec.Gates {
-		timeout := time.Duration(gate.Timeout) * time.Second
-		if timeout <= 0 {
-			timeout = 10 * time.Minute
-		}
+		timeout := gateTimeout(gate)
 		if err = db.UpsertGate(ctx, registered.ID, store.GateConfig{Type: gate.Type, Command: gate.Command,
-			Timeout: timeout, Required: gate.Required, SuccessValue: gate.SuccessValue, ValuePattern: gate.ValuePattern}); err != nil {
+			Timeout: timeout, Required: gate.Required, SuccessValue: gate.SuccessValue,
+			ValuePattern: gate.ValuePattern, Kind: gate.Kind}); err != nil {
 			return outcome, err
 		}
 	}
@@ -140,4 +139,14 @@ func (e ServiceExecutor) finish(ctx context.Context, db *store.Store, projectID 
 		}
 	}
 	return outcome, nil
+}
+
+
+// gateTimeout is shared by both arms so the baseline is never given a
+// different amount of time to pass the same check.
+func gateTimeout(gate evaluation.Gate) time.Duration {
+	if gate.Timeout > 0 {
+		return time.Duration(gate.Timeout) * time.Second
+	}
+	return 10 * time.Minute
 }

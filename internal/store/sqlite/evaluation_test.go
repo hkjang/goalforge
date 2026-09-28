@@ -212,7 +212,7 @@ func TestCaseSpecRoundTrip(t *testing.T) {
 		t.Fatalf("limits lost: %+v", loaded)
 	}
 	// The condition hash is what keeps results from different setups apart.
-	if evaluation.ConditionHash(loaded, "baseline") != evaluation.ConditionHash(spec, "baseline") {
+	if evaluation.ConditionHash(loaded) != evaluation.ConditionHash(spec) {
 		t.Fatal("a round-tripped spec must hash to the same condition")
 	}
 	if _, err = s.CaseSpec(ctx, p.ID, "EVAL-GHOST"); !errors.Is(err, ErrNotFound) {

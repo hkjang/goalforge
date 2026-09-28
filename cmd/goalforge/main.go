@@ -74,7 +74,7 @@ review     status | usage | sessions | logs | report [--since 24h] | models | ev
 ship       approval request | approval list | approval approve ID | approval reject ID
            merge --work-item ID | publish --work-item ID | rollback | worktree gc
 handoff    takeover --work-item ID | takeover return --work-item ID
-evaluate   eval add | eval list | eval record | eval compare
+evaluate   eval add | eval list | eval spec | eval run [--arm baseline] | eval record | eval compare
 operate    backup --out FILE | restore --from FILE --to PATH | effects [--reconcile]
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
            checkpoint --next-action TEXT
@@ -1527,10 +1527,11 @@ func evalSpec(ctx context.Context, s *store.Store, args []string) error {
 	caseID := f.String("case", "", "evaluation case ID")
 	fixture := f.String("fixture", "", "repository the task starts from")
 	ref := f.String("ref", "", "commit or branch pinning the fixture")
-	criteria := f.String("criterion", "", "comma-separated type=value completion criteria")
+	criteria := f.String("criterion", "", "comma-separated type=value completion criteria, or type@kind=value to demand a kind of proof")
 	gateType := f.String("gate-type", "", "criterion the gate measures")
 	gateCommand := f.String("gate-command-json", "", "JSON command array for the gate")
 	gateValue := f.String("gate-success-value", "true", "value the gate must reach")
+	gateKind := f.String("gate-kind", "", "what the gate establishes: "+strings.Join(policy.KnownGateKinds(), ", "))
 	seedTitle := f.String("work", "", "seed the trial's backlog with this work item (repeatable via comma separation)")
 	seedScope := f.String("work-scope", "", "declared change scope for the seeded work")
 	tokens := f.Int64("token-budget", 0, "token ceiling for one trial")
@@ -1557,11 +1558,15 @@ func evalSpec(ctx context.Context, s *store.Store, args []string) error {
 	spec.Fixture, spec.Ref = absolute, *ref
 	spec.TokenBudget, spec.CostBudgetUSD, spec.TimeoutSeconds = *tokens, *cost, *timeout
 	for _, pair := range splitList(*criteria) {
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("criterion %q must be type=value", pair)
+		// The same syntax the product uses, so a case can demand that a
+		// feature be exercised rather than merely compiled — and so both arms
+		// of a comparison are judged by that demand.
+		criterion, parseErr := model.ParseCriterion(pair)
+		if parseErr != nil {
+			return parseErr
 		}
-		spec.Criteria = append(spec.Criteria, evaluation.Criterion{Type: parts[0], ExpectedValue: parts[1]})
+		spec.Criteria = append(spec.Criteria, evaluation.Criterion{Type: criterion.Type,
+			ExpectedValue: criterion.ExpectedValue, RequiredKind: criterion.RequiredKind})
 	}
 	for _, title := range splitList(*seedTitle) {
 		spec.SeedWork = append(spec.SeedWork, evaluation.SeedWorkItem{Title: title, ChangeScope: *seedScope, Priority: 50})
@@ -1574,7 +1579,11 @@ func evalSpec(ctx context.Context, s *store.Store, args []string) error {
 		if err = policy.ValidateCommand(command); err != nil {
 			return fmt.Errorf("gate command rejected: %w", err)
 		}
-		spec.Gates = append(spec.Gates, evaluation.Gate{Type: *gateType, Command: command, Required: true, SuccessValue: *gateValue})
+		if err = policy.ValidGateKind(*gateKind); err != nil {
+			return err
+		}
+		spec.Gates = append(spec.Gates, evaluation.Gate{Type: *gateType, Command: command, Required: true,
+			SuccessValue: *gateValue, Kind: *gateKind})
 	}
 	// The clean state is recorded from the fixture as it stands now, so a
 	// later trial starting from anything else is detectable.
@@ -1612,11 +1621,15 @@ func evalRun(ctx context.Context, s *store.Store, args []string) error {
 	caseID := f.String("case", "", "evaluation case ID")
 	label := f.String("label", "", "configuration label being measured")
 	repeat := f.Int("repeat", 1, "repetitions, run in separate clean environments")
+	arm := f.String("arm", evaluation.ArmGoalForge, "goalforge, or baseline for the same model and tools given the same task without GoalForge")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	if *caseID == "" || *label == "" {
 		return errors.New("--case and --label are required")
+	}
+	if *arm != evaluation.ArmGoalForge && *arm != evaluation.ArmBaseline {
+		return fmt.Errorf("--arm must be %s or %s", evaluation.ArmGoalForge, evaluation.ArmBaseline)
 	}
 	p, err := currentProject(ctx, s)
 	if err != nil {
@@ -1629,12 +1642,33 @@ func evalRun(ctx context.Context, s *store.Store, args []string) error {
 	if spec.Fixture == "" {
 		return fmt.Errorf("case %s has no fixture; pin one with `goalforge eval spec --case %s --fixture DIR`", *caseID, *caseID)
 	}
-	runner := evaluation.Runner{Executor: app.ServiceExecutor{
+	runner := evaluation.Runner{Arm: *arm, Executor: app.ServiceExecutor{
 		Provider: p.Provider, Model: p.Model,
 		NewSession: func(ctx context.Context, env evaluation.Environment, project model.Project) (evaluation.Session, error) {
 			return newTrialSession(ctx, env, project)
 		},
 	}}
+	if *arm == evaluation.ArmBaseline {
+		// The baseline runs the same provider and model the project is
+		// configured with. Anything else would make the comparison a
+		// comparison of models.
+		providers, cleanup, providerErr := workerProviders(ctx)
+		if providerErr != nil {
+			return providerErr
+		}
+		defer cleanup()
+		var chosen provider.Provider
+		for _, candidate := range providers {
+			if candidate.Name() == p.Provider {
+				chosen = candidate
+				break
+			}
+		}
+		if chosen == nil {
+			return fmt.Errorf("no adapter for provider %q", p.Provider)
+		}
+		runner.Executor = app.BaselineExecutor{Provider: chosen, Model: p.Model}
+	}
 	trials, err := runner.Run(ctx, spec, *label, *repeat)
 	for _, trial := range trials {
 		if recordErr := s.RecordTrial(ctx, trial); recordErr != nil {
@@ -1669,16 +1703,22 @@ func evalCompare(ctx context.Context, s *store.Store, args []string) error {
 	}
 	if len(trials) > 0 {
 		fmt.Println("re-executed trials (clean environment per repetition)")
-		fmt.Printf("  %-20s %6s %8s %9s %12s %14s %10s\n", "label", "trials", "pass", "stability", "cost/success", "interventions", "avg sec")
+		fmt.Printf("  %-12s %-20s %6s %8s %9s %12s %14s %10s\n", "arm", "label", "trials", "pass", "stability", "cost/success", "interventions", "avg sec")
 		for _, summary := range trials {
-			fmt.Printf("  %-20s %6d %7.0f%% %8.0f%% %12.4f %14.1f %10.0f\n",
-				summary.Label, summary.Trials, summary.PassRate, summary.StableCases,
+			fmt.Printf("  %-12s %-20s %6d %7.0f%% %8.0f%% %12.4f %14.1f %10.0f\n",
+				summary.Arm, summary.Label, summary.Trials, summary.PassRate, summary.StableCases,
 				summary.CostPerSuccessUSD, summary.AverageInterventions, summary.AverageSeconds)
 			if summary.Invalid > 0 || summary.Errored > 0 {
-				fmt.Printf("  %-20s   측정 불가 %d건, 오류 %d건 (성공률 분모에서 제외)\n", "", summary.Invalid, summary.Errored)
+				fmt.Printf("  %-33s 측정 불가 %d건, 오류 %d건 (성공률 분모에서 제외)\n", "", summary.Invalid, summary.Errored)
+			}
+			if summary.MixedConditions {
+				fmt.Printf("  %-33s 조건이 섞여 있어 이 평균은 해석할 수 없습니다\n", "")
 			}
 		}
 		fmt.Println()
+		if err = printArmComparison(ctx, s, p.ID, *caseID); err != nil {
+			return err
+		}
 	}
 	attached, err := s.CompareEvaluations(ctx, p.ID, *caseID)
 	if err != nil {
@@ -3388,4 +3428,49 @@ func (t *trialSession) Close() {
 	if t.db != nil {
 		t.db.Close()
 	}
+}
+
+// printArmComparison reports GoalForge against the baseline, or says plainly
+// that there is no baseline. A suite that only measures GoalForge cannot
+// support a statement about GoalForge being better than not using it, and
+// leaving that unsaid is how such statements get made.
+func printArmComparison(ctx context.Context, s *store.Store, projectID, caseID string) error {
+	comparisons, err := s.CompareArms(ctx, projectID, caseID)
+	if err != nil {
+		return err
+	}
+	if len(comparisons) == 0 {
+		return nil
+	}
+	fmt.Println("GoalForge vs 기준선 (같은 모델·도구·예산으로 GoalForge 없이)")
+	for _, comparison := range comparisons {
+		fmt.Printf("  조건 %s\n", comparison.ConditionHash)
+		if !comparison.Comparable {
+			fmt.Printf("    비교 불가 — %s\n", comparison.Reason)
+			continue
+		}
+		fmt.Printf("    %-12s 성공률 %5.0f%%  시행 %d  성공당 비용 $%.4f  개입 %.1f\n",
+			"goalforge", comparison.GoalForge.PassRate, comparison.GoalForge.Trials,
+			comparison.GoalForge.CostPerSuccessUSD, comparison.GoalForge.AverageInterventions)
+		fmt.Printf("    %-12s 성공률 %5.0f%%  시행 %d  성공당 비용 $%.4f  개입 %.1f\n",
+			"baseline", comparison.Baseline.PassRate, comparison.Baseline.Trials,
+			comparison.Baseline.CostPerSuccessUSD, comparison.Baseline.AverageInterventions)
+		fmt.Printf("    차이         성공률 %+.0f%%p", comparison.PassRateDelta)
+		if comparison.CostPerSuccessRatio > 0 {
+			fmt.Printf("  성공당 비용 %.2fx", comparison.CostPerSuccessRatio)
+		}
+		fmt.Println()
+		// Say how thin the evidence is. A difference from three trials is a
+		// hint, not a result, and a number printed without its sample size is
+		// read as though it had one.
+		smallest := comparison.GoalForge.Trials
+		if comparison.Baseline.Trials < smallest {
+			smallest = comparison.Baseline.Trials
+		}
+		if smallest < 10 {
+			fmt.Printf("    시행이 팔당 %d건뿐입니다 — 방향을 시사할 뿐 수치로 인용할 수 없습니다\n", smallest)
+		}
+	}
+	fmt.Println()
+	return nil
 }
