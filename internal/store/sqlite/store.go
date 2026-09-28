@@ -372,6 +372,12 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "design_decisions", "scope", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// The state a run started from. Without it a run cannot be reproduced: the
+	// only commit recorded was the one the run produced, which a failed run
+	// never has, so "reproduce" could describe a run but never re-run it.
+	if err := s.ensureColumn(ctx, "runs", "base_commit", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "verification_results", "evidence_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -833,6 +839,10 @@ func criterionMet(expected, actual string) bool {
 type RunRecord struct {
 	ID, ProjectID, WorkItemID, Provider, Model, State string
 	TaskType                                          string
+	// BaseCommit is the commit the workspace was on when the run started. It
+	// is what makes the run reproducible; the commit a run *produces* is a
+	// different thing and a failed run does not have one.
+	BaseCommit string
 	// ConfigVersion identifies the configuration this run executed under, so
 	// a later change in success rate or cost can be attributed rather than
 	// guessed at.
@@ -898,7 +908,7 @@ func (s *Store) StartRun(ctx context.Context, run RunRecord) error {
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project is not runnable")
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,config_version,started_at) VALUES(?,?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, run.ConfigVersion, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,config_version,base_commit,started_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, run.ConfigVersion, run.BaseCommit, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	return tx.Commit()

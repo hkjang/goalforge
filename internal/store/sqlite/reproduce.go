@@ -14,15 +14,19 @@ import (
 type ReproductionPackage struct {
 	RunID, ProjectID, WorkItemID string
 	Repository, Worktree, Branch string
-	BaseCommit                   string
-	Provider, Model, TaskType    string
-	State                        string
-	StartedAt, EndedAt           time.Time
-	Prompt                       PromptView
-	Gates                        []GateConfig
-	Results                      []VerificationRecord
-	FileChanges                  []string
-	Repair                       RepairPlan
+	// BaseCommit is where the run started and ResultCommit is what it
+	// produced. They were once one field holding the second, which made
+	// "reproduce" a description rather than something that could be re-run —
+	// and left a failed run, the kind worth re-running, with nothing at all.
+	BaseCommit, ResultCommit  string
+	Provider, Model, TaskType string
+	State                     string
+	StartedAt, EndedAt        time.Time
+	Prompt                    PromptView
+	Gates                     []GateConfig
+	Results                   []VerificationRecord
+	FileChanges               []string
+	Repair                    RepairPlan
 }
 
 // BuildReproductionPackage assembles the package for a run.
@@ -34,15 +38,15 @@ func (s *Store) BuildReproductionPackage(ctx context.Context, projectID, runID s
 	}
 	pkg.Repository = project.RepositoryPath
 	var started, ended string
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(work_item_id,''),provider,COALESCE(model,''),COALESCE(task_type,''),state,started_at,COALESCE(ended_at,'') FROM runs WHERE id=? AND project_id=?`, runID, projectID).
-		Scan(&pkg.WorkItemID, &pkg.Provider, &pkg.Model, &pkg.TaskType, &pkg.State, &started, &ended)
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(work_item_id,''),provider,COALESCE(model,''),COALESCE(task_type,''),state,COALESCE(base_commit,''),started_at,COALESCE(ended_at,'') FROM runs WHERE id=? AND project_id=?`, runID, projectID).
+		Scan(&pkg.WorkItemID, &pkg.Provider, &pkg.Model, &pkg.TaskType, &pkg.State, &pkg.BaseCommit, &started, &ended)
 	if err != nil {
 		return pkg, ErrNotFound
 	}
 	pkg.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	pkg.EndedAt, _ = time.Parse(time.RFC3339Nano, ended)
 	if commit, commitErr := s.RunCommitByRun(ctx, runID); commitErr == nil {
-		pkg.BaseCommit, pkg.Branch = commit.CommitSHA, commit.Branch
+		pkg.ResultCommit, pkg.Branch = commit.CommitSHA, commit.Branch
 	} else if !errors.Is(commitErr, ErrNotFound) {
 		return pkg, commitErr
 	}

@@ -76,7 +76,8 @@ review     tui | status | usage | sessions | logs | report [--since 24h] | model
 ship       approval request | approval list | approval approve ID | approval reject ID
            merge --work-item ID | publish --work-item ID | rollback | worktree gc
 handoff    takeover --work-item ID | takeover return --work-item ID
-evaluate   eval add | eval list | eval spec | eval run [--arm baseline] | eval record | eval compare
+evaluate   eval add | eval list | eval spec | eval from-failure --run ID | --approval ID
+           eval run [--arm baseline] | eval record | eval compare
 operate    backup --out FILE | restore --from FILE --to PATH | effects [--reconcile]
            integrity verify
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
@@ -278,6 +279,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "run" {
 			return evalRun(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "from-failure" {
+			return evalFromFailure(ctx, s, args[2:])
 		}
 	case "takeover":
 		if len(args) > 1 && args[1] == "return" {
@@ -3586,4 +3590,100 @@ func standingMark(standing string) string {
 	default:
 		return "[?]"
 	}
+}
+
+// evalFromFailure turns something that actually went wrong into a case the
+// next configuration can be measured against.
+//
+// Without it the improvement loop never closes: "we fixed the prompt" is a
+// claim about a run that can never be run again, because the repository has
+// moved and the only record is a log. Pinning the failure to the commit it
+// started from turns it into a question with an answer.
+func evalFromFailure(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("eval from-failure", flag.ContinueOnError)
+	runID := f.String("run", "", "run that failed")
+	approvalID := f.String("approval", "", "approval a person rejected")
+	name := f.String("name", "", "case name (default: derived from the work item)")
+	kind := f.String("kind", "bug_fix", "bug_fix, feature, refactor, or docs")
+	even := f.Bool("even-if-it-passed", false, "build a case from a run that succeeded, as a regression guard")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if (*runID == "") == (*approvalID == "") {
+		return errors.New("--run 또는 --approval 중 하나가 필요합니다")
+	}
+	p, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	var failure store.FailureCase
+	if *runID != "" {
+		failure, err = s.BuildCaseFromRun(ctx, p.ID, *runID, *even)
+		if errors.Is(err, store.ErrRunSucceeded) {
+			return fmt.Errorf("실행 %s 은(는) 실패하지 않았습니다. 회귀 방지용으로 만들려면 --even-if-it-passed 를 쓰세요", *runID)
+		}
+	} else {
+		failure, err = s.BuildCaseFromApproval(ctx, p.ID, *approvalID)
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return errors.New("이 프로젝트에서 해당 실행이나 승인을 찾을 수 없습니다")
+	}
+	if err != nil {
+		return err
+	}
+	caseName := *name
+	if caseName == "" {
+		caseName = derivedCaseName(failure)
+	}
+	notes := failure.Expectation
+	if failure.RejectionCategory != "" {
+		notes = "반려 사유 분류: " + failure.RejectionCategory + "\n" + notes
+	}
+	if failure.FailureKind != "" {
+		notes = "실패 유형: " + failure.FailureKind + "\n" + notes
+	}
+	created, err := s.AddEvaluationCase(ctx, store.EvaluationCase{ProjectID: p.ID, Name: caseName, Kind: *kind,
+		Repository: failure.Case.Fixture, GoalTitle: failure.Case.GoalTitle,
+		GoalObjective: failure.Case.GoalObjective, Notes: notes})
+	if err != nil {
+		return err
+	}
+	if err = s.SaveCaseSpec(ctx, created.ID, failure.Case); err != nil {
+		return err
+	}
+	fmt.Printf("evaluation case created from %s: %s (%s)\n", failure.Origin, created.ID, caseName)
+	fmt.Printf("  고정: %s @ %s\n", failure.Case.Fixture, shortSHA(failure.Case.Ref))
+	fmt.Printf("  완료 조건 %d개, 게이트 %d개, 초기 작업 %d개\n",
+		len(failure.Case.Criteria), len(failure.Case.Gates), len(failure.Case.SeedWork))
+	if failure.FailureKind != "" {
+		fmt.Printf("  실패 유형: %s\n", failure.FailureKind)
+	}
+	if failure.RejectionCategory != "" {
+		fmt.Printf("  반려 사유 분류: %s\n", failure.RejectionCategory)
+	}
+	fmt.Printf("  %s\n", failure.Expectation)
+	fmt.Printf("\n지금 돌려서 현재 구성이 이 실패를 재현하는지 확인하세요:\n")
+	fmt.Printf("  goalforge eval run --case %s --label <현재 구성> --repeat 3\n", created.ID)
+	fmt.Printf("  goalforge eval run --case %s --label <현재 구성> --repeat 3 --arm baseline\n", created.ID)
+	return nil
+}
+
+// derivedCaseName names the case after what failed, so a suite reads as a list
+// of problems rather than a list of identifiers.
+func derivedCaseName(failure store.FailureCase) string {
+	base := "실패"
+	if len(failure.Case.SeedWork) > 0 && failure.Case.SeedWork[0].Title != "" {
+		base = failure.Case.SeedWork[0].Title
+	} else if failure.Case.GoalTitle != "" {
+		base = failure.Case.GoalTitle
+	}
+	switch {
+	case failure.RejectionCategory != "":
+		base += " (반려: " + failure.RejectionCategory + ")"
+	case failure.FailureKind != "":
+		base += " (" + failure.FailureKind + ")"
+	}
+	// Case names are unique per project, so a second case from the same work
+	// item needs to be distinguishable rather than rejected.
+	return fmt.Sprintf("%s %s", base, time.Now().Format("01-02 15:04"))
 }
