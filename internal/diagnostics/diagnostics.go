@@ -61,6 +61,27 @@ var RequiredFlags = map[string][]string{
 	"opencode": {"run", "--format", "--session", "--agent", "--model"},
 }
 
+// helpPages are the help screens to search for each provider, in order. These
+// CLIs are subcommand-based and document a subcommand's flags only on that
+// subcommand's page: codex's --json and --output-schema live behind
+// `codex exec --help`, opencode's --format behind `opencode run --help`.
+// Reading only the top-level page reported working installations as broken.
+var helpPages = map[string][][]string{
+	"claude":   {{"--help"}},
+	"codex":    {{"--help"}, {"exec", "--help"}},
+	"qwen":     {{"--help"}},
+	"opencode": {{"--help"}, {"run", "--help"}},
+}
+
+// helpPagesFor returns the pages to search, defaulting to the top-level help
+// for a provider that has not named any.
+func helpPagesFor(name string) [][]string {
+	if pages, ok := helpPages[name]; ok {
+		return pages
+	}
+	return [][]string{{"--help"}}
+}
+
 var Supported = []string{"codex", "claude", "qwen", "opencode"}
 
 func IsSupported(name string) bool {
@@ -125,22 +146,7 @@ func checkProvider(ctx context.Context, report *Report, name, missingLevel strin
 		version = strings.TrimSpace(strings.Split(string(output), "\n")[0])
 	}
 	report.add(LevelOK, name+" cli", resolved+" ("+version+")")
-	help, helpErr := exec.CommandContext(ctx, resolved, "--help").CombinedOutput()
-	if helpErr != nil {
-		report.add(LevelWarn, name+" flags", "could not read CLI help to verify flag support")
-	} else {
-		var missing []string
-		for _, flagName := range RequiredFlags[name] {
-			if !strings.Contains(string(help), flagName) {
-				missing = append(missing, flagName)
-			}
-		}
-		if len(missing) > 0 {
-			report.add(LevelFail, name+" flags", "CLI does not support required flags: "+strings.Join(missing, ", "))
-		} else {
-			report.add(LevelOK, name+" flags", "all adapter flags supported")
-		}
-	}
+	checkFlags(ctx, report, name, resolved)
 	if !probeAuth || name != "claude" {
 		return
 	}
@@ -155,4 +161,51 @@ func checkProvider(ctx context.Context, report *Report, name, missingLevel strin
 	default:
 		report.add(LevelOK, name+" auth", "authenticated")
 	}
+}
+
+// checkFlags verifies the flags an adapter passes against the CLI's own help,
+// reading every page the adapter's commands live on.
+//
+// Absence from the help text is deliberately not treated as proof of absence.
+// qwen accepts --approval-mode (plan, default, auto-edit, auto, yolo) and
+// documents it on no page at all; calling that "unsupported" told users with a
+// working install that three of four providers were unusable. A flag that
+// cannot be found is reported as unverified, naming the pages that were read,
+// so the finding says what is actually known.
+func checkFlags(ctx context.Context, report *Report, name, resolved string) {
+	pages := helpPagesFor(name)
+	var text strings.Builder
+	var read []string
+	for _, page := range pages {
+		output, err := exec.CommandContext(ctx, resolved, page...).CombinedOutput()
+		if err != nil && len(output) == 0 {
+			continue
+		}
+		text.Write(output)
+		text.WriteString("\n")
+		read = append(read, describeHelpPage(name, page))
+	}
+	if len(read) == 0 {
+		report.add(LevelWarn, name+" flags", "could not read CLI help to verify flag support")
+		return
+	}
+	var missing []string
+	for _, flagName := range RequiredFlags[name] {
+		if !strings.Contains(text.String(), flagName) {
+			missing = append(missing, flagName)
+		}
+	}
+	if len(missing) == 0 {
+		report.add(LevelOK, name+" flags", "all adapter flags supported")
+		return
+	}
+	report.add(LevelWarn, name+" flags", fmt.Sprintf(
+		"도움말에서 확인하지 못한 플래그: %s (읽은 도움말: %s). 도움말에 없지만 동작하는 플래그도 있으므로 차단하지 않습니다 — 실행이 이 플래그로 실패하면 CLI 버전을 확인하세요",
+		strings.Join(missing, ", "), strings.Join(read, ", ")))
+}
+
+// describeHelpPage names a help page the way the user would run it, so the
+// finding can be reproduced by hand.
+func describeHelpPage(name string, page []string) string {
+	return strings.TrimSpace(name + " " + strings.Join(page, " "))
 }
