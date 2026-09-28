@@ -1,10 +1,14 @@
 package policy
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/goalforge/goalforge/internal/testscript"
 )
 
 func TestSandboxNoneLeavesTheCommandAlone(t *testing.T) {
@@ -122,4 +126,45 @@ func TestExplicitContainerUserIsHonoured(t *testing.T) {
 	if !strings.Contains(strings.Join(wrapped, " "), "--user 1000:1000") {
 		t.Fatalf("wrapped=%v", wrapped)
 	}
+}
+
+// A sandbox that cannot enforce what it promises must refuse rather than run
+// a weaker thing under the same name. Docker in Windows-container mode rejects
+// --read-only and supports neither capability dropping nor no-new-privileges.
+func TestSandboxRefusesAnEngineThatCannotConfine(t *testing.T) {
+	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23"}
+	// A fake docker that reports a Windows-container daemon.
+	dir := t.TempDir()
+	fake := writeFakeDocker(t, dir, "windows")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_ = fake
+	err := policy.CheckEngine(context.Background())
+	if !errors.Is(err, ErrSandboxUnsupportedEngine) {
+		t.Fatalf("a non-Linux engine must be refused: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sandbox --mode none") {
+		t.Fatalf("the refusal must say what to do instead: %v", err)
+	}
+}
+
+// A Linux daemon is what the flags were written for, so it is allowed.
+func TestSandboxAcceptsALinuxEngine(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeDocker(t, dir, "linux")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := (SandboxPolicy{Mode: SandboxDocker, Image: "x"}).CheckEngine(context.Background()); err != nil {
+		t.Fatalf("a Linux engine is exactly what this supports: %v", err)
+	}
+}
+
+// Sandboxing turned off asks nothing of the engine.
+func TestNoSandboxAsksNothingOfTheEngine(t *testing.T) {
+	if err := (SandboxPolicy{Mode: SandboxNone}).CheckEngine(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeDocker(t *testing.T, dir, engineOS string) string {
+	t.Helper()
+	return testscript.Write(t, dir, "docker", "echo "+engineOS, "echo "+engineOS)
 }

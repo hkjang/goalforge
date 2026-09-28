@@ -64,6 +64,12 @@ type Engine struct {
 }
 
 // WithSandbox returns an engine that runs gates under the given policy.
+// CheckSandbox reports whether the configured sandbox can be enforced by the
+// container engine present here. It is separate from Wrap so the answer
+// arrives before a run starts, not as a gate failure that reads like the
+// project is broken.
+func (e *Engine) CheckSandbox(ctx context.Context) error { return e.sandbox.CheckEngine(ctx) }
+
 func (e *Engine) WithSandbox(sandbox policy.SandboxPolicy) *Engine {
 	copied := *e
 	copied.sandbox = sandbox
