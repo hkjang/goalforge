@@ -3012,6 +3012,13 @@ func runtimeService(ctx context.Context, s *store.Store, p model.Project) (*app.
 		cleanup()
 		return nil, func() {}, err
 	}
+	// Refused here rather than at the first gate: "docker rejected an option"
+	// reads like the project is broken, when it means the sandbox the project
+	// asked for cannot be enforced by the engine that is installed.
+	if err = sandbox.CheckEngine(ctx); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
 	service, err := app.New(s, planning, runner, verifier.WithSandbox(sandbox), nil)
 	if err != nil {
 		cleanup()

@@ -21,6 +21,14 @@ func requireDocker(t *testing.T) {
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skip("docker is not usable in this environment")
 	}
+	// These tests are about Linux container confinement — a read-only root,
+	// dropped capabilities, no new privileges. A Windows-container daemon
+	// supports none of them and the product refuses to pretend otherwise, so
+	// there is nothing here to assert rather than something failing.
+	engineOS, err := policy.EngineOS(context.Background())
+	if err == nil && engineOS != "" && engineOS != "linux" {
+		t.Skipf("docker is in %s container mode; the sandbox requires Linux containers", engineOS)
+	}
 }
 
 func sandboxEngine(t *testing.T, sandbox policy.SandboxPolicy) *Engine {

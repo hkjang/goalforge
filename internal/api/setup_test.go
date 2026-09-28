@@ -61,15 +61,17 @@ func TestSetupFlowCreatesProjectGoalAndPolicy(t *testing.T) {
 	defer db.Close()
 	repo := gitRepo(t)
 	if response := mutate(t, server, http.MethodPost, "/api/v1/projects",
-		`{"name":"wizard","repository_path":"`+repo+`","provider":"nope"}`); response.Code != http.StatusBadRequest {
+		jsonBody(t, map[string]any{"name": "wizard", "repository_path": repo, "provider": "nope"})); response.Code != http.StatusBadRequest {
 		t.Fatalf("unsupported provider status=%d", response.Code)
 	}
 	if response := mutate(t, server, http.MethodPost, "/api/v1/projects",
-		`{"name":"wizard","repository_path":"`+filepath.Join(repo, "missing")+`","provider":"claude"}`); response.Code != http.StatusBadRequest {
+		jsonBody(t, map[string]any{"name": "wizard", "repository_path": filepath.Join(repo, "missing"),
+			"provider": "claude"})); response.Code != http.StatusBadRequest {
 		t.Fatalf("non-repository status=%d", response.Code)
 	}
 	response := mutate(t, server, http.MethodPost, "/api/v1/projects",
-		`{"name":"wizard","repository_path":"`+repo+`","provider":"claude","model":"haiku","worktrees":true,"auto_commit":true}`)
+		jsonBody(t, map[string]any{"name": "wizard", "repository_path": repo, "provider": "claude",
+			"model": "haiku", "worktrees": true, "auto_commit": true}))
 	if response.Code != http.StatusOK {
 		t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
 	}

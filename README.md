@@ -38,8 +38,16 @@ tar -xzf goalforge_vX.Y.Z_linux_amd64.tar.gz
 ./goalforge doctor
 ```
 
-같은 릴리즈의 `SHA256SUMS` 로 내려받은 파일을 검증할 수 있습니다:
-`sha256sum -c SHA256SUMS --ignore-missing`.
+같은 릴리즈의 `SHA256SUMS` 로 내려받은 파일이 올라온 것과 같은지 확인할 수 있고,
+그 파일이 **이 저장소의 이 커밋에서 빌드되었는지**는 출처 증명으로 확인합니다:
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify goalforge_vX.Y.Z_linux_amd64.tar.gz --repo hkjang/goalforge
+```
+
+체크섬은 받은 파일이 올라온 파일과 같다는 것까지만 말합니다. 올라온 파일이
+어디서 왔는지는 말하지 않습니다 — 그것이 출처 증명이 답하는 질문입니다.
 
 소스에서 빌드하려면 `go build ./cmd/goalforge`, 릴리즈 산출물을 직접 만들려면
 `scripts/build-release.sh vX.Y.Z` 입니다. 후자는 linux/darwin/windows 의

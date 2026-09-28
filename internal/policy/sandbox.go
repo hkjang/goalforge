@@ -42,11 +42,21 @@ type SandboxPolicy struct {
 // containerUser keeps the identity inside the container the same as outside,
 // so the mounted workspace is writable without handing back the capability
 // that lets root ignore file permissions.
+//
+// It returns an empty string where the host has no POSIX identity to copy.
+// On Windows and Plan 9 os.Getuid reports -1, and this used to hand docker
+// "--user -1:-1", which it refuses — the flag exists to make a bind mount
+// writable under Linux's file ownership, and Docker Desktop's file sharing
+// does not work that way, so there is nothing to translate.
 func (p SandboxPolicy) containerUser() string {
-	if strings.TrimSpace(p.User) != "" {
-		return p.User
+	if trimmed := strings.TrimSpace(p.User); trimmed != "" {
+		return trimmed
 	}
-	return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid < 0 || gid < 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d", uid, gid)
 }
 
 func DefaultSandboxPolicy() SandboxPolicy {
@@ -86,15 +96,17 @@ func (p SandboxPolicy) Wrap(workspace string, command []string) ([]string, error
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"docker", "run", "--rm", "--init",
-		"--workdir", "/workspace",
-		"--user", p.containerUser(),
+	args := []string{"docker", "run", "--rm", "--init", "--workdir", "/workspace"}
+	if user := p.containerUser(); user != "" {
+		args = append(args, "--user", user)
+	}
+	args = append(args,
 		// The workspace is writable so a gate can build; the container root is
 		// not, so an escalation inside it cannot become a change to the host.
-		"--volume", absolute + ":/workspace:rw",
+		"--volume", absolute+":/workspace:rw",
 		"--read-only", "--tmpfs", "/tmp:rw,exec,size=512m",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-	}
+	)
 	if !p.Network {
 		args = append(args, "--network", "none")
 	}

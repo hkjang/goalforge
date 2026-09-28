@@ -1,0 +1,115 @@
+# GoalForge's thesis is that work is not done until a gate proves it. This is
+# that rule applied to GoalForge: every change runs the checks before it is
+# merged, on every platform the release ships a binary for.
+#
+# Until this existed, "the tests pass" meant "they passed on one machine, on
+# Linux, the last time someone remembered to run them" — and the Windows code
+# paths in the test helpers had never executed anywhere.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded push has nothing left to prove; cancelling it keeps the queue
+  # honest about what is actually being checked.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Linux is where this runs, so Linux is the gate on every change: fast
+    # feedback on the platform that matters.
+    #
+    # The other platforms are tested when a release is cut rather than on every
+    # pull request. Shipping a Windows binary is a claim about Windows, so it
+    # cannot go untested — but paying ten minutes per pull request for a
+    # platform nobody deploys to buys a slower loop and little else.
+    name: test (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Pinned to the module's own requirement so CI cannot pass on a
+          # toolchain the project does not claim to support.
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: go vet ./...
+
+      - name: test
+        run: go test ./... -count=1
+        env:
+          # Colour codes in captured output make failures harder to read.
+          NO_COLOR: "1"
+
+  lint:
+    name: formatting and tidiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal)"
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go.mod is tidy
+        run: |
+          # A go.mod that drifts from the imports makes a build depend on
+          # whatever happened to be in someone's module cache.
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "go.mod/go.sum are not tidy; run 'go mod tidy'"
+            git --no-pager diff go.mod go.sum
+            exit 1
+          fi
+
+  release-build:
+    name: release artifacts build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The build script reads the commit and its date for the version
+          # stamp, so it needs more than a shallow clone.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: cross-compile every released platform
+        # A release that only fails to build when someone cuts a tag is a
+        # release that fails at the worst moment.
+        run: bash scripts/build-release.sh v0.0.0-ci
+
+      - name: the built binary runs and identifies itself
+        run: |
+          mkdir -p /tmp/artifact
+          tar -xzf dist/v0.0.0-ci/goalforge_v0.0.0-ci_linux_amd64.tar.gz -C /tmp/artifact
+          /tmp/artifact/goalforge version
+          # A checksum file nobody verifies is decoration.
+          cd dist/v0.0.0-ci && sha256sum -c SHA256SUMS

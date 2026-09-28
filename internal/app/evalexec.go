@@ -141,7 +141,6 @@ func (e ServiceExecutor) finish(ctx context.Context, db *store.Store, projectID 
 	return outcome, nil
 }
 
-
 // gateTimeout is shared by both arms so the baseline is never given a
 // different amount of time to pass the same check.
 func gateTimeout(gate evaluation.Gate) time.Duration {

@@ -1,8 +1,14 @@
 package policy
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/goalforge/goalforge/internal/testscript"
 )
 
 func TestSandboxNoneLeavesTheCommandAlone(t *testing.T) {
@@ -31,7 +37,12 @@ func TestSandboxRefusesIncompleteConfiguration(t *testing.T) {
 // network, no privileges to gain, and ceilings on what it can consume.
 func TestSandboxDockerConfinesTheCommand(t *testing.T) {
 	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23", MemoryMB: 1024, CPUs: 1.5, Processes: 64}
-	wrapped, err := policy.Wrap("/tmp/work", []string{"go", "test", "./..."})
+	// The workspace is a real directory on this platform, because Wrap makes
+	// it absolute and "/tmp/work" is not absolute on Windows — asserting a
+	// POSIX path here made the test a statement about the host rather than
+	// about the policy.
+	workspace := t.TempDir()
+	wrapped, err := policy.Wrap(workspace, []string{"go", "test", "./..."})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,8 +50,7 @@ func TestSandboxDockerConfinesTheCommand(t *testing.T) {
 	for _, expected := range []string{
 		"docker run --rm --init",
 		"--workdir /workspace",
-		"--user ",
-		"--volume /tmp/work:/workspace:rw",
+		"--volume " + workspace + ":/workspace:rw",
 		"--read-only",
 		"--cap-drop ALL",
 		"--security-opt no-new-privileges",
@@ -78,4 +88,83 @@ func TestSandboxNetworkIsOptIn(t *testing.T) {
 	if strings.Contains(strings.Join(on, " "), "--network none") {
 		t.Error("network must be allowed when a project asks for it")
 	}
+}
+
+// The identity flag exists to make a bind mount writable under Linux file
+// ownership. Where the host has no POSIX identity to copy — Windows reports
+// -1 — the flag must be left out rather than passed as "-1:-1", which docker
+// refuses, taking the whole sandbox down with it.
+func TestContainerUserIsOmittedWithoutAPosixIdentity(t *testing.T) {
+	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23"}
+	wrapped, err := policy.Wrap(t.TempDir(), []string{"go", "build", "./..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(wrapped, " ")
+	if strings.Contains(joined, "-1") {
+		t.Fatalf("a host with no POSIX identity must not produce a --user value: %q", joined)
+	}
+	if os.Getuid() >= 0 {
+		// On a POSIX host the identity is still copied, or the mounted
+		// workspace stops being writable by the user who owns it.
+		if !strings.Contains(joined, fmt.Sprintf("--user %d:%d", os.Getuid(), os.Getgid())) {
+			t.Fatalf("the host identity must be carried into the container: %q", joined)
+		}
+	} else if strings.Contains(joined, "--user") {
+		t.Fatalf("no identity to carry, so no --user: %q", joined)
+	}
+}
+
+// An explicitly configured user is honoured on every platform, which is the
+// escape hatch for an image that needs a particular account.
+func TestExplicitContainerUserIsHonoured(t *testing.T) {
+	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23", User: "1000:1000"}
+	wrapped, err := policy.Wrap(t.TempDir(), []string{"go", "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(wrapped, " "), "--user 1000:1000") {
+		t.Fatalf("wrapped=%v", wrapped)
+	}
+}
+
+// A sandbox that cannot enforce what it promises must refuse rather than run
+// a weaker thing under the same name. Docker in Windows-container mode rejects
+// --read-only and supports neither capability dropping nor no-new-privileges.
+func TestSandboxRefusesAnEngineThatCannotConfine(t *testing.T) {
+	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23"}
+	// A fake docker that reports a Windows-container daemon.
+	dir := t.TempDir()
+	fake := writeFakeDocker(t, dir, "windows")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_ = fake
+	err := policy.CheckEngine(context.Background())
+	if !errors.Is(err, ErrSandboxUnsupportedEngine) {
+		t.Fatalf("a non-Linux engine must be refused: %v", err)
+	}
+	if !strings.Contains(err.Error(), "sandbox --mode none") {
+		t.Fatalf("the refusal must say what to do instead: %v", err)
+	}
+}
+
+// A Linux daemon is what the flags were written for, so it is allowed.
+func TestSandboxAcceptsALinuxEngine(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeDocker(t, dir, "linux")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := (SandboxPolicy{Mode: SandboxDocker, Image: "x"}).CheckEngine(context.Background()); err != nil {
+		t.Fatalf("a Linux engine is exactly what this supports: %v", err)
+	}
+}
+
+// Sandboxing turned off asks nothing of the engine.
+func TestNoSandboxAsksNothingOfTheEngine(t *testing.T) {
+	if err := (SandboxPolicy{Mode: SandboxNone}).CheckEngine(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeFakeDocker(t *testing.T, dir, engineOS string) string {
+	t.Helper()
+	return testscript.Write(t, dir, "docker", "echo "+engineOS, "echo "+engineOS)
 }
