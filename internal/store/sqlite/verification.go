@@ -60,7 +60,8 @@ func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord)
 		return err
 	}
 	if err = appendChain(ctx, tx, ChainEvidence, fmt.Sprint(id),
-		evidenceDigest(goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, r.EvidenceKind, now, required), now); err != nil {
+		evidenceDigest(goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, r.EvidenceKind, now,
+			audit.RedactString(r.Output), required), now); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -225,13 +225,13 @@ func TestKeyedChainSurvivesARecomputedLedger(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE verification_results SET status='PASSED',actual_value='true'`); err != nil {
 		t.Fatal(err)
 	}
-	var goalID, runID, checkType, status, actualValue, evidenceKind, createdAt string
+	var goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, output string
 	var required int
-	if err := s.db.QueryRowContext(ctx, `SELECT goal_id,COALESCE(run_id,''),check_type,status,actual_value,COALESCE(evidence_kind,''),created_at,required FROM verification_results`).
-		Scan(&goalID, &runID, &checkType, &status, &actualValue, &evidenceKind, &createdAt, &required); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT goal_id,COALESCE(run_id,''),check_type,status,actual_value,COALESCE(evidence_kind,''),created_at,required,COALESCE(output,'') FROM verification_results`).
+		Scan(&goalID, &runID, &checkType, &status, &actualValue, &evidenceKind, &createdAt, &required, &output); err != nil {
 		t.Fatal(err)
 	}
-	forged := evidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, required)
+	forged := evidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, output, required)
 	// Relink using the unkeyed digest, which is the best they can do.
 	t.Setenv("GOALFORGE_AUDIT_KEY", "")
 	var seq int64
@@ -249,5 +249,65 @@ func TestKeyedChainSurvivesARecomputedLedger(t *testing.T) {
 	report = mustVerify(t, ctx, s)
 	if !hasFinding(report, IntegrityChainBroken) {
 		t.Fatalf("a ledger relinked without the key must not verify: %+v", report.Findings)
+	}
+}
+
+// The output is the text a person reads when deciding whether to trust a
+// result: which test failed, what the compiler said, which line. It was not
+// covered, so a failure's reason could be rewritten while the check answered
+// that the records were exactly as GoalForge wrote them.
+func TestRewritingAGateOutputIsDetected(t *testing.T) {
+	ctx, s, goal := integrityFixture(t)
+	if err := s.RecordVerification(ctx, goal.ID, "build_passed", "FAILED", "false",
+		"undefined: criticalFunction — 핵심 기능이 구현되지 않음"); err != nil {
+		t.Fatal(err)
+	}
+	if !mustVerify(t, ctx, s).Intact() {
+		t.Fatal("precondition: the history starts clean")
+	}
+	// Status and value untouched; only the reason is rewritten.
+	if _, err := s.db.ExecContext(ctx, `UPDATE verification_results SET output='사소한 경고'`); err != nil {
+		t.Fatal(err)
+	}
+	report := mustVerify(t, ctx, s)
+	if !hasFinding(report, IntegrityRecordEdited) {
+		t.Fatalf("rewriting why a gate failed must be detected: %+v", report.Findings)
+	}
+}
+
+// Evidence recorded before the output was covered still verifies — reporting
+// every one of those as edited would be crying wolf over a change GoalForge
+// made to itself — but the report says how many are in that state rather than
+// folding them into "intact".
+func TestEvidencePredatingOutputCoverageIsCountedNotFlagged(t *testing.T) {
+	ctx, s, goal := integrityFixture(t)
+	if err := s.RecordVerification(ctx, goal.ID, "build_passed", "PASSED", "true", "ok"); err != nil {
+		t.Fatal(err)
+	}
+	// Rewrite the chain entry to the digest as it was computed before the
+	// output was covered, which is what an older install holds.
+	var goalID, runID, checkType, status, actualValue, evidenceKind, createdAt string
+	var required int
+	if err := s.db.QueryRowContext(ctx, `SELECT goal_id,COALESCE(run_id,''),check_type,status,actual_value,COALESCE(evidence_kind,''),created_at,required FROM verification_results`).
+		Scan(&goalID, &runID, &checkType, &status, &actualValue, &evidenceKind, &createdAt, &required); err != nil {
+		t.Fatal(err)
+	}
+	legacy := legacyEvidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, required)
+	var seq int64
+	var kind, recordID, prevDigest, recordedAt string
+	if err := s.db.QueryRowContext(ctx, `SELECT seq,kind,record_id,prev_digest,recorded_at FROM audit_chain ORDER BY seq LIMIT 1`).
+		Scan(&seq, &kind, &recordID, &prevDigest, &recordedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE audit_chain SET payload_digest=?,digest=? WHERE seq=?`,
+		legacy, unkeyedLinkForTest(prevDigest, legacy, kind, recordID, recordedAt), seq); err != nil {
+		t.Fatal(err)
+	}
+	report := mustVerify(t, ctx, s)
+	if !report.Intact() {
+		t.Fatalf("an older record must not be reported as tampered with: %+v", report.Findings)
+	}
+	if report.UnprotectedOutputs != 1 {
+		t.Fatalf("the operator must be told those outputs are unprotected: %d", report.UnprotectedOutputs)
 	}
 }

@@ -816,7 +816,7 @@ func (s *Store) RecordVerification(ctx context.Context, goalID, checkType, statu
 		return err
 	}
 	if err = appendChain(ctx, tx, ChainEvidence, fmt.Sprint(id),
-		evidenceDigest(goalID, "", checkType, status, actual, "", now, 1), now); err != nil {
+		evidenceDigest(goalID, "", checkType, status, actual, "", now, audit.RedactString(output), 1), now); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -43,6 +43,11 @@ type IntegrityReport struct {
 	// detects edits but can be recomputed by whoever made them; reporting the
 	// difference is the difference between a true statement and a boast.
 	Keyed bool
+	// UnprotectedOutputs counts evidence recorded before gate output was
+	// covered by the chain. Those rows verify, and their outputs could still
+	// be rewritten without detection, so the number is reported rather than
+	// folded into "intact".
+	UnprotectedOutputs int64
 }
 
 // Intact reports whether nothing was found.
@@ -78,9 +83,28 @@ func (s *Store) appendChainDB(ctx context.Context, kind, recordID, payloadDigest
 }
 
 // evidenceDigest covers the fields that decide what a verification result
-// says. Output is included because a result's output is the evidence a person
-// reads when deciding whether to trust it.
-func evidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt string, required int) string {
+// says — including its output.
+//
+// The output is the text a person reads when deciding whether to trust the
+// result: which test failed, what the compiler said, which line. Leaving it
+// out meant a failure's reason could be rewritten while `integrity verify`
+// answered that the records were exactly as GoalForge wrote them. The comment
+// here claimed the output was covered before the code did; the claim was the
+// correct one.
+func evidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, output string, required int) string {
+	return audit.PayloadDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt,
+		fmt.Sprint(required), output)
+}
+
+// legacyEvidenceDigest is the digest as it was computed before the output was
+// covered.
+//
+// Records written then cannot match the new form, and reporting every one of
+// them as edited would be crying wolf over a change GoalForge made to itself.
+// A legacy match is accepted and counted, so the operator is told plainly that
+// those rows' outputs are not protected rather than being told nothing or
+// being told they were tampered with.
+func legacyEvidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt string, required int) string {
 	return audit.PayloadDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, fmt.Sprint(required))
 }
 
@@ -129,10 +153,11 @@ func (s *Store) VerifyIntegrity(ctx context.Context) (IntegrityReport, error) {
 	if err = rows.Err(); err != nil {
 		return report, err
 	}
-	evidenceFindings, err := s.verifyEvidenceRecords(ctx, chained[ChainEvidence])
+	evidenceFindings, legacyOutputs, err := s.verifyEvidenceRecords(ctx, chained[ChainEvidence])
 	if err != nil {
 		return report, err
 	}
+	report.UnprotectedOutputs = legacyOutputs
 	report.Findings = append(report.Findings, evidenceFindings...)
 	approvalFindings, err := s.verifyApprovalRecords(ctx, chained[ChainApproval])
 	if err != nil {
@@ -142,20 +167,21 @@ func (s *Store) VerifyIntegrity(ctx context.Context) (IntegrityReport, error) {
 	return report, nil
 }
 
-func (s *Store) verifyEvidenceRecords(ctx context.Context, chained map[string]string) ([]IntegrityFinding, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(run_id,''),check_type,status,actual_value,COALESCE(evidence_kind,''),created_at,required FROM verification_results ORDER BY id`)
+func (s *Store) verifyEvidenceRecords(ctx context.Context, chained map[string]string) ([]IntegrityFinding, int64, error) {
+	var legacy int64
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(run_id,''),check_type,status,actual_value,COALESCE(evidence_kind,''),created_at,required,COALESCE(output,'') FROM verification_results ORDER BY id`)
 	if err != nil {
-		return nil, err
+		return nil, legacy, err
 	}
 	defer rows.Close()
 	var findings []IntegrityFinding
 	seen := map[string]bool{}
 	for rows.Next() {
 		var id int64
-		var goalID, runID, checkType, status, actualValue, evidenceKind, createdAt string
+		var goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, output string
 		var required int
-		if err = rows.Scan(&id, &goalID, &runID, &checkType, &status, &actualValue, &evidenceKind, &createdAt, &required); err != nil {
-			return nil, err
+		if err = rows.Scan(&id, &goalID, &runID, &checkType, &status, &actualValue, &evidenceKind, &createdAt, &required, &output); err != nil {
+			return nil, legacy, err
 		}
 		recordID := fmt.Sprint(id)
 		seen[recordID] = true
@@ -166,14 +192,21 @@ func (s *Store) verifyEvidenceRecords(ctx context.Context, chained map[string]st
 				Detail:   fmt.Sprintf("%s=%s 증거가 GoalForge 를 거치지 않고 기록되었습니다", checkType, status)})
 			continue
 		}
-		if recorded != evidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, required) {
+		switch recorded {
+		case evidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, output, required):
+			// Fully covered, output included.
+		case legacyEvidenceDigest(goalID, runID, checkType, status, actualValue, evidenceKind, createdAt, required):
+			// Written before the output was covered. The row is untouched, but
+			// its output is not protected and saying so is the honest report.
+			legacy++
+		default:
 			findings = append(findings, IntegrityFinding{Kind: IntegrityRecordEdited, RecordKind: ChainEvidence,
 				RecordID: recordID,
 				Detail:   fmt.Sprintf("%s 증거가 기록된 뒤 수정되었습니다 (현재 %s=%s)", checkType, checkType, status)})
 		}
 	}
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, legacy, err
 	}
 	for recordID := range chained {
 		if !seen[recordID] {
@@ -181,7 +214,7 @@ func (s *Store) verifyEvidenceRecords(ctx context.Context, chained map[string]st
 				RecordID: recordID, Detail: "기록된 증거가 삭제되었습니다"})
 		}
 	}
-	return findings, nil
+	return findings, legacy, nil
 }
 
 func (s *Store) verifyApprovalRecords(ctx context.Context, chained map[string]string) ([]IntegrityFinding, error) {
