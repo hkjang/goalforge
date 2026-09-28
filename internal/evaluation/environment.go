@@ -40,7 +40,10 @@ type CaseSpec struct {
 	TimeoutSeconds int
 }
 
-type Criterion struct{ Type, ExpectedValue string }
+// Criterion is one completion condition. RequiredKind names the kind of check
+// that can settle it, so a case can demand that a feature be exercised rather
+// than merely compiled — and so both arms of a comparison are judged by it.
+type Criterion struct{ Type, ExpectedValue, RequiredKind string }
 
 // SeedWorkItem is one pre-decomposed task a trial begins with.
 type SeedWorkItem struct {
@@ -56,6 +59,10 @@ type Gate struct {
 	SuccessValue string
 	ValuePattern string
 	Timeout      int
+	// Kind is what this gate establishes (build, test, journey, ...). It is
+	// part of the pinned case because it decides which criteria the gate can
+	// settle, and therefore what "passed" means for every trial.
+	Kind string
 }
 
 // Environment is one prepared, disposable workspace for a single trial.

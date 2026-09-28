@@ -38,6 +38,11 @@ type Gate struct {
 }
 type Result struct {
 	Type, Status, Output string
+	// Value is the measurement the gate produced — the extracted number for a
+	// gate with a value pattern, its boolean meaning otherwise. Check used to
+	// compute it and throw it away, which left callers unable to say what a
+	// gate actually measured.
+	Value string
 	// FailureKind, RepairMode, and FailureSummary explain a failure instead of
 	// leaving the caller to read the output and guess.
 	FailureKind, RepairMode, FailureSummary string
@@ -85,7 +90,7 @@ func (e *Engine) Check(ctx context.Context, repositoryPath string, gates []Gate)
 	passed := true
 	for _, gate := range gates {
 		result, err := e.runGate(ctx, repositoryPath, gate)
-		measure(gate, &result)
+		result.Value = measure(gate, &result)
 		if result.Status != "PASSED" {
 			failure := policy.ClassifyGateFailure(result.Status, result.Output)
 			result.FailureKind, result.RepairMode, result.FailureSummary = string(failure.Kind), string(failure.Mode), failure.Summary
@@ -128,6 +133,7 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 	for _, gate := range gates {
 		result, err := e.runGate(ctx, project.RepositoryPath, gate)
 		actual := measure(gate, &result)
+		result.Value = actual
 		record := store.VerificationRecord{RunID: runID, CheckType: gate.Type, Status: result.Status, ActualValue: actual,
 			Command: strings.Join(gate.Command, " "), Output: result.Output, ExitCode: result.ExitCode,
 			Duration: result.Duration, Required: gate.Required, TreeID: treeID, EvidenceKind: gate.Kind,

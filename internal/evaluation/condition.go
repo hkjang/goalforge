@@ -7,23 +7,29 @@ import (
 	"sort"
 )
 
-// ConditionHash identifies what a trial was run under, so results are only
-// ever compared against results produced the same way. A comparison across
-// different budgets, gates, or fixtures is not a comparison.
-func ConditionHash(spec CaseSpec, label string) string {
+// ConditionHash identifies the conditions a trial was run under, so results
+// are only ever compared against results produced the same way. A comparison
+// across different budgets, gates, or fixtures is not a comparison.
+//
+// It covers everything that must be *held equal* and deliberately excludes the
+// label and the arm, which are the independent variables. Including them —
+// as this once did with the label — gave every label a different hash, so the
+// hash could never certify that two groups were comparable, which is the only
+// thing it exists to do.
+func ConditionHash(spec CaseSpec) string {
 	gates := append([]Gate(nil), spec.Gates...)
 	sort.Slice(gates, func(i, j int) bool { return gates[i].Type < gates[j].Type })
 	criteria := append([]Criterion(nil), spec.Criteria...)
 	sort.Slice(criteria, func(i, j int) bool { return criteria[i].Type < criteria[j].Type })
 	payload := struct {
-		Label, Fixture, Ref, CleanTreeID string
-		Criteria                         []Criterion
-		Gates                            []Gate
-		SeedWork                         []SeedWorkItem
-		TokenBudget                      int64
-		CostBudgetUSD                    float64
-		TimeoutSeconds                   int
-	}{label, spec.Fixture, spec.Ref, spec.CleanTreeID, criteria, gates, spec.SeedWork, spec.TokenBudget, spec.CostBudgetUSD, spec.TimeoutSeconds}
+		Fixture, Ref, CleanTreeID string
+		Criteria                  []Criterion
+		Gates                     []Gate
+		SeedWork                  []SeedWorkItem
+		TokenBudget               int64
+		CostBudgetUSD             float64
+		TimeoutSeconds            int
+	}{spec.Fixture, spec.Ref, spec.CleanTreeID, criteria, gates, spec.SeedWork, spec.TokenBudget, spec.CostBudgetUSD, spec.TimeoutSeconds}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return ""

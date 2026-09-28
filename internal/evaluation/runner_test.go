@@ -170,12 +170,9 @@ func TestRunnerSeparatesErrorsFromFailures(t *testing.T) {
 func TestConditionHashCoversWhatAffectsTheResult(t *testing.T) {
 	base := CaseSpec{Fixture: "/repo", Ref: "abc", Criteria: []Criterion{{Type: "build", ExpectedValue: "true"}},
 		Gates: []Gate{{Type: "build", Command: []string{"go", "build"}, Required: true}}, TokenBudget: 1000, TimeoutSeconds: 60}
-	original := ConditionHash(base, "baseline")
+	original := ConditionHash(base)
 	if original == "" {
 		t.Fatal("no hash produced")
-	}
-	if ConditionHash(base, "variant") == original {
-		t.Error("the label must change the condition")
 	}
 	for name, mutate := range map[string]func(*CaseSpec){
 		"ref":      func(s *CaseSpec) { s.Ref = "def" },
@@ -188,7 +185,7 @@ func TestConditionHashCoversWhatAffectsTheResult(t *testing.T) {
 		changed.Gates = append([]Gate(nil), base.Gates...)
 		changed.Criteria = append([]Criterion(nil), base.Criteria...)
 		mutate(&changed)
-		if ConditionHash(changed, "baseline") == original {
+		if ConditionHash(changed) == original {
 			t.Errorf("changing the %s must change the condition hash", name)
 		}
 	}
@@ -198,7 +195,48 @@ func TestConditionHashCoversWhatAffectsTheResult(t *testing.T) {
 	reordered.Gates = append(reordered.Gates, Gate{Type: "aaa", Command: []string{"x"}})
 	shuffled := reordered
 	shuffled.Gates = []Gate{{Type: "aaa", Command: []string{"x"}}, base.Gates[0]}
-	if ConditionHash(reordered, "baseline") != ConditionHash(shuffled, "baseline") {
+	if ConditionHash(reordered) != ConditionHash(shuffled) {
 		t.Error("gate ordering must not change the condition")
+	}
+}
+
+// The hash exists to certify that two groups of trials may be set against each
+// other. Including the independent variable — the label, or the arm — gave
+// every group a different hash, so it could never certify anything. The
+// baseline comparison rests entirely on this property.
+func TestConditionHashIgnoresTheIndependentVariable(t *testing.T) {
+	spec := CaseSpec{Fixture: "/repo", Ref: "abc",
+		Criteria: []Criterion{{Type: "build", ExpectedValue: "true"}},
+		Gates:    []Gate{{Type: "build", Command: []string{"go", "build"}, Required: true}}}
+	// Two arms, and two configuration labels, run against the same pinned case
+	// must share a condition, or nothing can ever be compared to anything.
+	if ConditionHash(spec) == "" {
+		t.Fatal("no hash produced")
+	}
+	same := spec
+	same.Gates = append([]Gate(nil), spec.Gates...)
+	same.Criteria = append([]Criterion(nil), spec.Criteria...)
+	if ConditionHash(same) != ConditionHash(spec) {
+		t.Fatal("the same pinned case must produce the same condition regardless of who runs it")
+	}
+}
+
+// A criterion's required kind and a gate's kind decide what "passed" means, so
+// they are conditions: comparing a run that demanded a journey against one that
+// accepted a build is not a comparison.
+func TestConditionHashCoversVerificationKinds(t *testing.T) {
+	base := CaseSpec{Fixture: "/repo", Ref: "abc",
+		Criteria: []Criterion{{Type: "saves", ExpectedValue: "true"}},
+		Gates:    []Gate{{Type: "saves", Command: []string{"./check"}, Required: true}}}
+	original := ConditionHash(base)
+	demanding := base
+	demanding.Criteria = []Criterion{{Type: "saves", ExpectedValue: "true", RequiredKind: "journey"}}
+	if ConditionHash(demanding) == original {
+		t.Error("demanding a kind of proof changes what passing means")
+	}
+	relabelled := base
+	relabelled.Gates = []Gate{{Type: "saves", Command: []string{"./check"}, Required: true, Kind: "build"}}
+	if ConditionHash(relabelled) == original {
+		t.Error("what the gate claims to prove changes what passing means")
 	}
 }

@@ -39,9 +39,20 @@ type Executor interface {
 	Execute(ctx context.Context, env Environment, spec CaseSpec) (Outcome, error)
 }
 
+// Arms name the system under test. The point of a baseline is that everything
+// except the system is held equal, so the arm is recorded separately from the
+// conditions and from the configuration label.
+const (
+	ArmGoalForge = "goalforge"
+	ArmBaseline  = "baseline"
+)
+
 // Trial is one measured execution of one case under one label.
 type Trial struct {
-	CaseID, Label   string
+	CaseID, Label string
+	// Arm is which system produced this trial: goalforge, or the same model
+	// and tools given the same task without GoalForge.
+	Arm             string
 	Repetition      int
 	ConditionHash   string
 	CleanTreeID     string
@@ -58,14 +69,20 @@ type Trial struct {
 type Runner struct {
 	Root     string
 	Executor Executor
+	// Arm labels what this runner is measuring. Empty means GoalForge itself.
+	Arm string
 }
 
 // RunTrial prepares an environment, executes the case in it, and reports the
 // measurement. Contamination is recorded as an invalid trial rather than
 // discarded, and rather than scored: both would misreport the suite.
 func (r Runner) RunTrial(ctx context.Context, spec CaseSpec, label string, repetition int) (Trial, error) {
-	trial := Trial{CaseID: spec.CaseID, Label: label, Repetition: repetition,
-		ConditionHash: ConditionHash(spec, label), StartedAt: time.Now().UTC()}
+	arm := r.Arm
+	if arm == "" {
+		arm = ArmGoalForge
+	}
+	trial := Trial{CaseID: spec.CaseID, Label: label, Arm: arm, Repetition: repetition,
+		ConditionHash: ConditionHash(spec), StartedAt: time.Now().UTC()}
 	if r.Executor == nil {
 		return trial, errors.New("evaluation runner needs an executor")
 	}

@@ -357,6 +357,10 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "goal_criteria", "required_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// Trials recorded before arms existed were all GoalForge's own.
+	if err := s.ensureColumn(ctx, "evaluation_trials", "arm", "TEXT NOT NULL DEFAULT 'goalforge'"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "verification_results", "evidence_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -783,6 +787,11 @@ func (s *Store) RecordVerification(ctx context.Context, goalID, checkType, statu
 	_, err := s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,check_type,status,actual_value,output,created_at) VALUES(?,?,?,?,?,?)`, goalID, checkType, status, actual, audit.RedactString(output), time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
+
+// CriterionMet is exported so a baseline arm is judged by the identical
+// comparison GoalForge uses. A comparison whose two sides apply different
+// thresholds measures the judge, not the systems.
+func CriterionMet(expected, actual string) bool { return criterionMet(expected, actual) }
 
 func criterionMet(expected, actual string) bool {
 	if expected == actual {

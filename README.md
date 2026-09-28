@@ -151,7 +151,8 @@ goalforge eval spec --case EVAL-1 --fixture ./fixture --ref COMMIT --criterion b
                     --work "작업 제목" --gate-type build_passed --gate-command-json '["go","test","./..."]'
                     [--token-budget N] [--cost-budget-usd N] [--timeout-seconds N]
 goalforge eval run --case EVAL-1 --label "haiku+v2" --repeat 3   # clean environment per repetition
-goalforge eval compare [--case EVAL-1]     # pass rate, repetition stability, cost per success
+goalforge eval run --case EVAL-1 --label "haiku+v2" --repeat 3 --arm baseline  # same model, no GoalForge
+goalforge eval compare [--case EVAL-1]     # pass rate, stability, cost per success, and the baseline delta
 goalforge approval reject APR-1 --category code_quality --note "..."
 goalforge pr --work-item WORK-1            # a PR body carrying the goal, criteria, and evidence
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
@@ -328,6 +329,18 @@ what was achieved and how it was proven without reconstructing it from commits.
 
 Improving the automation needs a fixed yardstick, so a prompt, model, or
 policy change can be told apart from the work that happened to come up.
+"GoalForge completes N% of tasks" is not a claim about GoalForge unless
+something else was measured the same way. `--arm baseline` runs the same case
+with the same model, tools, workspace, and budget, given the task directly —
+no decomposition, no verification-repair loop, no evidence ledger — and judged
+by the same gates with the same criteria and the same rule about which kind of
+evidence settles which criterion. The baseline prompt carries the gate commands
+too: withholding them would measure GoalForge's prompt rather than its
+orchestration. Where the two arms cannot be set against each other, the
+comparison says why instead of printing a difference, and the condition hash
+covers what must be held equal while excluding the label and the arm, which are
+the variables under test.
+
 `goalforge eval spec` pins a case to a fixture repository at one commit, with
 the criteria and gates that judge it and the limits it runs under, and
 `goalforge eval run` re-executes it — each repetition in a freshly cloned
