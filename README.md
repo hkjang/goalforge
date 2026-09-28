@@ -124,6 +124,7 @@ pass is committed in its worktree as author `GoalForge` with
 goalforge approval request --action merge-branch --work-item WORK-1 --reason "..."
 goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
 goalforge effects [--reconcile]        # what was changed outside, and settle anything unresolved
+goalforge tui [--refresh 5s]           # terminal dashboard: progress, criteria, work, approvals, plan
 goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge backup --out FILE            # consistent copy of the state database
@@ -458,6 +459,18 @@ and `GOALFORGE_POSTGRES_DSN` — is withheld from every execution session, and
 that list is not widened by `GOALFORGE_PASS_ENV` or `GOALFORGE_INHERIT_ENV=all`:
 an operator widening their environment is saying "this session may see my
 tooling", not "this session may hold the keys to its own audit".
+
+`goalforge tui` is the same view as the dashboard without a browser: work
+progress and proven completion side by side, every criterion with the evidence
+behind it, work items with the reason each one is stuck, the approval inbox
+with the commit and files each decision covers, and what a run would do right
+now. It refuses to start outside a terminal instead of hanging, honours
+`NO_COLOR`, and lays out by display width so Korean columns line up. Deciding
+an approval from it is checked where the decision happens, not when the screen
+opens: a session that is refused `goalforge approval approve` is refused the
+keystroke too, because opening a screen is not a permission. If any evidence or
+approval fails the integrity check, the warning sits above every tab rather
+than behind one.
 
 A boundary the CLI enforces and the API does not is not a boundary, and the
 session reaches both. `goalforge serve` listens on loopback with no token by
