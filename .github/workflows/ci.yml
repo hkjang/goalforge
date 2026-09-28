@@ -23,15 +23,15 @@ concurrency:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Every platform reports, rather than the first failure hiding the
-      # others: "it broke on Windows" and "it broke everywhere" need different
-      # responses.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+    # Linux is where this runs, so Linux is the gate on every change: fast
+    # feedback on the platform that matters.
+    #
+    # The other platforms are tested when a release is cut rather than on every
+    # pull request. Shipping a Windows binary is a claim about Windows, so it
+    # cannot go untested — but paying ten minutes per pull request for a
+    # platform nobody deploys to buys a slower loop and little else.
+    name: test (linux)
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4

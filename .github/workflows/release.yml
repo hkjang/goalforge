@@ -18,7 +18,33 @@ permissions:
   attestations: write
 
 jobs:
+  # Every platform a binary is shipped for is tested before any of them are
+  # published. Pull requests gate on Linux alone because that is where this
+  # runs; a release is the moment the other claims are made, so it is the
+  # moment they are checked.
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform reports. "It broke on Windows" and "it broke
+      # everywhere" need different responses.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test ./... -count=1
+        env:
+          NO_COLOR: "1"
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -31,13 +57,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: verify before publishing
-        # A release that was never tested is a release whose only claim is that
-        # it compiled.
-        run: |
-          go vet ./...
-          go test ./... -count=1
 
       - name: build artifacts
         id: build
