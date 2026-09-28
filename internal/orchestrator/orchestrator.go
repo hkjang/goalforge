@@ -38,6 +38,12 @@ type Request struct {
 	WorkspaceWrite               bool
 	ReadOnlyTask, Isolated       bool
 	EstimatedTokens              int64
+	// sessionRecovered marks a turn that is already the retry after a dead
+	// session was dropped. It is unexported because it is the orchestrator's
+	// own bookkeeping, not something a caller sets — and it bounds the retry
+	// to one without a counter, since the retry starts fresh and cannot fail
+	// the same way twice.
+	sessionRecovered bool
 }
 
 type Result struct {
@@ -261,6 +267,26 @@ func (o *Orchestrator) Run(ctx context.Context, request Request) (Result, error)
 	if runErr != nil {
 		if handled, quotaResult, quotaErr := o.handleRuntimeQuotaFailure(ctx, p, request, result); handled {
 			return quotaResult, quotaErr
+		}
+		// A resume that failed only because the provider no longer has the
+		// session is recoverable: drop the binding and do the turn again from
+		// a fresh one. The conversation is lost either way — what this changes
+		// is whether the goal stops and waits for a person.
+		//
+		// Bounded to one retry by the flag rather than by a counter, because
+		// the second attempt starts fresh and so cannot fail this way again;
+		// if it does, something else is wrong and it should surface.
+		if !request.sessionRecovered && o.handleDeadSessionFailure(context.WithoutCancel(ctx), request, result, runErr) {
+			// The run is recorded as failed — it was — but the project goes
+			// back to READY rather than FAILED, because the retry is about to
+			// start and a project marked FAILED refuses to run.
+			if err := o.store.FinishRun(context.WithoutCancel(ctx), request.RunID, "FAILED", "READY"); err != nil {
+				return result, errors.Join(runErr, err)
+			}
+			retry := request
+			retry.sessionRecovered = true
+			retry.RunID = store.NewID("RUN")
+			return o.Run(ctx, retry)
 		}
 		if err := o.store.FinishRun(context.WithoutCancel(ctx), request.RunID, "FAILED", "FAILED"); err != nil {
 			runErr = errors.Join(runErr, err)

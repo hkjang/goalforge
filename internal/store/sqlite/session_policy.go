@@ -51,3 +51,17 @@ func (s *Store) PruneSessions(ctx context.Context, now time.Time) (int64, error)
 	}
 	return result.RowsAffected()
 }
+
+// SeedActiveSession records an active provider session directly. It exists so
+// a test can put the store into the state a real deployment reaches — a
+// session GoalForge believes is live — without driving a provider to produce
+// one.
+func (s *Store) SeedActiveSession(ctx context.Context, projectID, providerName, sessionID, modelName string) error {
+	if projectID == "" || providerName == "" || sessionID == "" {
+		return errors.New("project, provider, and session are required")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO provider_session_history(project_id,provider,session_id,model,status,created_at,updated_at) VALUES(?,?,?,?,'ACTIVE',?,?) ON CONFLICT(provider,session_id) DO UPDATE SET status='ACTIVE',updated_at=excluded.updated_at`,
+		projectID, providerName, sessionID, modelName, now, now)
+	return err
+}

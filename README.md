@@ -480,6 +480,17 @@ that list is not widened by `GOALFORGE_PASS_ENV` or `GOALFORGE_INHERIT_ENV=all`:
 an operator widening their environment is saying "this session may see my
 tooling", not "this session may hold the keys to its own audit".
 
+A stored session ID is a claim about the provider's storage, not GoalForge's.
+The provider can discard it at any time — expiry, a cleared cache, a different
+machine — and says so only when asked to resume. When a resume fails because
+the session is gone, the binding is dropped and the turn is done again from a
+fresh one; the conversation is lost either way, and what changes is whether the
+goal stops and waits for a person. Only the provider's own phrasings for a
+missing session count: a resume that failed on quota or auth still fails, since
+starting fresh there would discard a conversation over a transient outage and
+hide the real fault behind a retry that looks fine. `goalforge sessions --drop
+active` forgets a binding by hand when you already know it is gone.
+
 `goalforge tui` is the same view as the dashboard without a browser: work
 progress and proven completion side by side, every criterion with the evidence
 behind it, work items with the reason each one is stuck, the approval inbox

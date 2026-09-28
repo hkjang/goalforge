@@ -71,7 +71,7 @@ work       work add | work list | work status ID --set STATUS
 verify     verify template NAME | verify gate add | verify record | verify integration
 run        plan [--json] | continue [--enqueue] | develop | run --until-quota | ideas | audit | replan
            worker [--once] | pause | resume | cancel
-review     tui | status | usage | sessions | logs | report [--since 24h] | models | evidence export --out DIR
+review     tui | status | usage | sessions [--drop active] | logs | report [--since 24h] | models | evidence export --out DIR
            reproduce --run ID --out DIR | pr --work-item ID
 ship       approval request | approval list | approval approve ID | approval reject ID
            merge --work-item ID | publish --work-item ID | rollback | worktree gc
@@ -250,7 +250,7 @@ func run(ctx context.Context, args []string) error {
 	case "usage":
 		return usageShow(ctx, s)
 	case "sessions":
-		return sessionsShow(ctx, s)
+		return sessionsShow(ctx, s, args[1:])
 	case "checkpoint":
 		return checkpointCreate(ctx, s, args[1:])
 	case "logs":
@@ -2679,10 +2679,18 @@ func usageShow(ctx context.Context, s *store.Store) error {
 	return nil
 }
 
-func sessionsShow(ctx context.Context, s *store.Store) error {
+func sessionsShow(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("sessions", flag.ContinueOnError)
+	drop := f.String("drop", "", "forget a session binding the provider no longer has (or 'active' for the current one)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return err
+	}
+	if *drop != "" {
+		return dropSession(ctx, s, p, *drop)
 	}
 	sessions, err := s.ListSessions(ctx, p.ID)
 	if err != nil {
@@ -2691,6 +2699,42 @@ func sessionsShow(ctx context.Context, s *store.Store) error {
 	for _, session := range sessions {
 		fmt.Printf("%s\t%s\t%s\t%s\n", session.Provider, session.Status, session.SessionID, session.LastRunID)
 	}
+	// A binding GoalForge calls ACTIVE is a claim about the provider's storage,
+	// not about GoalForge's — the provider can discard it at any time and only
+	// says so when asked to resume. The run recovers from that on its own now;
+	// this line is for the case where someone is looking at the list because
+	// something already went wrong.
+	if len(sessions) > 0 {
+		fmt.Println("\nACTIVE 는 GoalForge 가 기억하는 값입니다. 제공자가 이미 버렸을 수 있으며, 그때는 실행이 스스로 새 세션으로 복구합니다.")
+		fmt.Println("직접 끊으려면: goalforge sessions --drop active")
+	}
+	return nil
+}
+
+// dropSession forgets a binding by hand. The run recovers on its own, so this
+// is for the operator who already knows the session is gone and does not want
+// the next run to spend an attempt discovering it.
+func dropSession(ctx context.Context, s *store.Store, p model.Project, target string) error {
+	sessionID := target
+	if target == "active" {
+		session, err := s.ActiveSession(ctx, p.ID, p.Provider)
+		if errors.Is(err, store.ErrNotFound) {
+			fmt.Println("이 프로젝트에 활성 세션이 없습니다")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		sessionID = session.SessionID
+	}
+	if err := s.InvalidateSession(ctx, p.ID, p.Provider, sessionID,
+		"운영자가 직접 끊었습니다", 30*24*time.Hour); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("활성 상태인 세션 %s 을(를) 찾을 수 없습니다", sessionID)
+		}
+		return err
+	}
+	fmt.Printf("세션 연결을 끊었습니다: %s\n다음 실행은 새 세션으로 시작합니다.\n", sessionID)
 	return nil
 }
 
