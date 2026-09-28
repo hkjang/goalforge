@@ -77,6 +77,25 @@ func TestMergeVerifiedMergesCleanAndAbortsConflicts(t *testing.T) {
 	}
 }
 
+// requirePushable establishes with plain git — no GoalForge code in the path —
+// that this environment can publish to the bare repository the test just
+// created. A sandbox that blocks pushing is an environment limit, not a
+// regression, and reporting it as one buries the real failures underneath it.
+// Only plain git is exempted, never the code under test: wherever pushing works
+// (CI included) the test runs in full and still catches push regressions. The
+// probe goes through the same remote name the test uses, because pushing can be
+// disabled per remote rather than outright.
+func requirePushable(t *testing.T, repository, remote string) {
+	t.Helper()
+	const probe = "refs/heads/goalforge-push-probe"
+	output, err := exec.Command("git", "-C", repository, "push", remote, "HEAD:"+probe).CombinedOutput()
+	if err != nil {
+		t.Skipf("environment cannot push to its own bare repository via %q: %v: %s",
+			remote, err, strings.TrimSpace(string(output)))
+	}
+	_ = exec.Command("git", "-C", repository, "push", remote, ":"+probe).Run()
+}
+
 func TestPushBranchPublishesToLocalRemote(t *testing.T) {
 	ctx := context.Background()
 	source := t.TempDir()
@@ -100,6 +119,7 @@ func TestPushBranchPublishesToLocalRemote(t *testing.T) {
 	run(source, "add", "README.md")
 	run(source, "commit", "-m", "base")
 	run(source, "remote", "add", "origin", bare)
+	requirePushable(t, source, "origin")
 	run(source, "checkout", "-b", "goalforge/P1-WORK-1")
 	if err := os.WriteFile(filepath.Join(source, "feature.go"), []byte("package feature"), 0o600); err != nil {
 		t.Fatal(err)
@@ -116,6 +136,65 @@ func TestPushBranchPublishesToLocalRemote(t *testing.T) {
 	}
 	if err := PushBranch(ctx, source, "origin", ""); err == nil {
 		t.Fatal("empty branch must be rejected")
+	}
+}
+
+// GoalForge must own the identity on the commits it creates. `git -c user.name=`
+// only outranks configuration files, so an environment exporting GIT_AUTHOR_* or
+// GIT_COMMITTER_* used to stamp the operator's own name onto AI changes.
+func TestCommitAndMergeKeepGoalForgeIdentityOverAmbientEnvironment(t *testing.T) {
+	const want = "GoalForge <goalforge@goalforge.invalid>"
+	ctx := context.Background()
+	t.Setenv("GIT_AUTHOR_NAME", "Someone Else")
+	t.Setenv("GIT_AUTHOR_EMAIL", "someone@example.invalid")
+	t.Setenv("GIT_COMMITTER_NAME", "Someone Else")
+	t.Setenv("GIT_COMMITTER_EMAIL", "someone@example.invalid")
+
+	repository := t.TempDir()
+	run := func(dir string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	run(repository, "init", "-b", "main")
+	run(repository, "config", "user.email", "config@example.invalid")
+	run(repository, "config", "user.name", "Config Name")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(repository, "add", "README.md")
+	run(repository, "commit", "-m", "base")
+
+	worktree, err := EnsureWorktree(ctx, repository, "P1", "WORK-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(worktree.Path, "generated.go"), []byte("package main"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = CommitVerified(ctx, worktree.Path, "main", "GOAL-1", "WORK-1", "RUN-1", "implement feature"); err != nil {
+		t.Fatal(err)
+	}
+	if identity := run(worktree.Path, "log", "-1", "--format=%an <%ae>"); identity != want {
+		t.Errorf("CommitVerified author=%q, want %q", identity, want)
+	}
+	if identity := run(worktree.Path, "log", "-1", "--format=%cn <%ce>"); identity != want {
+		t.Errorf("CommitVerified committer=%q, want %q", identity, want)
+	}
+
+	message := "Merge verified work WORK-1\n\nGoal-ID: GOAL-1\nWork-Item-ID: WORK-1\nRun-ID: RUN-1\n"
+	if _, err = MergeVerified(ctx, repository, "main", worktree.Branch, message); err != nil {
+		t.Fatal(err)
+	}
+	if identity := run(repository, "log", "-1", "--format=%an <%ae>"); identity != want {
+		t.Errorf("MergeVerified author=%q, want %q", identity, want)
+	}
+	if identity := run(repository, "log", "-1", "--format=%cn <%ce>"); identity != want {
+		t.Errorf("MergeVerified committer=%q, want %q", identity, want)
 	}
 }
 

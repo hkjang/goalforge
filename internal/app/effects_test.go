@@ -13,6 +13,29 @@ import (
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
+// requirePushable establishes with plain git — no GoalForge code in the path —
+// that this environment can publish to the bare repository the fixture just
+// created. A sandbox that blocks pushing is an environment limit, not a
+// regression, and reporting it as one buries the real failures underneath it.
+// Only plain git is exempted, never the code under test: wherever pushing works
+// (CI included) the test runs in full and still catches push regressions. The
+// probe goes through the same remote name the test uses, because pushing can be
+// disabled per remote rather than outright.
+//
+// Call it from the individual tests that actually push, never from the shared
+// fixture: in the fixture it silently skips the tests that never touch the
+// remote, and a skip is invisible in CI output without -v.
+func requirePushable(t *testing.T, repository, remote string) {
+	t.Helper()
+	const probe = "refs/heads/goalforge-push-probe"
+	output, err := exec.Command("git", "-C", repository, "push", remote, "HEAD:"+probe).CombinedOutput()
+	if err != nil {
+		t.Skipf("environment cannot push to its own bare repository via %q: %v: %s",
+			remote, err, strings.TrimSpace(string(output)))
+	}
+	_ = exec.Command("git", "-C", repository, "push", remote, ":"+probe).Run()
+}
+
 func effectFixture(t *testing.T) (context.Context, *store.Store, model.Project, string, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -62,6 +85,7 @@ func effectFixture(t *testing.T) (context.Context, *store.Store, model.Project, 
 // change is already applied instead of making a second one.
 func TestPublishReconcilesInsteadOfRepeating(t *testing.T) {
 	ctx, db, project, head, remote := effectFixture(t)
+	requirePushable(t, project.RepositoryPath, "origin")
 	effect := store.ExternalEffect{ProjectID: project.ID, WorkItemID: "W1", Kind: store.EffectPublishBranch,
 		Target: "origin", Branch: "goalforge/W1", RequestHash: head,
 		Key: store.EffectKey(store.EffectPublishBranch, project.ID, "W1", "origin", head)}
