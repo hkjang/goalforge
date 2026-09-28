@@ -31,7 +31,7 @@ func fixture(t *testing.T) (*Server, *store.Store) {
 	if _, err = db.SetGoal(ctx, project.ID, "ship", "objective", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}}); err != nil {
 		t.Fatal(err)
 	}
-	server, err := New(db, "test")
+	server, err := New(db, "test", db)
 	if err != nil {
 		t.Fatal(err)
 	}

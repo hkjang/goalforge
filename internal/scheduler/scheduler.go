@@ -12,6 +12,15 @@ import (
 type Handler func(context.Context, store.SchedulerJob) (Outcome, error)
 type Outcome struct{ RescheduleAt *time.Time }
 
+// Queue is the enqueue half of the job store. It is named separately from
+// JobStore because the processes that ask for work (CLI, dashboard, MCP) and
+// the process that performs it (worker) must agree on *one* queue: an enqueue
+// that lands somewhere the worker never drains is a request that silently
+// never runs.
+type Queue interface {
+	ScheduleRecurringJob(context.Context, store.SchedulerJob) (store.SchedulerJob, error)
+}
+
 type JobStore interface {
 	ClaimDueJob(context.Context, time.Time, string, time.Duration) (store.SchedulerJob, error)
 	CompleteJob(context.Context, string, string) error

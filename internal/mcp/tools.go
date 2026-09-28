@@ -539,7 +539,7 @@ func (s *Server) continueEnqueue(ctx context.Context, args toolArgs) (string, er
 	if err != nil {
 		return "", err
 	}
-	job, err := s.store.ScheduleRecurringJob(ctx, store.SchedulerJob{ProjectID: project.ID, Type: "CONTINUE", RunAt: time.Now().UTC(), IdempotencyKey: "continue:" + project.ID})
+	job, err := s.queue.ScheduleRecurringJob(ctx, store.SchedulerJob{ProjectID: project.ID, Type: "CONTINUE", RunAt: time.Now().UTC(), IdempotencyKey: "continue:" + project.ID})
 	if err != nil {
 		return "", err
 	}

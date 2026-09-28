@@ -365,6 +365,35 @@ goalforge restore --from ./state.backup --to ./restored/state.db
 
 ---
 
+## 15. 여러 기계에서 나눠 돌리기
+
+기본값에서 작업 큐는 나머지 상태와 같은 SQLite 안에 있습니다. 그래서 `goalforge worker` 는
+**자기 기계에서 넣은 작업만** 봅니다. 큐를 공유하려면 PostgreSQL 을 씁니다.
+
+```sh
+export GOALFORGE_POSTGRES_DSN='postgres://user:pass@host/goalforge?sslmode=require'
+goalforge storage postgres migrate     # 최초 1회, 테이블 생성
+goalforge serve                        # PostgreSQL 에 넣는다
+goalforge worker                       # PostgreSQL 에서 꺼낸다
+```
+
+**배포 안의 모든 프로세스가 같은 값을 봐야 합니다.** `worker`, `serve`, `mcp`,
+`continue --enqueue` 는 각각 시작할 때 큐를 한 번 정하고 어느 쪽을 쓰는지 알려 줍니다.
+
+```
+job queue: PostgreSQL (shared with other machines)
+```
+
+대시보드는 A 큐에 넣고 워커는 B 큐에서 꺼내는 배포는 **성공이라고 답하고 아무것도 실행하지
+않는 버튼**을 갖게 됩니다. 같은 이유로, DSN 이 설정됐는데 연결되지 않으면 조용히 로컬 큐로
+물러나지 않고 **시작을 거부합니다.**
+
+PostgreSQL 이 조율하는 것은 **'누가 실행하는가'** 입니다. 목표·작업 항목·실행 기록·검증 증거는
+여전히 각 기계의 SQLite 에 있습니다. 즉 공유 체크아웃을 보는 워커 풀에는 맞지만, 한 프로젝트의
+이력을 여러 기계에 쪼개는 용도는 아직 아닙니다.
+
+---
+
 ## 자주 묻는 것
 
 **목표가 100% 인데 완료가 아니라고 나옵니다.**
