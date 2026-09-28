@@ -50,6 +50,25 @@ func gitIn(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
+// requirePushable establishes with plain git — no GoalForge code in the path —
+// that this environment can publish to the bare repository the test just
+// created. A sandbox that blocks pushing is an environment limit, not a
+// regression, and reporting it as one buries the real failures underneath it.
+// Only plain git is exempted, never the code under test: wherever pushing works
+// (CI included) the test runs in full and still catches push regressions. The
+// probe goes through the same remote name the test uses, because pushing can be
+// disabled per remote rather than outright.
+func requirePushable(t *testing.T, repository, remote string) {
+	t.Helper()
+	const probe = "refs/heads/goalforge-push-probe"
+	output, err := exec.Command("git", "-C", repository, "push", remote, "HEAD:"+probe).CombinedOutput()
+	if err != nil {
+		t.Skipf("environment cannot push to its own bare repository via %q: %v: %s",
+			remote, err, strings.TrimSpace(string(output)))
+	}
+	_ = exec.Command("git", "-C", repository, "push", remote, ":"+probe).Run()
+}
+
 // TestCLIFullLifecycle drives the complete user journey through the real CLI
 // dispatch with a contract-faithful fake provider: register, plan, execute in
 // an isolated worktree, verify, auto-commit, approve and merge, approve and
@@ -87,6 +106,7 @@ func TestCLIFullLifecycle(t *testing.T) {
 	remote := t.TempDir()
 	gitIn(t, remote, "init", "--bare", "-b", "main")
 	gitIn(t, repo, "remote", "add", "origin", remote)
+	requirePushable(t, repo, "origin")
 
 	t.Setenv("GOALFORGE_CLAUDE_BIN", fake)
 	t.Setenv("GOALFORGE_DB", filepath.Join(t.TempDir(), "state.db"))
@@ -542,6 +562,7 @@ func TestRestoreVerifiesRecordsAndSettlesOutsideWork(t *testing.T) {
 	gitIn(t, repo, "add", "-A")
 	gitIn(t, repo, "commit", "-m", "base")
 	gitIn(t, repo, "remote", "add", "origin", remote)
+	requirePushable(t, repo, "origin")
 	gitIn(t, repo, "checkout", "-q", "-b", "goalforge/W1")
 	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("done"), 0o600); err != nil {
 		t.Fatal(err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -18,6 +19,19 @@ const (
 	commitAuthorName  = "GoalForge"
 	commitAuthorEmail = "goalforge@goalforge.invalid"
 )
+
+// commitIdentityEnv pins the identity GoalForge commits under. `-c user.name`
+// only outranks configuration files, so an environment exporting GIT_AUTHOR_* or
+// GIT_COMMITTER_* wins over it and stamps the operator's own name onto AI
+// changes (귀속 오염). The surrounding environment is preserved so PATH and the
+// GIT_CONFIG_* safeguards stay in force.
+func commitIdentityEnv() []string {
+	return append(os.Environ(),
+		"GIT_AUTHOR_NAME="+commitAuthorName,
+		"GIT_AUTHOR_EMAIL="+commitAuthorEmail,
+		"GIT_COMMITTER_NAME="+commitAuthorName,
+		"GIT_COMMITTER_EMAIL="+commitAuthorEmail)
+}
 
 // ErrMergeConflict means the merge could not complete cleanly; the merge was
 // aborted and the repository left untouched for user review (자동 병합 금지).
@@ -50,6 +64,7 @@ func MergeVerified(ctx context.Context, repository, defaultBranch, branch, messa
 		"-c", "user.name="+commitAuthorName,
 		"-c", "user.email="+commitAuthorEmail,
 		"merge", "--no-ff", "-m", message, branch)
+	merge.Env = commitIdentityEnv()
 	if output, mergeErr := merge.CombinedOutput(); mergeErr != nil {
 		abort := exec.CommandContext(ctx, "git", "-C", repository, "merge", "--abort")
 		_ = abort.Run()
@@ -121,6 +136,7 @@ func CommitVerified(ctx context.Context, repository, protectedBranch, goalID, wo
 		"-c", "user.name="+commitAuthorName,
 		"-c", "user.email="+commitAuthorEmail,
 		"commit", "-m", message)
+	commit.Env = commitIdentityEnv()
 	if output, commitErr := commit.CombinedOutput(); commitErr != nil {
 		return CommitInfo{}, fmt.Errorf("commit verified change: %w: %s", commitErr, strings.TrimSpace(string(output)))
 	}
