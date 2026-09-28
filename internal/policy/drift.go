@@ -9,36 +9,51 @@ import (
 )
 
 func OutOfScopeChanges(scope string, changes []gitops.FileChange) []string {
-	patterns := strings.Split(scope, ",")
-	allowed := make([]string, 0, len(patterns))
-	for _, pattern := range patterns {
-		if pattern = strings.TrimSpace(strings.TrimPrefix(pattern, "./")); pattern != "" {
-			allowed = append(allowed, pattern)
-		}
-	}
 	var violations []string
 	for _, change := range changes {
-		name := strings.TrimPrefix(strings.ReplaceAll(change.Path, "\\", "/"), "./")
-		matched := false
-		for _, pattern := range allowed {
-			if strings.HasSuffix(pattern, "/**") {
-				prefix := strings.TrimSuffix(pattern, "/**")
-				matched = name == prefix || strings.HasPrefix(name, prefix+"/")
-			} else if strings.ContainsAny(pattern, "*?[") {
-				matched, _ = path.Match(pattern, name)
-			} else {
-				matched = name == pattern || strings.HasPrefix(name, strings.TrimSuffix(pattern, "/")+"/")
-			}
-			if matched {
-				break
-			}
-		}
-		if !matched {
-			violations = append(violations, name)
+		if !PathInScope(scope, change.Path) {
+			violations = append(violations, normalizePath(change.Path))
 		}
 	}
 	sort.Strings(violations)
 	return violations
+}
+
+// PathInScope reports whether a file matches a declared change scope.
+//
+// It answers only the pattern question and deliberately does not decide what
+// an empty scope means, because the two callers need opposite answers and both
+// are right: a work item that declared no scope may change nothing
+// (OutOfScopeChanges), while two work items that declared no scope must be
+// assumed to collide (ScopesOverlap). A shared helper that picked one would
+// silently give the other the unsafe answer. An empty scope therefore matches
+// nothing here, and callers say what they mean.
+func PathInScope(scope, filePath string) bool {
+	patterns := scopePatterns(scope)
+	name := normalizePath(filePath)
+	for _, pattern := range patterns {
+		if matchesPattern(pattern, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesPattern(pattern, name string) bool {
+	switch {
+	case strings.HasSuffix(pattern, "/**"):
+		prefix := strings.TrimSuffix(pattern, "/**")
+		return name == prefix || strings.HasPrefix(name, prefix+"/")
+	case strings.ContainsAny(pattern, "*?["):
+		matched, _ := path.Match(pattern, name)
+		return matched
+	default:
+		return name == pattern || strings.HasPrefix(name, strings.TrimSuffix(pattern, "/")+"/")
+	}
+}
+
+func normalizePath(filePath string) string {
+	return strings.TrimPrefix(strings.ReplaceAll(filePath, "\\", "/"), "./")
 }
 
 // ScopesOverlap reports whether two declared change scopes could touch the

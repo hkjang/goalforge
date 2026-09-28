@@ -317,8 +317,9 @@ func (s *Server) activityReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listDecisions(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
 	includeSuperseded := r.URL.Query().Get("all") == "true"
-	decisions, err := s.store.ListDecisions(r.Context(), r.PathValue("id"), includeSuperseded)
+	decisions, err := s.store.ListDecisions(r.Context(), projectID, includeSuperseded)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -326,7 +327,14 @@ func (s *Server) listDecisions(w http.ResponseWriter, r *http.Request) {
 	if decisions == nil {
 		decisions = []store.DesignDecision{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"decisions": decisions})
+	// Each decision travels with whether the code it was made about has moved
+	// since, because a list that shows a note about a since-rewritten module
+	// the same way as one about untouched code is how stale reasoning survives.
+	standings := []store.DecisionStanding{}
+	if project, projectErr := s.store.ProjectByID(r.Context(), projectID); projectErr == nil {
+		standings = store.DecisionStandings(r.Context(), project.RepositoryPath, decisions)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"decisions": decisions, "standings": standings})
 }
 
 type decisionRequest struct {
@@ -335,6 +343,9 @@ type decisionRequest struct {
 	Decision     string `json:"decision"`
 	Alternatives string `json:"alternatives"`
 	Consequences string `json:"consequences"`
+	// Scope names the files the decision is about, so a later change to them
+	// flags it for review instead of leaving it to read as current forever.
+	Scope string `json:"scope"`
 	WorkItemID   string `json:"work_item_id"`
 	Supersedes   string `json:"supersedes"`
 }
@@ -372,7 +383,7 @@ func (s *Server) recordDecision(w http.ResponseWriter, r *http.Request) {
 	baseCommit, _ := gitops.HeadCommit(r.Context(), project.RepositoryPath, project.DefaultBranch)
 	decision, err := s.store.RecordDecision(r.Context(), store.DesignDecision{ProjectID: projectID, GoalID: goalID,
 		WorkItem: request.WorkItemID, Title: request.Title, Context: request.Context, Decision: request.Decision,
-		Alternatives: request.Alternatives, Consequences: request.Consequences, BaseCommit: baseCommit})
+		Alternatives: request.Alternatives, Consequences: request.Consequences, BaseCommit: baseCommit, Scope: request.Scope})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

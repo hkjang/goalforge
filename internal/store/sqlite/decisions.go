@@ -17,8 +17,11 @@ type DesignDecision struct {
 	Alternatives, Consequences     string
 	Status, SupersededBy, WorkItem string
 	// BaseCommit is what the repository looked like when the decision was
-	// made, so a reader can tell how old the reasoning is.
+	// made, and Scope names the files it was about. Together they are what
+	// lets a later reader be told the decision may no longer hold, instead of
+	// being handed it as current fact forever.
 	BaseCommit string
+	Scope      string
 	CreatedAt  time.Time
 }
 
@@ -41,9 +44,9 @@ func (s *Store) RecordDecision(ctx context.Context, decision DesignDecision) (De
 	if decision.CreatedAt.IsZero() {
 		decision.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO design_decisions(id,project_id,goal_id,work_item_id,title,context,decision,alternatives,consequences,status,superseded_by,base_commit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'',?,?)`,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO design_decisions(id,project_id,goal_id,work_item_id,title,context,decision,alternatives,consequences,status,superseded_by,base_commit,scope,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'',?,?,?)`,
 		decision.ID, decision.ProjectID, decision.GoalID, decision.WorkItem, decision.Title, decision.Context, decision.Decision,
-		decision.Alternatives, decision.Consequences, decision.Status, decision.BaseCommit, decision.CreatedAt.Format(time.RFC3339Nano))
+		decision.Alternatives, decision.Consequences, decision.Status, decision.BaseCommit, decision.Scope, decision.CreatedAt.Format(time.RFC3339Nano))
 	return decision, err
 }
 
@@ -63,7 +66,7 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, decisionID, re
 
 // ListDecisions returns a project's decisions, accepted ones first.
 func (s *Store) ListDecisions(ctx context.Context, projectID string, includeSuperseded bool) ([]DesignDecision, error) {
-	query := `SELECT id,project_id,COALESCE(goal_id,''),COALESCE(work_item_id,''),title,context,decision,alternatives,consequences,status,COALESCE(superseded_by,''),COALESCE(base_commit,''),created_at FROM design_decisions WHERE project_id=?`
+	query := `SELECT id,project_id,COALESCE(goal_id,''),COALESCE(work_item_id,''),title,context,decision,alternatives,consequences,status,COALESCE(superseded_by,''),COALESCE(base_commit,''),COALESCE(scope,''),created_at FROM design_decisions WHERE project_id=?`
 	if !includeSuperseded {
 		query += ` AND status='` + DecisionAccepted + `'`
 	}
@@ -78,7 +81,7 @@ func (s *Store) ListDecisions(ctx context.Context, projectID string, includeSupe
 		var decision DesignDecision
 		var created string
 		if err = rows.Scan(&decision.ID, &decision.ProjectID, &decision.GoalID, &decision.WorkItem, &decision.Title, &decision.Context,
-			&decision.Decision, &decision.Alternatives, &decision.Consequences, &decision.Status, &decision.SupersededBy, &decision.BaseCommit, &created); err != nil {
+			&decision.Decision, &decision.Alternatives, &decision.Consequences, &decision.Status, &decision.SupersededBy, &decision.BaseCommit, &decision.Scope, &created); err != nil {
 			return nil, err
 		}
 		decision.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
@@ -90,9 +93,9 @@ func (s *Store) ListDecisions(ctx context.Context, projectID string, includeSupe
 func (s *Store) DecisionByID(ctx context.Context, projectID, decisionID string) (DesignDecision, error) {
 	var decision DesignDecision
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,COALESCE(goal_id,''),COALESCE(work_item_id,''),title,context,decision,alternatives,consequences,status,COALESCE(superseded_by,''),COALESCE(base_commit,''),created_at FROM design_decisions WHERE id=? AND project_id=?`, decisionID, projectID).
+	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,COALESCE(goal_id,''),COALESCE(work_item_id,''),title,context,decision,alternatives,consequences,status,COALESCE(superseded_by,''),COALESCE(base_commit,''),COALESCE(scope,''),created_at FROM design_decisions WHERE id=? AND project_id=?`, decisionID, projectID).
 		Scan(&decision.ID, &decision.ProjectID, &decision.GoalID, &decision.WorkItem, &decision.Title, &decision.Context,
-			&decision.Decision, &decision.Alternatives, &decision.Consequences, &decision.Status, &decision.SupersededBy, &decision.BaseCommit, &created)
+			&decision.Decision, &decision.Alternatives, &decision.Consequences, &decision.Status, &decision.SupersededBy, &decision.BaseCommit, &decision.Scope, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return decision, ErrNotFound
 	}

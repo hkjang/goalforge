@@ -453,7 +453,8 @@ func contextSections(pkg store.ContextPackage) []prompt.ContextSection {
 	section := func(heading string, items []store.ContextItem) prompt.ContextSection {
 		lines := make([]prompt.ContextLine, 0, len(items))
 		for _, item := range items {
-			line := prompt.ContextLine{Title: item.Title, Body: item.Body, Source: item.Source}
+			line := prompt.ContextLine{Title: item.Title, Body: item.Body, Source: item.Source,
+				Standing: item.Standing, Caveat: item.Caveat}
 			if !item.AsOf.IsZero() {
 				line.AsOf = item.AsOf.Format("2006-01-02")
 			}

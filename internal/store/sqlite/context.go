@@ -18,7 +18,24 @@ type ContextItem struct {
 	Source string
 	// AsOf is when the underlying fact was recorded.
 	AsOf time.Time
+	// Standing separates what is measured from what was decided from what is
+	// merely assumed. Handed a flat list, a session reads a two-month-old
+	// architecture note with the same authority as a gate that passed a minute
+	// ago, and acts on it.
+	Standing string
+	// Caveat is why this may no longer hold. Present only when it does not.
+	Caveat string
 }
+
+// Context standings. Measured is backed by evidence GoalForge recorded;
+// Decided is true because someone chose it, which can be superseded but not
+// disproved; Assumed is stated without either.
+const (
+	ContextMeasured = "측정된 사실"
+	ContextDecided  = "결정"
+	ContextAssumed  = "확인되지 않음"
+	ContextPolicy   = "규칙"
+)
 
 // ContextPackage is everything a session needs before touching a work item:
 // what it is for, what must not change, what has already been tried and
@@ -46,6 +63,15 @@ func (s *Store) BuildContextPackage(ctx context.Context, project model.Project, 
 	if err != nil {
 		return pkg, err
 	}
+	// Each decision is checked against the code it was made about. A decision
+	// whose files have moved since is still included — it is the best record
+	// of why things are as they are — but it is handed over marked, so the
+	// session treats it as something to confirm rather than as fact.
+	standings := DecisionStandings(ctx, project.RepositoryPath, decisions)
+	standingByID := make(map[string]DecisionStanding, len(standings))
+	for _, standing := range standings {
+		standingByID[standing.Decision.ID] = standing
+	}
 	for _, decision := range decisions {
 		body := decision.Decision
 		if decision.Alternatives != "" {
@@ -58,16 +84,21 @@ func (s *Store) BuildContextPackage(ctx context.Context, project model.Project, 
 		if decision.BaseCommit != "" {
 			source += " @ " + shortSHA(decision.BaseCommit)
 		}
-		pkg.Decisions = append(pkg.Decisions, ContextItem{Kind: "decision", Title: decision.Title, Body: body, Source: source, AsOf: decision.CreatedAt})
+		item := ContextItem{Kind: "decision", Title: decision.Title, Body: body, Source: source,
+			AsOf: decision.CreatedAt, Standing: ContextDecided}
+		if standing, ok := standingByID[decision.ID]; ok && standing.NeedsReview() {
+			item.Standing, item.Caveat = ContextAssumed, standing.Detail
+		}
+		pkg.Decisions = append(pkg.Decisions, item)
 	}
 	if work.ChangeScope != "" {
 		pkg.Constraints = append(pkg.Constraints, ContextItem{Kind: "scope", Title: "허용된 변경 범위",
-			Body: work.ChangeScope + " 밖의 파일을 수정하면 범위 이탈로 검증이 차단됩니다", Source: work.ID})
+			Body: work.ChangeScope + " 밖의 파일을 수정하면 범위 이탈로 검증이 차단됩니다", Source: work.ID, Standing: ContextPolicy})
 	}
 	pkg.Constraints = append(pkg.Constraints, ContextItem{Kind: "protected", Title: "변경 금지",
-		Body: "보호 대상 파일(.env, 키, 인증 설정)은 승인 없이 수정할 수 없습니다. 기본 브랜치에 직접 커밋하지 않습니다.", Source: "policy"})
+		Body: "보호 대상 파일(.env, 키, 인증 설정)은 승인 없이 수정할 수 없습니다. 기본 브랜치에 직접 커밋하지 않습니다.", Source: "policy", Standing: ContextPolicy})
 	if work.Acceptance != "" {
-		pkg.Constraints = append(pkg.Constraints, ContextItem{Kind: "acceptance", Title: "완료 기준", Body: work.Acceptance, Source: work.ID})
+		pkg.Constraints = append(pkg.Constraints, ContextItem{Kind: "acceptance", Title: "완료 기준", Body: work.Acceptance, Source: work.ID, Standing: ContextPolicy})
 	}
 	failures, err := s.recentFailures(ctx, project.ID, work.ID)
 	if err != nil {
@@ -86,7 +117,8 @@ func (s *Store) BuildContextPackage(ctx context.Context, project model.Project, 
 		if !gate.Required {
 			body += "  (선택 게이트)"
 		}
-		pkg.Verification = append(pkg.Verification, ContextItem{Kind: "gate", Title: gate.Type, Body: body, Source: "gate:" + gate.Type})
+		pkg.Verification = append(pkg.Verification, ContextItem{Kind: "gate", Title: gate.Type, Body: body,
+			Source: "gate:" + gate.Type, Standing: ContextPolicy})
 	}
 	for _, criterion := range goal.Criteria {
 		status, statusErr := s.criterionStatus(ctx, goal.ID, criterion)
@@ -94,7 +126,20 @@ func (s *Store) BuildContextPackage(ctx context.Context, project model.Project, 
 			return pkg, statusErr
 		}
 		body := fmt.Sprintf("기준 %s, 현재 %s", criterion.ExpectedValue, statusLabel(status))
-		pkg.Verification = append(pkg.Verification, ContextItem{Kind: "criterion", Title: criterion.Type, Body: body, Source: status.RunID, AsOf: status.MeasuredAt})
+		// A criterion with no evidence, or with evidence that has gone stale,
+		// is not a measured fact however confidently the row reads.
+		itemStanding := ContextMeasured
+		caveat := ""
+		switch status.Status {
+		case "NO_EVIDENCE":
+			itemStanding, caveat = ContextAssumed, "아직 한 번도 측정되지 않았습니다"
+		case "STALE":
+			itemStanding, caveat = ContextAssumed, status.StaleReason
+		case "WRONG_KIND":
+			itemStanding, caveat = ContextAssumed, status.KindMismatch()
+		}
+		pkg.Verification = append(pkg.Verification, ContextItem{Kind: "criterion", Title: criterion.Type,
+			Body: body, Source: status.RunID, AsOf: status.MeasuredAt, Standing: itemStanding, Caveat: caveat})
 	}
 	return pkg, nil
 }
@@ -135,7 +180,7 @@ ORDER BY v.id DESC LIMIT 5`, projectID, workItemID)
 		}
 		at, _ := time.Parse(time.RFC3339Nano, created)
 		result = append(result, ContextItem{Kind: "failure", Title: checkType + " " + status,
-			Body: firstLines(output, 6), Source: runID + " (" + kind + ")", AsOf: at})
+			Body: firstLines(output, 6), Source: runID + " (" + kind + ")", AsOf: at, Standing: ContextMeasured})
 	}
 	return result, rows.Err()
 }

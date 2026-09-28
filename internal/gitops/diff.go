@@ -36,3 +36,34 @@ func CommitDiff(ctx context.Context, repository, sha string, maxBytes int) (stri
 	}
 	return strings.ToValidUTF8(diff, ""), false, nil
 }
+
+// ChangedSince lists the files that differ between a commit and the current
+// HEAD. It is how a record that pinned the code it was reasoning about can be
+// asked whether that code still looks the way it did.
+//
+// An unknown commit returns ErrUnknownCommit rather than an empty list: "no
+// files changed" and "I cannot tell" are different answers, and returning the
+// first for the second would quietly mark stale reasoning as current.
+func ChangedSince(ctx context.Context, repository, commit string) ([]string, error) {
+	if strings.TrimSpace(commit) == "" {
+		return nil, ErrUnknownCommit
+	}
+	if err := exec.CommandContext(ctx, "git", "-C", repository, "cat-file", "-e", commit+"^{commit}").Run(); err != nil {
+		return nil, ErrUnknownCommit
+	}
+	output, err := exec.CommandContext(ctx, "git", "-C", repository, "diff", "--name-only", commit, "HEAD").Output()
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			files = append(files, trimmed)
+		}
+	}
+	return files, nil
+}
+
+// ErrUnknownCommit means the recorded baseline is not in this repository, so
+// nothing can be said about what changed since.
+var ErrUnknownCommit = errors.New("commit is not in this repository")
