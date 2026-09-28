@@ -127,10 +127,19 @@ func (s *Store) recordExternalEvidence(ctx context.Context, goalID, source strin
 		if record.Required {
 			required = 1
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,stale,stale_reason,tree_id,evaluator_id,created_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,0,'',?,?,?)`,
+		inserted, insertErr := tx.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,stale,stale_reason,tree_id,evaluator_id,evidence_kind,created_at) VALUES(?,NULL,?,?,?,?,?,?,?,?,?,?,0,'',?,?,?,?)`,
 			goalID, record.CheckType, record.Status, record.ActualValue, source,
 			record.ExitCode, record.Duration.Milliseconds(), required, record.Output, record.FailureKind, record.RepairMode,
-			record.TreeID, record.EvaluatorID, now); err != nil {
+			record.TreeID, record.EvaluatorID, record.EvidenceKind, now)
+		if insertErr != nil {
+			return insertErr
+		}
+		id, idErr := inserted.LastInsertId()
+		if idErr != nil {
+			return idErr
+		}
+		if err = appendChain(ctx, tx, ChainEvidence, fmt.Sprint(id),
+			evidenceDigest(goalID, "", record.CheckType, record.Status, record.ActualValue, record.EvidenceKind, now, required), now); err != nil {
 			return err
 		}
 	}

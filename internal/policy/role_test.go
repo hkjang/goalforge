@@ -80,3 +80,46 @@ func TestSessionEnvironmentCanBeWidenedDeliberately(t *testing.T) {
 		t.Error("the role marker is not optional")
 	}
 }
+
+// The integrity chain is worthless if the session being audited holds the key
+// that signs it, and the API token would let a session approve its own work
+// through the management API. Neither may be handed over, whatever else is.
+func TestSecretsNeverReachASession(t *testing.T) {
+	host := []string{
+		"PATH=/usr/bin",
+		"ANTHROPIC_API_KEY=sk-test",
+		"GOALFORGE_AUDIT_KEY=chain-secret",
+		"GOALFORGE_API_TOKEN=api-secret",
+		"GOALFORGE_MCP_TOKEN=mcp-secret",
+		"GOALFORGE_POSTGRES_DSN=postgres://user:pw@host/db",
+		"GOALFORGE_DB=/tmp/state.db",
+	}
+	for _, name := range []string{"default", "inherit-all"} {
+		t.Run(name, func(t *testing.T) {
+			if name == "inherit-all" {
+				t.Setenv(EnvInherit, "all")
+			}
+			got := strings.Join(SessionEnvironment(host, RoleImplementation), "\n")
+			for _, secret := range []string{"chain-secret", "api-secret", "mcp-secret", "user:pw"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("a session must never receive %q:\n%s", secret, got)
+				}
+			}
+			// The credentials the tool genuinely needs still get through, or
+			// the guard would just break the product.
+			if !strings.Contains(got, "ANTHROPIC_API_KEY=sk-test") {
+				t.Errorf("the provider credential is still required:\n%s", got)
+			}
+		})
+	}
+}
+
+// Naming a secret in the passthrough list must not override the rule: the
+// operator widening their environment is not consenting to this.
+func TestPassthroughCannotOverrideTheSecretList(t *testing.T) {
+	t.Setenv(EnvPassthrough, "GOALFORGE_AUDIT_KEY,GOALFORGE_API_TOKEN")
+	got := strings.Join(SessionEnvironment([]string{"GOALFORGE_AUDIT_KEY=chain-secret", "GOALFORGE_API_TOKEN=api-secret"}, RoleImplementation), "\n")
+	if strings.Contains(got, "chain-secret") || strings.Contains(got, "api-secret") {
+		t.Fatalf("the secret list is not negotiable:\n%s", got)
+	}
+}
