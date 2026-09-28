@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -79,6 +80,7 @@ handoff    takeover --work-item ID | takeover return --work-item ID
 evaluate   eval add | eval list | eval spec | eval from-failure --run ID | --approval ID
            eval run [--arm baseline] | eval record | eval compare
 operate    backup --out FILE | restore --from FILE --to PATH | effects [--reconcile]
+           service systemd [--scope user|system] [--out FILE]
            integrity verify
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
            checkpoint --next-action TEXT
@@ -182,6 +184,10 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "sandbox" {
 			return projectSandbox(ctx, s, args[2:])
+		}
+	case "service":
+		if len(args) > 1 && args[1] == "systemd" {
+			return serviceSystemd(ctx, s, args[2:])
 		}
 	case "tui":
 		return runTUI(ctx, s, args[1:])
@@ -3730,4 +3736,55 @@ func derivedCaseName(failure store.FailureCase) string {
 	// Case names are unique per project, so a second case from the same work
 	// item needs to be distinguishable rather than rejected.
 	return fmt.Sprintf("%s %s", base, time.Now().Format("01-02 15:04"))
+}
+
+// serviceSystemd emits a unit that runs the worker as a Linux service.
+//
+// Written by hand, three things go wrong: the binary path, the state database
+// path, and the working directory — a worker started from the wrong directory
+// finds no registered project and drains an empty queue while looking
+// perfectly healthy. Generating it from the running process removes all three,
+// and it prints rather than installs, because writing into /etc is the
+// operator's decision and not a side effect of asking what the unit should say.
+func serviceSystemd(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("service systemd", flag.ContinueOnError)
+	scope := f.String("scope", "system", "system or user")
+	out := f.String("out", "", "write the unit here instead of printing it")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *scope != "system" && *scope != "user" {
+		return errors.New("--scope must be system or user")
+	}
+	unit, err := app.DefaultServiceUnit(*scope)
+	if err != nil {
+		return err
+	}
+	if *scope == "system" {
+		if current, userErr := user.Current(); userErr == nil {
+			unit.User, unit.Group = current.Username, current.Username
+		}
+	}
+	// The worker must run where a project is registered, so the check happens
+	// now rather than at the first start where it looks like a queue problem.
+	if _, err = currentProject(ctx, s); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s 에 등록된 프로젝트가 없습니다. 워커는 이 디렉터리에서 실행되므로 먼저 goalforge project init 을 하세요\n\n", unit.WorkingDir)
+	}
+	rendered, err := unit.Render()
+	if err != nil {
+		return err
+	}
+	if *out != "" {
+		if err = os.WriteFile(*out, []byte(rendered), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("unit written: %s\n", *out)
+	} else {
+		fmt.Print(rendered)
+	}
+	fmt.Fprintln(os.Stderr)
+	for _, note := range unit.InstallNotes() {
+		fmt.Fprintln(os.Stderr, note)
+	}
+	return nil
 }

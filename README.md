@@ -133,6 +133,7 @@ goalforge approval request --action merge-branch --work-item WORK-1 --reason "..
 goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
 goalforge effects [--reconcile]        # what was changed outside, and settle anything unresolved
 goalforge tui [--refresh 5s]           # terminal dashboard: progress, criteria, work, approvals, plan
+goalforge service systemd [--scope user|system]  # a systemd unit for the worker
 goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge backup --out FILE            # consistent copy of the state database
@@ -479,6 +480,17 @@ and `GOALFORGE_POSTGRES_DSN` — is withheld from every execution session, and
 that list is not widened by `GOALFORGE_PASS_ENV` or `GOALFORGE_INHERIT_ENV=all`:
 an operator widening their environment is saying "this session may see my
 tooling", not "this session may hold the keys to its own audit".
+
+`goalforge service systemd` emits a unit that runs the worker as a Linux
+service. Written by hand, three things go wrong: the binary path, the state
+database path, and the working directory — a worker started from the wrong
+directory finds no registered project and drains an empty queue while looking
+healthy. The unit is generated from the running process, so all three are the
+ones that are actually correct. It prints rather than installs, because writing
+into `/etc` is the operator's decision and not a side effect of asking what the
+unit should say. Secrets are pointed at a credentials file rather than written
+into the unit: a unit is world-readable, so a token in one is a token published
+to every account on the machine.
 
 A stored session ID is a claim about the provider's storage, not GoalForge's.
 The provider can discard it at any time — expiry, a cleared cache, a different
