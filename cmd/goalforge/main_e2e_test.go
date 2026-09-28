@@ -388,14 +388,33 @@ func TestCLIEvaluationRunner(t *testing.T) {
 	gitIn(t, repo, "add", "-A")
 	gitIn(t, repo, "commit", "-m", "base")
 
-	solving := testscript.Write(t, t.TempDir(), "claude",
-		strings.Join([]string{
-			`case "$*" in *--version*|*--help*) echo "fake --output-format --resume --settings --permission-mode --json-schema --no-session-persistence"; exit 0;; esac`,
-			"cat >/dev/null",
-			"printf 'hello goalforge\\n' > hello.txt",
-			`printf '{"type":"system","subtype":"init","session_id":"sess-eval"}\n'`,
-			`printf '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-eval","total_cost_usd":0.003,"usage":{"input_tokens":300,"output_tokens":90}}\n'`,
-		}, "\n"), "exit /b 0")
+	// Compiled rather than scripted: this fake has to write a file and emit
+	// two events, and the batch half of the shell version did neither, so the
+	// trial it stood in for could never have run on Windows.
+	solving := testscript.WriteGo(t, t.TempDir(), "claude", `package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+func main() {
+	joined := strings.Join(os.Args[1:], " ")
+	if strings.Contains(joined, "--version") || strings.Contains(joined, "--help") {
+		fmt.Println("fake --output-format --resume --settings --permission-mode --json-schema --no-session-persistence")
+		return
+	}
+	io.Copy(io.Discard, os.Stdin)
+	if err := os.WriteFile("hello.txt", []byte("hello goalforge\n"), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Println(`+"`"+`{"type":"system","subtype":"init","session_id":"sess-eval"}`+"`"+`)
+	fmt.Println(`+"`"+`{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"sess-eval","total_cost_usd":0.003,"usage":{"input_tokens":300,"output_tokens":90}}`+"`"+`)
+}
+`)
 
 	t.Setenv("GOALFORGE_CLAUDE_BIN", solving)
 	t.Setenv("GOALFORGE_DB", filepath.Join(t.TempDir(), "state.db"))

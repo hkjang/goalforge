@@ -327,3 +327,16 @@ func TestPlanEndpointIsReadOnly(t *testing.T) {
 		}
 	}
 }
+
+// jsonBody encodes a request body instead of concatenating one. A Windows
+// path pasted into a JSON string literal produces `C:\Users`, where `\U` is an
+// invalid escape, so the request the test sent was never the request it meant
+// to send — and the handler rejected it for the wrong reason.
+func jsonBody(t *testing.T, value any) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
+}

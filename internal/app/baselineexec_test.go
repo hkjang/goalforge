@@ -3,13 +3,13 @@ package app
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/goalforge/goalforge/internal/evaluation"
 	"github.com/goalforge/goalforge/internal/provider"
+	"github.com/goalforge/goalforge/internal/testscript"
 )
 
 // baselineProvider stands in for a coding CLI: it runs a canned effect on the
@@ -55,33 +55,29 @@ func baselineEnv(t *testing.T) evaluation.Environment {
 	return evaluation.Environment{Workspace: workspace, StateDB: filepath.Join(t.TempDir(), "state.db")}
 }
 
-func gateScript(t *testing.T, dir, name, body string) []string {
+// gateScript writes an executable gate for this platform.
+//
+// It used to write a shebang script and guard the tests with a "skipOnWindows"
+// that actually asked whether `sh` was on PATH. Those are different questions:
+// a Windows runner ships Git Bash, so the guard let the test through and then
+// exec'd a file whose shebang Windows does not honour. The repository already
+// had a helper for exactly this, and using it is what makes these tests mean
+// the same thing everywhere.
+func gateScript(t *testing.T, dir, name, posix, windows string) []string {
 	t.Helper()
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return []string{path}
-}
-
-func skipOnWindows(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("needs a POSIX shell to write gate scripts")
-	}
+	return []string{testscript.Write(t, dir, name, posix, windows)}
 }
 
 // The baseline is judged by exactly the gates GoalForge is judged by. A
 // session that actually satisfies them passes.
 func TestBaselinePassesWhenItSatisfiesTheSameGates(t *testing.T) {
-	skipOnWindows(t)
 	env := baselineEnv(t)
 	scripts := t.TempDir()
 	spec := evaluation.CaseSpec{CaseID: "EVAL-1", GoalTitle: "add the marker file",
 		GoalObjective: "create done.txt in the workspace",
 		Criteria:      []evaluation.Criterion{{Type: "marker", ExpectedValue: "true"}},
 		Gates: []evaluation.Gate{{Type: "marker", Required: true, SuccessValue: "true", Timeout: 30,
-			Command: gateScript(t, scripts, "marker", `test -f "$PWD/done.txt"`)}}}
+			Command: gateScript(t, scripts, "marker", `test -f "$PWD/done.txt"`, `if exist done.txt (exit /b 0) else (exit /b 1)`)}}}
 	fake := &baselineProvider{name: "codex", usage: provider.Usage{OutputTokens: 120, CostUSD: 0.5},
 		effect: func(workDir string) error {
 			return os.WriteFile(filepath.Join(workDir, "done.txt"), []byte("ok"), 0o600)
@@ -101,13 +97,12 @@ func TestBaselinePassesWhenItSatisfiesTheSameGates(t *testing.T) {
 // A session that does nothing fails the same gate. Without this the baseline
 // would flatter itself and the comparison would understate GoalForge.
 func TestBaselineFailsWhenTheGateIsNotSatisfied(t *testing.T) {
-	skipOnWindows(t)
 	env := baselineEnv(t)
 	scripts := t.TempDir()
 	spec := evaluation.CaseSpec{CaseID: "EVAL-1", GoalTitle: "add the marker file",
 		Criteria: []evaluation.Criterion{{Type: "marker", ExpectedValue: "true"}},
 		Gates: []evaluation.Gate{{Type: "marker", Required: true, SuccessValue: "true", Timeout: 30,
-			Command: gateScript(t, scripts, "marker", `test -f "$PWD/done.txt"`)}}}
+			Command: gateScript(t, scripts, "marker", `test -f "$PWD/done.txt"`, `if exist done.txt (exit /b 0) else (exit /b 1)`)}}}
 	fake := &baselineProvider{name: "codex"}
 	outcome, err := BaselineExecutor{Provider: fake, Model: "haiku"}.Execute(context.Background(), env, spec)
 	if err != nil {
@@ -124,13 +119,12 @@ func TestBaselineFailsWhenTheGateIsNotSatisfied(t *testing.T) {
 // The kind rule applies to the baseline identically. If it did not, one arm
 // could pass on evidence the other arm is refused.
 func TestBaselineIsHeldToTheSameProofKind(t *testing.T) {
-	skipOnWindows(t)
 	env := baselineEnv(t)
 	scripts := t.TempDir()
 	spec := evaluation.CaseSpec{CaseID: "EVAL-1", GoalTitle: "save a note",
 		Criteria: []evaluation.Criterion{{Type: "saves", ExpectedValue: "true", RequiredKind: "journey"}},
 		Gates: []evaluation.Gate{{Type: "saves", Required: true, SuccessValue: "true", Timeout: 30, Kind: "build",
-			Command: gateScript(t, scripts, "build", `exit 0`)}}}
+			Command: gateScript(t, scripts, "build", `exit 0`, `exit /b 0`)}}}
 	fake := &baselineProvider{name: "codex"}
 	outcome, err := BaselineExecutor{Provider: fake, Model: "haiku"}.Execute(context.Background(), env, spec)
 	if err != nil {

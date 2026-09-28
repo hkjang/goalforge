@@ -1,6 +1,8 @@
 package policy
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -31,7 +33,12 @@ func TestSandboxRefusesIncompleteConfiguration(t *testing.T) {
 // network, no privileges to gain, and ceilings on what it can consume.
 func TestSandboxDockerConfinesTheCommand(t *testing.T) {
 	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23", MemoryMB: 1024, CPUs: 1.5, Processes: 64}
-	wrapped, err := policy.Wrap("/tmp/work", []string{"go", "test", "./..."})
+	// The workspace is a real directory on this platform, because Wrap makes
+	// it absolute and "/tmp/work" is not absolute on Windows — asserting a
+	// POSIX path here made the test a statement about the host rather than
+	// about the policy.
+	workspace := t.TempDir()
+	wrapped, err := policy.Wrap(workspace, []string{"go", "test", "./..."})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,8 +46,7 @@ func TestSandboxDockerConfinesTheCommand(t *testing.T) {
 	for _, expected := range []string{
 		"docker run --rm --init",
 		"--workdir /workspace",
-		"--user ",
-		"--volume /tmp/work:/workspace:rw",
+		"--volume " + workspace + ":/workspace:rw",
 		"--read-only",
 		"--cap-drop ALL",
 		"--security-opt no-new-privileges",
@@ -77,5 +83,43 @@ func TestSandboxNetworkIsOptIn(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(on, " "), "--network none") {
 		t.Error("network must be allowed when a project asks for it")
+	}
+}
+
+// The identity flag exists to make a bind mount writable under Linux file
+// ownership. Where the host has no POSIX identity to copy — Windows reports
+// -1 — the flag must be left out rather than passed as "-1:-1", which docker
+// refuses, taking the whole sandbox down with it.
+func TestContainerUserIsOmittedWithoutAPosixIdentity(t *testing.T) {
+	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23"}
+	wrapped, err := policy.Wrap(t.TempDir(), []string{"go", "build", "./..."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(wrapped, " ")
+	if strings.Contains(joined, "-1") {
+		t.Fatalf("a host with no POSIX identity must not produce a --user value: %q", joined)
+	}
+	if os.Getuid() >= 0 {
+		// On a POSIX host the identity is still copied, or the mounted
+		// workspace stops being writable by the user who owns it.
+		if !strings.Contains(joined, fmt.Sprintf("--user %d:%d", os.Getuid(), os.Getgid())) {
+			t.Fatalf("the host identity must be carried into the container: %q", joined)
+		}
+	} else if strings.Contains(joined, "--user") {
+		t.Fatalf("no identity to carry, so no --user: %q", joined)
+	}
+}
+
+// An explicitly configured user is honoured on every platform, which is the
+// escape hatch for an image that needs a particular account.
+func TestExplicitContainerUserIsHonoured(t *testing.T) {
+	policy := SandboxPolicy{Mode: SandboxDocker, Image: "golang:1.23", User: "1000:1000"}
+	wrapped, err := policy.Wrap(t.TempDir(), []string{"go", "build"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(wrapped, " "), "--user 1000:1000") {
+		t.Fatalf("wrapped=%v", wrapped)
 	}
 }
