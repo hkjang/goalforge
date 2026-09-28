@@ -208,6 +208,14 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 	if result.Checkpoint.WorkItemID != "" {
 		worktree, worktreeErr := s.store.WorktreeForWorkItem(ctx, project.ID, result.Checkpoint.WorkItemID)
 		if worktreeErr == nil {
+			// The recorded path is checked before anything reads the tree.
+			// Otherwise a worktree that was pruned, deleted, or created on
+			// another machine surfaces as `fatal: cannot change to '...'`,
+			// which reads like the repository is broken.
+			recorded := gitops.Worktree{Path: worktree.Path, Branch: worktree.Branch, BaseCommit: worktree.BaseCommit}
+			if intactErr := gitops.WorktreeIntact(ctx, recorded); intactErr != nil {
+				return result, fmt.Errorf("%w — %s", intactErr, gitops.ExplainMissingWorktree(project.RepositoryPath, recorded))
+			}
 			project.RepositoryPath = worktree.Path
 		} else if project.WorktreeEnabled || !errors.Is(worktreeErr, store.ErrNotFound) {
 			return result, fmt.Errorf("load checkpoint worktree: %w", worktreeErr)

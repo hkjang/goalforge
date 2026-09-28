@@ -491,6 +491,16 @@ into `/etc` is the operator's decision and not a side effect of asking what the
 unit should say. Secrets are pointed at a credentials file rather than written
 into the unit: a unit is world-readable, so a token in one is a token published
 to every account on the machine.
+A recorded worktree is the same kind of claim about the filesystem. `git
+worktree prune`, a manual delete, a fresh clone, a reset disk — and, once a
+PostgreSQL queue is shared, a worker on a different machine picking up work
+whose worktree was created somewhere else. The recorded path is checked before
+anything reads the tree, so the failure says which worktree is gone, that the
+committed work is still on its branch, that uncommitted work in it is not
+recoverable, and how to recreate it — rather than surfacing as
+`fatal: cannot change to '...'`, which reads like the repository is broken. A
+path that exists holding a different branch is refused for the same reason:
+continuing there would write into somebody else's work.
 
 A stored session ID is a claim about the provider's storage, not GoalForge's.
 The provider can discard it at any time — expiry, a cleared cache, a different
