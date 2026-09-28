@@ -27,7 +27,7 @@ func gitRepo(t *testing.T) string {
 // The setup flow refuses a directory that is not a repository, and says so as
 // a blocking finding rather than a warning the wizard would step past.
 func TestDoctorBlocksNonRepository(t *testing.T) {
-	server, db := apiFixture(t, "")
+	server, db := apiFixture(t, "operator-secret")
 	defer db.Close()
 	plain := t.TempDir()
 	var report diagnostics.Report
@@ -57,7 +57,7 @@ func TestDoctorBlocksNonRepository(t *testing.T) {
 // Setup creates a project, its first goal version, and its budget, refusing a
 // goal with no completion criteria: a goal nothing can judge complete is not one.
 func TestSetupFlowCreatesProjectGoalAndPolicy(t *testing.T) {
-	server, db := apiFixture(t, "")
+	server, db := apiFixture(t, "operator-secret")
 	defer db.Close()
 	repo := gitRepo(t)
 	if response := mutate(t, server, http.MethodPost, "/api/v1/projects",

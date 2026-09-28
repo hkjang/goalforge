@@ -149,6 +149,12 @@ type setGoalRequest struct {
 // setGoal records a goal version. Criteria are required: without them nothing
 // can judge the goal complete, and a goal that cannot complete is not a goal.
 func (s *Server) setGoal(w http.ResponseWriter, r *http.Request) {
+	// Redefining the goal redefines what "done" means, which is how an
+	// unfinished job is made to look finished. The CLI refuses this to a
+	// session; so does this.
+	if !s.requireAuthority(w, operationSetGoal, "goalforge goal set") {
+		return
+	}
 	var request setGoalRequest
 	if err := decodeBody(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -194,6 +200,10 @@ type policyRequest struct {
 // anything is written: a request rejected halfway through would otherwise
 // leave the project with a budget it was never asked for.
 func (s *Server) setPolicy(w http.ResponseWriter, r *http.Request) {
+	// A run that can raise its own ceiling has no ceiling.
+	if !s.requireAuthority(w, operationSetPolicy, "goalforge project budget") {
+		return
+	}
 	var request policyRequest
 	if err := decodeBody(w, r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
