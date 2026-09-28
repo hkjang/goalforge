@@ -21,6 +21,10 @@ import (
 // (CI included) the test runs in full and still catches push regressions. The
 // probe goes through the same remote name the test uses, because pushing can be
 // disabled per remote rather than outright.
+//
+// Call it from the individual tests that actually push, never from the shared
+// fixture: in the fixture it silently skips the tests that never touch the
+// remote, and a skip is invisible in CI output without -v.
 func requirePushable(t *testing.T, repository, remote string) {
 	t.Helper()
 	const probe = "refs/heads/goalforge-push-probe"
@@ -55,7 +59,6 @@ func effectFixture(t *testing.T) (context.Context, *store.Store, model.Project, 
 	run(repo, "add", "-A")
 	run(repo, "commit", "-qm", "base")
 	run(repo, "remote", "add", "origin", remote)
-	requirePushable(t, repo, "origin")
 	run(repo, "checkout", "-q", "-b", "goalforge/W1")
 	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("done"), 0o600); err != nil {
 		t.Fatal(err)
@@ -82,6 +85,7 @@ func effectFixture(t *testing.T) (context.Context, *store.Store, model.Project, 
 // change is already applied instead of making a second one.
 func TestPublishReconcilesInsteadOfRepeating(t *testing.T) {
 	ctx, db, project, head, remote := effectFixture(t)
+	requirePushable(t, project.RepositoryPath, "origin")
 	effect := store.ExternalEffect{ProjectID: project.ID, WorkItemID: "W1", Kind: store.EffectPublishBranch,
 		Target: "origin", Branch: "goalforge/W1", RequestHash: head,
 		Key: store.EffectKey(store.EffectPublishBranch, project.ID, "W1", "origin", head)}
