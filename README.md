@@ -480,6 +480,17 @@ that list is not widened by `GOALFORGE_PASS_ENV` or `GOALFORGE_INHERIT_ENV=all`:
 an operator widening their environment is saying "this session may see my
 tooling", not "this session may hold the keys to its own audit".
 
+A recorded worktree is the same kind of claim about the filesystem. `git
+worktree prune`, a manual delete, a fresh clone, a reset disk — and, once a
+PostgreSQL queue is shared, a worker on a different machine picking up work
+whose worktree was created somewhere else. The recorded path is checked before
+anything reads the tree, so the failure says which worktree is gone, that the
+committed work is still on its branch, that uncommitted work in it is not
+recoverable, and how to recreate it — rather than surfacing as
+`fatal: cannot change to '...'`, which reads like the repository is broken. A
+path that exists holding a different branch is refused for the same reason:
+continuing there would write into somebody else's work.
+
 A stored session ID is a claim about the provider's storage, not GoalForge's.
 The provider can discard it at any time — expiry, a cleared cache, a different
 machine — and says so only when asked to resume. When a resume fails because

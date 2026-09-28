@@ -584,7 +584,32 @@ goalforge sessions --drop active    # 이미 없어진 걸 아는 경우 직접 
 
 ---
 
-## 17. 여러 기계에서 나눠 돌리기
+## 17. 워크트리가 사라졌을 때
+
+GoalForge 는 작업마다 worktree 경로를 기억합니다. 그 경로도 **파일 시스템에 대한 주장**입니다. `git worktree prune`, 수동 삭제, 새로 클론, 디스크 초기화 — 그리고 PostgreSQL 큐를 공유하면 **다른 기계에서 만들어진 워크트리**를 이 기계의 워커가 집을 수도 있습니다.
+
+기록된 경로는 **트리를 읽기 전에** 확인합니다. 아니면 이렇게 나옵니다:
+
+```
+fatal: cannot change to '/srv/myapp.goalforge-worktrees/W1': No such file or directory
+```
+
+저장소가 망가진 것처럼 읽히지만 실제 뜻은 다릅니다. 이제는 이렇게 말합니다:
+
+```
+recorded worktree is no longer present: /srv/myapp.goalforge-worktrees/W1 —
+커밋된 작업은 브랜치 goalforge/PRJ-1-W1 에 그대로 남아 있습니다 —
+git -C /srv/myapp worktree add ... 로 되살릴 수 있습니다.
+커밋되지 않은 변경은 복구할 수 없습니다.
+```
+
+**무엇이 남았고 무엇이 사라졌는지**가 다음 행동을 정합니다. 커밋된 작업은 브랜치에 안전하고, 커밋되지 않은 변경은 복구할 수 없습니다 — 어떻게 표현해도 그렇습니다. 그래서 **조용히 다시 만들고 계속하지 않습니다.** 체크포인트가 기록한 변경이 없는 트리에서 이어 가는 것이 더 나쁩니다.
+
+경로는 있는데 **다른 브랜치**가 올라가 있으면 거부합니다. 거기서 계속하면 남의 작업에 쓰게 됩니다.
+
+---
+
+## 18. 여러 기계에서 나눠 돌리기
 
 기본값에서 작업 큐는 나머지 상태와 같은 SQLite 안에 있습니다. 그래서 `goalforge worker` 는
 **자기 기계에서 넣은 작업만** 봅니다. 큐를 공유하려면 PostgreSQL 을 씁니다.
