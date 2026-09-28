@@ -491,6 +491,16 @@ into `/etc` is the operator's decision and not a side effect of asking what the
 unit should say. Secrets are pointed at a credentials file rather than written
 into the unit: a unit is world-readable, so a token in one is a token published
 to every account on the machine.
+A recorded worktree is the same kind of claim about the filesystem. `git
+worktree prune`, a manual delete, a fresh clone, a reset disk — and, once a
+PostgreSQL queue is shared, a worker on a different machine picking up work
+whose worktree was created somewhere else. The recorded path is checked before
+anything reads the tree, so the failure says which worktree is gone, that the
+committed work is still on its branch, that uncommitted work in it is not
+recoverable, and how to recreate it — rather than surfacing as
+`fatal: cannot change to '...'`, which reads like the repository is broken. A
+path that exists holding a different branch is refused for the same reason:
+continuing there would write into somebody else's work.
 
 A project is found by its repository path, so a repository that moves becomes
 unreachable: every command reports "no project here" while the goal, the
@@ -516,7 +526,12 @@ progress and proven completion side by side, every criterion with the evidence
 behind it, work items with the reason each one is stuck, the approval inbox
 with the commit and files each decision covers, and what a run would do right
 now. It refuses to start outside a terminal instead of hanging, honours
-`NO_COLOR`, and lays out by display width so Korean columns line up. Deciding
+`NO_COLOR`, and lays out by display width so Korean columns line up. Lists
+longer than the screen scroll with the cursor and say how many rows are out of
+sight; a list that renders its first screenful and drops the rest moves the
+cursor somewhere nobody can see, which is indistinguishable from the key not
+working. `?` shows every key on its own screen, because the footer is one line
+and truncates exactly where someone is most likely looking for it. Deciding
 an approval from it is checked where the decision happens, not when the screen
 opens: a session that is refused `goalforge approval approve` is refused the
 keystroke too, because opening a screen is not a permission. If any evidence or

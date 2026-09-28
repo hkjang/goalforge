@@ -108,6 +108,14 @@ func (o *Orchestrator) ResumeHandler(config ResumeConfig) scheduler.Handler {
 		if checkpoint.WorkItemID != "" {
 			worktree, worktreeErr := o.store.WorktreeForWorkItem(ctx, project.ID, checkpoint.WorkItemID)
 			if worktreeErr == nil {
+				// Checked before the snapshot reads it, so a worktree that was
+				// pruned, deleted, or made on another machine says so instead
+				// of surfacing as a git error about a missing directory.
+				recorded := gitops.Worktree{Path: worktree.Path, Branch: worktree.Branch, BaseCommit: worktree.BaseCommit}
+				if intactErr := gitops.WorktreeIntact(ctx, recorded); intactErr != nil {
+					_ = o.store.TransitionProjectState(ctx, project.ID, "WAITING_QUOTA", "BLOCKED")
+					return out, fmt.Errorf("%w — %s", intactErr, gitops.ExplainMissingWorktree(project.RepositoryPath, recorded))
+				}
 				project.RepositoryPath = worktree.Path
 			} else if project.WorktreeEnabled || !errors.Is(worktreeErr, store.ErrNotFound) {
 				_ = o.store.TransitionProjectState(ctx, project.ID, "WAITING_QUOTA", "BLOCKED")
