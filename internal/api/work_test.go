@@ -20,6 +20,11 @@ func mutate(t *testing.T, server *Server, method, path, body string) *httptest.R
 	var reader *strings.Reader = strings.NewReader(body)
 	request := httptest.NewRequest(method, path, reader)
 	request.Header.Set("X-Requested-With", "GoalForge")
+	// Tests that exercise behaviour speak as an authenticated operator; the
+	// tests about the authority boundary build their requests by hand.
+	if server.token != "" {
+		request.Header.Set("Authorization", "Bearer "+server.token)
+	}
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	return recorder
@@ -28,6 +33,9 @@ func mutate(t *testing.T, server *Server, method, path, body string) *httptest.R
 func get(t *testing.T, server *Server, path string, into any) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodGet, path, nil)
+	if server.token != "" {
+		request.Header.Set("Authorization", "Bearer "+server.token)
+	}
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if into != nil && recorder.Code == http.StatusOK {

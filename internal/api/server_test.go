@@ -40,7 +40,9 @@ func apiFixture(t *testing.T, token string) (*Server, *store.Store) {
 }
 
 func TestApprovalInboxAndDecisions(t *testing.T) {
-	server, db := apiFixture(t, "")
+	// A token is configured because deciding an approval requires the API to
+	// know who is calling; the unauthenticated case is its own test.
+	server, db := apiFixture(t, "operator-secret")
 	defer db.Close()
 	ctx := context.Background()
 	mergeScope := store.ApprovalScope{WorkItemID: "W1", SourceBranch: "goalforge/W1", TargetRef: "main", CommitSHA: "abc123def456789", FilesChanged: 2}
@@ -54,6 +56,7 @@ func TestApprovalInboxAndDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/approvals", nil)
+	request.Header.Set("Authorization", "Bearer operator-secret")
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	var inbox struct {
@@ -69,8 +72,10 @@ func TestApprovalInboxAndDecisions(t *testing.T) {
 	if inbox.Approvals[0].Scope.CommitSHA != "abc123def456789" || inbox.Approvals[0].Scope.WorkItemID != "W1" {
 		t.Fatalf("scope missing from inbox: %+v", inbox.Approvals[0])
 	}
-	// Mutations without the CSRF header are rejected even without a token.
+	// Mutations without the CSRF header are rejected even by an authenticated
+	// caller: the header defends the browser, the token identifies the caller.
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/projects/P-API/approvals/"+first.ID+"/approve", nil)
+	request.Header.Set("Authorization", "Bearer operator-secret")
 	response = httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
@@ -79,6 +84,7 @@ func TestApprovalInboxAndDecisions(t *testing.T) {
 	post := func(path string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, path, nil)
 		request.Header.Set("X-Requested-With", "GoalForge")
+		request.Header.Set("Authorization", "Bearer operator-secret")
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
 		return recorder

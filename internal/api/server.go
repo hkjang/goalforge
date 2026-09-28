@@ -363,7 +363,52 @@ func (s *Server) pendingApprovals(w http.ResponseWriter, r *http.Request) {
 
 // decideApproval approves or rejects one pending approval. Approvals stay a
 // deliberate human action: one decision per request, no bulk endpoint.
+// privilegedOperations are the API routes whose CLI equivalents an execution
+// session is already forbidden to run. Keeping the two lists in step is the
+// point: a boundary the CLI enforces and the API does not is not a boundary,
+// and the session reaches both.
+//
+// Deciding an approval releases work; changing the goal redefines what
+// "done" means, which is how a session makes an unfinished job look finished;
+// changing the budget lifts its own ceiling. Reading, triage, planning notes,
+// and run control are not on this list, because the CLI does not restrict them
+// either.
+const (
+	operationApprove   = "승인"
+	operationSetGoal   = "목표 변경"
+	operationSetPolicy = "예산·실행 제한 변경"
+)
+
+// requireAuthority reports whether this server can tell an operator apart
+// from anything else on the machine.
+//
+// It can only do that when a bearer token is configured, because the token is
+// an operator secret that is deliberately withheld from every execution
+// session. Without one the API authenticates nobody: `serve` on loopback has
+// no credential at all, and the X-Requested-With header is a cross-site guard,
+// not proof of who is calling — curl sets it in one flag. The session
+// GoalForge is running reaches the same port, so an API that decides approvals
+// in that mode lets a change approve itself, which the CLI and MCP both refuse.
+//
+// Reads stay open. Watching a run is the whole point of the loopback
+// dashboard, and closing that would cost something without preventing
+// anything.
+func (s *Server) requireAuthority(w http.ResponseWriter, operation, cliRemedy string) bool {
+	if s.token != "" {
+		return true
+	}
+	// Every operation name on this list ends in a consonant, so the particle
+	// is fixed; spelling it "을(를)" would read like a form letter.
+	writeError(w, http.StatusForbidden, fmt.Sprintf(
+		"이 API 는 호출자를 확인할 수 없어 %s을 수행하지 않습니다. GOALFORGE_API_TOKEN 을 설정하고 다시 시작하거나, `%s` 로 수행하세요",
+		operation, cliRemedy))
+	return false
+}
+
 func (s *Server) decideApproval(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthority(w, operationApprove, "goalforge approval approve <ID>") {
+		return
+	}
 	projectID, approvalID := r.PathValue("id"), r.PathValue("approvalID")
 	var err error
 	if strings.HasSuffix(r.URL.Path, "/reject") {

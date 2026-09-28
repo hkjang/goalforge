@@ -459,6 +459,17 @@ that list is not widened by `GOALFORGE_PASS_ENV` or `GOALFORGE_INHERIT_ENV=all`:
 an operator widening their environment is saying "this session may see my
 tooling", not "this session may hold the keys to its own audit".
 
+A boundary the CLI enforces and the API does not is not a boundary, and the
+session reaches both. `goalforge serve` listens on loopback with no token by
+default, and in that mode the API authenticates nobody — the
+`X-Requested-With` header defends the browser, it is not a credential. So an
+unauthenticated API refuses the operations the CLI already refuses to a
+session: deciding an approval, redefining the goal, and changing the budget.
+Reads stay open, because watching a run is what the loopback dashboard is for
+and closing it would prevent nothing. With `GOALFORGE_API_TOKEN` set, the
+caller has presented an operator secret that sessions are never given, so the
+decision is attributable and allowed.
+
 `goalforge doctor` checks two different things. The environment checks ask
 whether this machine can run anything; the readiness checks ask whether this
 project could ever finish, which is where the silent misconfiguration lives: a
