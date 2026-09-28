@@ -18,6 +18,16 @@ type UIState struct {
 	Width, Height  int
 	Message        string
 	MessageIsError bool
+	ShowHelp       bool
+}
+
+// pageSize is how far a page key moves: one screenful less a line, so the row
+// that was at the edge stays visible and the reader keeps their place.
+func (s UIState) pageSize() int {
+	if size := s.bodyHeight() - 1; size > 1 {
+		return size
+	}
+	return 1
 }
 
 // Model drives the terminal UI.
@@ -81,7 +91,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.snapshot = msg.snapshot
 		m.state.Message, m.state.MessageIsError = "", false
-		m.state.Cursor = clampCursor(m.state.Cursor, m.rowCount())
+		if m.state.Tab == TabOverview {
+			m.state.Cursor = clampCursor(m.snapshot.Selected, m.rowCount())
+		} else {
+			m.state.Cursor = clampCursor(m.state.Cursor, m.rowCount())
+		}
 		return m, nil
 	case actionMsg:
 		if msg.err != nil {
@@ -115,10 +129,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.state.Tab, m.state.Cursor = (m.state.Tab+tabCount-1)%tabCount, 0
 		return m, nil
 	case "up", "k":
-		m.state.Cursor = clampCursor(m.state.Cursor-1, m.rowCount())
-		return m, nil
+		return m.moveCursor(-1)
 	case "down", "j":
-		m.state.Cursor = clampCursor(m.state.Cursor+1, m.rowCount())
+		return m.moveCursor(1)
+	case "home", "g":
+		return m.moveCursorTo(0)
+	case "end", "G":
+		return m.moveCursorTo(m.rowCount() - 1)
+	case "pgup":
+		return m.moveCursor(-m.state.pageSize())
+	case "pgdown":
+		return m.moveCursor(m.state.pageSize())
+	case "?":
+		m.state.ShowHelp = !m.state.ShowHelp
 		return m, nil
 	case "left", "h":
 		return m.selectProject(m.snapshot.Selected - 1)
@@ -135,6 +158,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// moveCursor moves within the current tab's list. On the overview the list is
+// the projects, so moving the cursor is choosing the project the other tabs
+// describe — which is what makes the arrow keys do something on the first
+// screen.
+func (m Model) moveCursor(delta int) (tea.Model, tea.Cmd) {
+	return m.moveCursorTo(m.state.Cursor + delta)
+}
+
+func (m Model) moveCursorTo(index int) (tea.Model, tea.Cmd) {
+	count := m.rowCount()
+	next := clampCursor(index, count)
+	if next == m.state.Cursor {
+		return m, nil
+	}
+	m.state.Cursor = next
+	if m.state.Tab == TabOverview && count > 0 {
+		return m.selectProject(next)
+	}
+	return m, nil
+}
+
 func (m Model) selectProject(index int) (tea.Model, tea.Cmd) {
 	if len(m.snapshot.Projects) == 0 {
 		return m, nil
@@ -143,7 +187,13 @@ func (m Model) selectProject(index int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.snapshot.Selected = index
-	m.state.Cursor = 0
+	// On the overview the cursor *is* the selection, so it follows; elsewhere
+	// a new project means a new list and the cursor starts at the top.
+	if m.state.Tab == TabOverview {
+		m.state.Cursor = index
+	} else {
+		m.state.Cursor = 0
+	}
 	return m, m.load()
 }
 
@@ -192,8 +242,16 @@ func (m Model) decide(approve bool) (tea.Model, tea.Cmd) {
 
 // rowCount is how many rows the current tab can move through, so the cursor
 // cannot leave the list it belongs to.
+// rowCount is how many rows the current tab can move through.
+//
+// The overview's visible list is the project list, so it counts: with it
+// returning zero, up and down did nothing on the tab the user lands on, and on
+// a single-project install left and right did nothing either — every arrow
+// key was inert on the first screen.
 func (m Model) rowCount() int {
 	switch m.state.Tab {
+	case TabOverview:
+		return len(m.snapshot.Projects)
 	case TabWork:
 		return len(m.snapshot.Work)
 	case TabApprovals:
