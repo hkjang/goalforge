@@ -561,7 +561,41 @@ goalforge tui --refresh 10s    # 기본 5초
 
 ---
 
-## 16. 세션이 사라졌을 때
+## 16. 리눅스에서 서비스로 돌리기
+
+워커를 계속 띄워 두려면 systemd 유닛이 필요합니다. 손으로 쓰면 **세 가지가 어긋납니다** — 실행 파일 경로, 상태 DB 경로, 작업 디렉터리. 특히 마지막 것이 조용합니다: 엉뚱한 디렉터리에서 시작한 워커는 **등록된 프로젝트를 못 찾고 빈 큐를 돌면서 완벽히 건강해 보입니다.**
+
+```sh
+cd /srv/myapp                      # 프로젝트가 등록된 디렉터리에서
+goalforge service systemd --scope system | sudo tee /etc/systemd/system/goalforge-worker.service
+```
+
+유닛은 **실행 중인 프로세스에서 만들어지므로** 세 경로가 실제로 맞는 값입니다. 그리고 **설치하지 않고 출력합니다** — `/etc` 에 쓰는 것은 운영자의 결정이지, 유닛 내용을 물어본 것의 부작용이 아닙니다.
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/goalforge worker
+WorkingDirectory=/srv/myapp
+Environment=GOALFORGE_DB=/srv/myapp/.goalforge/goalforge.db
+EnvironmentFile=-/etc/goalforge/worker.env
+Restart=on-failure
+TimeoutStopSec=300
+NoNewPrivileges=yes
+```
+
+- **비밀값은 유닛에 쓰지 않습니다.** 유닛 파일은 누구나 읽을 수 있어서, 거기 적힌 토큰은 그 기계의 모든 계정에 공개한 것과 같습니다. `EnvironmentFile` 이 가리키는 파일에 적고 `chmod 600` 하세요 — `GOALFORGE_AUDIT_KEY`, `GOALFORGE_API_TOKEN`, `GOALFORGE_MCP_TOKEN`, `GOALFORGE_POSTGRES_DSN`.
+- **`TimeoutStopSec=300`**: 세션을 도중에 죽이면 아무도 기록하지 않은 절반짜리 변경이 남습니다. 끝낼 시간을 줍니다.
+- **`Restart=on-failure`**: 목표 중간에 죽은 워커는 돌아와야 합니다. 쥐고 있던 임대는 만료되고 작업은 다시 잡힙니다.
+
+`--scope user` 로 하면 `systemctl --user` 용 유닛이 나옵니다(루트 권한 없이).
+
+```sh
+journalctl -u goalforge-worker -f
+```
+
+---
+
+## 17. 세션이 사라졌을 때
 
 GoalForge 는 제공자 세션 ID 를 기억했다가 다음 실행에서 `--resume` 에 씁니다. 그런데 **그 ID 는 제공자 저장소에 대한 주장이지 GoalForge 저장소에 대한 주장이 아닙니다.** 제공자는 만료·캐시 정리·다른 기계 같은 이유로 언제든 그 세션을 버릴 수 있고, **재개를 요청받았을 때에야 그렇다고 말합니다.**
 
@@ -584,7 +618,7 @@ goalforge sessions --drop active    # 이미 없어진 걸 아는 경우 직접 
 
 ---
 
-## 17. 여러 기계에서 나눠 돌리기
+## 18. 여러 기계에서 나눠 돌리기
 
 기본값에서 작업 큐는 나머지 상태와 같은 SQLite 안에 있습니다. 그래서 `goalforge worker` 는
 **자기 기계에서 넣은 작업만** 봅니다. 큐를 공유하려면 PostgreSQL 을 씁니다.
