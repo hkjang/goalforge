@@ -1,0 +1,69 @@
+# Release artifacts built where anyone can check how they were built.
+#
+# Until this existed the binaries were compiled on one person's laptop and
+# attached by hand: the checksum file proved the download matched what was
+# uploaded, and nothing proved what was uploaded came from this source. An
+# attestation closes that gap — `gh attestation verify` ties each archive to
+# this repository, this workflow, and this commit.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  # Required to sign the provenance attestation.
+  id-token: write
+  attestations: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The build stamps the commit and its date into the binary.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: verify before publishing
+        # A release that was never tested is a release whose only claim is that
+        # it compiled.
+        run: |
+          go vet ./...
+          go test ./... -count=1
+
+      - name: build artifacts
+        id: build
+        run: |
+          version="${GITHUB_REF_NAME}"
+          bash scripts/build-release.sh "$version"
+          echo "dist=dist/$version" >> "$GITHUB_OUTPUT"
+
+      - name: attest provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.build.outputs.dist }}/goalforge_*
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME}"
+          # The release may already exist with hand-written notes; creating it
+          # is a fallback, not the normal path, so a failure here is expected
+          # and ignored.
+          gh release create "$version" --title "$version" \
+            --notes "빌드가 CI 에서 게시되었습니다. 상세 내용은 곧 갱신됩니다." || true
+          gh release upload "$version" "dist/$version"/goalforge_* "dist/$version/SHA256SUMS" --clobber
+
+      - name: state how to verify
+        run: |
+          echo "이 릴리즈의 산출물은 다음으로 출처를 검증할 수 있습니다:"
+          echo "  gh attestation verify goalforge_${GITHUB_REF_NAME}_linux_amd64.tar.gz --repo ${GITHUB_REPOSITORY}"
