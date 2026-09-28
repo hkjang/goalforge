@@ -68,6 +68,32 @@ var providerEnvPrefixes = []string{
 	"ANTHROPIC_", "CLAUDE_", "OPENAI_", "CODEX_", "QWEN_", "OPENCODE_", "XDG_", "GOALFORGE_",
 }
 
+// secretEnvKeys never reach an execution session, whatever else is allowed.
+// They are the credentials that would let a session act as the operator over
+// it: the audit key would let it recompute the integrity chain it is the
+// subject of, the API and MCP tokens would let it call the management surface
+// as an authenticated client, and the database DSN carries a password.
+//
+// Prefix allowances do not cover these, and neither does GOALFORGE_INHERIT_ENV=all.
+// An operator widening the environment is saying "this session may see my
+// tooling", not "this session may hold the keys to its own audit".
+var secretEnvKeys = map[string]bool{
+	"GOALFORGE_AUDIT_KEY":    true,
+	"GOALFORGE_API_TOKEN":    true,
+	"GOALFORGE_MCP_TOKEN":    true,
+	"GOALFORGE_POSTGRES_DSN": true,
+}
+
+// SecretEnvKeys lists the variables withheld from every session.
+func SecretEnvKeys() []string {
+	keys := make([]string, 0, len(secretEnvKeys))
+	for key := range secretEnvKeys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // EnvInherit and EnvPassthrough let an operator widen the set deliberately.
 const (
 	EnvInherit     = "GOALFORGE_INHERIT_ENV"
@@ -83,7 +109,7 @@ func SessionEnvironment(host []string, role string) []string {
 		role = RoleImplementation
 	}
 	if strings.EqualFold(os.Getenv(EnvInherit), "all") {
-		return append(append([]string{}, host...), EnvRole+"="+role)
+		return append(withoutSecrets(host), EnvRole+"="+role)
 	}
 	allowed := map[string]bool{}
 	for _, key := range baseEnvKeys {
@@ -100,12 +126,29 @@ func SessionEnvironment(host []string, role string) []string {
 		if !found {
 			continue
 		}
+		if secretEnvKeys[key] {
+			continue
+		}
 		if allowed[key] || hasAnyPrefix(key, providerEnvPrefixes) {
 			filtered = append(filtered, entry)
 		}
 	}
 	sort.Strings(filtered)
 	return append(filtered, EnvRole+"="+role)
+}
+
+// withoutSecrets strips the credentials no session may hold, so the widest
+// inheritance setting still cannot hand them over.
+func withoutSecrets(host []string) []string {
+	filtered := make([]string, 0, len(host))
+	for _, entry := range host {
+		key, _, found := strings.Cut(entry, "=")
+		if found && secretEnvKeys[key] {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func hasAnyPrefix(value string, prefixes []string) bool {

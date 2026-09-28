@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/goalforge/goalforge/internal/audit"
@@ -44,8 +45,25 @@ func (s *Store) RecordRunVerification(ctx context.Context, r VerificationRecord)
 	if r.Required {
 		required = 1
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,tree_id,evaluator_id,evidence_kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), r.FailureKind, r.RepairMode, r.TreeID, r.EvaluatorID, r.EvidenceKind, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := chainStamp(time.Now())
+	result, err := tx.ExecContext(ctx, `INSERT INTO verification_results(goal_id,run_id,check_type,status,actual_value,command,exit_code,duration_ms,required,output,failure_kind,repair_mode,tree_id,evaluator_id,evidence_kind,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, audit.RedactString(r.Command), r.ExitCode, r.Duration.Milliseconds(), required, audit.RedactString(r.Output), r.FailureKind, r.RepairMode, r.TreeID, r.EvaluatorID, r.EvidenceKind, now)
+	if err != nil {
+		return err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if err = appendChain(ctx, tx, ChainEvidence, fmt.Sprint(id),
+		evidenceDigest(goalID, r.RunID, r.CheckType, r.Status, r.ActualValue, r.EvidenceKind, now, required), now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ApplyVerificationOutcome(ctx context.Context, runID string, passed bool) (model.Goal, error) {

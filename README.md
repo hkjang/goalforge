@@ -124,6 +124,8 @@ pass is committed in its worktree as author `GoalForge` with
 goalforge approval request --action merge-branch --work-item WORK-1 --reason "..."
 goalforge merge --work-item WORK-1     # --no-ff into the default branch; conflicts abort for review
 goalforge effects [--reconcile]        # what was changed outside, and settle anything unresolved
+goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
+goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge backup --out FILE            # consistent copy of the state database
 goalforge restore --from FILE --to PATH  # verify the records, settle outside work, then resume
 goalforge approval request --action publish-branch --work-item WORK-1 [--remote origin] --reason "..."
@@ -437,6 +439,25 @@ self-contained HTML page plus the same record as JSON, and the dashboard serves
 it at `/api/v1/projects/{id}/evidence`. The refusals and relaxations are in
 there deliberately: a bundle that only keeps the good news describes a
 different project than the one that happened.
+
+Everything GoalForge claims rests on two kinds of record: the evidence that
+says a goal is done, and the approvals that say a change was allowed out. The
+session GoalForge orchestrates has write access to the same database file, so
+a row nobody can distinguish from one GoalForge wrote is not evidence. Both
+kinds are linked into an append-only chain as they are written, and
+`goalforge integrity verify` reports three distinct findings: a record edited
+after it was written, a record deleted, and a record inserted without passing
+through GoalForge at all.
+
+Set `GOALFORGE_AUDIT_KEY` to make the chain unforgeable. Without it the chain
+still catches an edit, a deletion, and a direct insert, but whoever made them
+could recompute the chain; with it they cannot, because the links are MACs.
+`integrity verify` says which of the two is in force rather than implying the
+stronger one. The key — along with `GOALFORGE_API_TOKEN`, `GOALFORGE_MCP_TOKEN`,
+and `GOALFORGE_POSTGRES_DSN` — is withheld from every execution session, and
+that list is not widened by `GOALFORGE_PASS_ENV` or `GOALFORGE_INHERIT_ENV=all`:
+an operator widening their environment is saying "this session may see my
+tooling", not "this session may hold the keys to its own audit".
 
 `goalforge doctor` checks two different things. The environment checks ask
 whether this machine can run anything; the readiness checks ask whether this

@@ -97,10 +97,24 @@ func (s *Store) RequestScopedApproval(ctx context.Context, projectID, actionType
 		return approval, fmt.Errorf("%s approvals must name the work item and commit being approved", actionType)
 	}
 	approval = Approval{ID: NewID("APR"), ProjectID: projectID, ActionType: actionType, Reason: audit.RedactString(reason), Status: "PENDING", RequestedAt: time.Now().UTC(), Scope: scope}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO approvals(id,project_id,action_type,reason,status,requested_at,work_item_id,source_branch,target_ref,commit_sha,files_changed) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		approval.ID, approval.ProjectID, approval.ActionType, approval.Reason, approval.Status, approval.RequestedAt.Format(time.RFC3339Nano),
-		scope.WorkItemID, scope.SourceBranch, scope.TargetRef, scope.CommitSHA, scope.FilesChanged)
-	return approval, err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return approval, err
+	}
+	defer tx.Rollback()
+	requestedAt := chainStamp(approval.RequestedAt)
+	if _, err = tx.ExecContext(ctx, `INSERT INTO approvals(id,project_id,action_type,reason,status,requested_at,work_item_id,source_branch,target_ref,commit_sha,files_changed) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		approval.ID, approval.ProjectID, approval.ActionType, approval.Reason, approval.Status, requestedAt,
+		scope.WorkItemID, scope.SourceBranch, scope.TargetRef, scope.CommitSHA, scope.FilesChanged); err != nil {
+		return approval, err
+	}
+	// Each transition appends a link, so the chain carries the approval's
+	// whole history rather than only the state it started in.
+	if err = appendChain(ctx, tx, ChainApproval, approval.ID,
+		approvalDigest(approval.ID, projectID, actionType, approval.Status, scope.WorkItemID, scope.CommitSHA, requestedAt), requestedAt); err != nil {
+		return approval, err
+	}
+	return approval, tx.Commit()
 }
 
 // scopeRequired lists the actions that transfer verified work outward, where
@@ -110,14 +124,35 @@ func scopeRequired(actionType string) bool {
 }
 
 func (s *Store) Approve(ctx context.Context, projectID, approvalID string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='APPROVED',approved_at=? WHERE id=? AND project_id=? AND status='PENDING'`, time.Now().UTC().Format(time.RFC3339Nano), approvalID, projectID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='APPROVED',approved_at=? WHERE id=? AND project_id=? AND status='PENDING'`, chainStamp(time.Now()), approvalID, projectID)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("approval is not pending")
 	}
-	return nil
+	if err = chainApprovalState(ctx, tx, approvalID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// chainApprovalState appends a link for an approval's current state, read back
+// inside the same transaction so the digest describes what was actually
+// written rather than what the caller meant to write.
+func chainApprovalState(ctx context.Context, tx *sql.Tx, approvalID string) error {
+	var id, projectID, actionType, status, workItemID, commitSHA, requestedAt string
+	if err := tx.QueryRowContext(ctx, `SELECT id,project_id,action_type,status,COALESCE(work_item_id,''),COALESCE(commit_sha,''),requested_at FROM approvals WHERE id=?`, approvalID).
+		Scan(&id, &projectID, &actionType, &status, &workItemID, &commitSHA, &requestedAt); err != nil {
+		return err
+	}
+	return appendChain(ctx, tx, ChainApproval, id,
+		approvalDigest(id, projectID, actionType, status, workItemID, commitSHA, requestedAt), chainStamp(time.Now()))
 }
 
 // RejectionCategories are the reasons a person turns work down. Recording
@@ -147,15 +182,23 @@ func (s *Store) RejectApprovalWithReason(ctx context.Context, projectID, approva
 	if category != "" && !ValidRejectionCategory(category) {
 		return fmt.Errorf("rejection category must be one of %s", strings.Join(RejectionCategories, ", "))
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE approvals SET status='REJECTED',approved_at=?,rejection_category=?,rejection_note=? WHERE id=? AND project_id=? AND status='PENDING'`,
-		time.Now().UTC().Format(time.RFC3339Nano), category, audit.RedactString(note), approvalID, projectID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE approvals SET status='REJECTED',approved_at=?,rejection_category=?,rejection_note=? WHERE id=? AND project_id=? AND status='PENDING'`,
+		chainStamp(time.Now()), category, audit.RedactString(note), approvalID, projectID)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("approval is not pending")
 	}
-	return nil
+	if err = chainApprovalState(ctx, tx, approvalID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // PendingApproval is an approval joined with its project name for the
@@ -264,6 +307,9 @@ func (s *Store) consume(ctx context.Context, runID, query string, args ...any) (
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
 		return false, errors.New("approval claim lost")
+	}
+	if err = chainApprovalState(ctx, tx, id); err != nil {
+		return false, err
 	}
 	return true, tx.Commit()
 }

@@ -306,6 +306,12 @@ CREATE TABLE IF NOT EXISTS verification_gates (
  success_value TEXT NOT NULL DEFAULT 'true', value_pattern TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
  PRIMARY KEY(project_id,check_type)
 );
+CREATE TABLE IF NOT EXISTS audit_chain (
+ seq INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, record_id TEXT NOT NULL,
+ payload_digest TEXT NOT NULL, prev_digest TEXT NOT NULL DEFAULT '', digest TEXT NOT NULL,
+ recorded_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_chain_record ON audit_chain(kind, record_id);
 CREATE INDEX IF NOT EXISTS idx_goals_project_version ON goals(project_id, version DESC);
 CREATE INDEX IF NOT EXISTS idx_work_goal_status ON work_items(goal_id, status);
 CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id, check_type, id DESC);`
@@ -784,7 +790,25 @@ func (s *Store) RecordVerification(ctx context.Context, goalID, checkType, statu
 	if status != "PASSED" && status != "FAILED" && status != "UNKNOWN" {
 		return fmt.Errorf("invalid verification status %q", status)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO verification_results(goal_id,check_type,status,actual_value,output,created_at) VALUES(?,?,?,?,?,?)`, goalID, checkType, status, actual, audit.RedactString(output), time.Now().UTC().Format(time.RFC3339Nano))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := chainStamp(time.Now())
+	inserted, err := tx.ExecContext(ctx, `INSERT INTO verification_results(goal_id,check_type,status,actual_value,output,created_at) VALUES(?,?,?,?,?,?)`, goalID, checkType, status, actual, audit.RedactString(output), now)
+	if err != nil {
+		return err
+	}
+	id, err := inserted.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if err = appendChain(ctx, tx, ChainEvidence, fmt.Sprint(id),
+		evidenceDigest(goalID, "", checkType, status, actual, "", now, 1), now); err != nil {
+		return err
+	}
+	return tx.Commit()
 	return err
 }
 

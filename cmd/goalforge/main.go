@@ -20,6 +20,7 @@ import (
 
 	"github.com/goalforge/goalforge/internal/api"
 	"github.com/goalforge/goalforge/internal/app"
+	"github.com/goalforge/goalforge/internal/audit"
 	"github.com/goalforge/goalforge/internal/diagnostics"
 	"github.com/goalforge/goalforge/internal/evaluation"
 	"github.com/goalforge/goalforge/internal/gitops"
@@ -76,6 +77,7 @@ ship       approval request | approval list | approval approve ID | approval rej
 handoff    takeover --work-item ID | takeover return --work-item ID
 evaluate   eval add | eval list | eval spec | eval run [--arm baseline] | eval record | eval compare
 operate    backup --out FILE | restore --from FILE --to PATH | effects [--reconcile]
+           integrity verify
 serve      serve [--addr HOST:PORT] | mcp [--addr HOST:PORT] | storage postgres migrate
            checkpoint --next-action TEXT
 misc       version`
@@ -178,6 +180,10 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "sandbox" {
 			return projectSandbox(ctx, s, args[2:])
+		}
+	case "integrity":
+		if len(args) > 1 && args[1] == "verify" {
+			return integrityVerify(ctx, s, args[2:])
 		}
 	case "goal":
 		if len(args) > 2 && args[1] == "contract" && args[2] == "show" {
@@ -3473,4 +3479,49 @@ func printArmComparison(ctx context.Context, s *store.Store, projectID, caseID s
 	}
 	fmt.Println()
 	return nil
+}
+
+// integrityVerify checks that the evidence and approvals in the database are the
+// ones GoalForge wrote. Everything the tool claims rests on those records, and
+// the session it orchestrates has write access to the same file, so "the row
+// says PASSED" is only worth something if a row nobody wrote through GoalForge
+// can be told apart from one that was.
+func integrityVerify(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("integrity verify", flag.ContinueOnError)
+	asJSON := f.Bool("json", false, "emit the report as JSON")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	report, err := s.VerifyIntegrity(ctx)
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		encoded, marshalErr := json.MarshalIndent(report, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		fmt.Println(string(encoded))
+		if !report.Intact() {
+			return errors.New("integrity check failed")
+		}
+		return nil
+	}
+	fmt.Printf("무결성 기록 %d건\n", report.Entries)
+	// State which guarantee is actually in force. An unkeyed chain catches an
+	// edit; it does not stop whoever made the edit from recomputing the chain.
+	if report.Keyed {
+		fmt.Println("사슬 보호: 키 있음 — 기록을 고친 사람도 사슬을 다시 계산할 수 없습니다")
+	} else {
+		fmt.Printf("사슬 보호: 키 없음 — 수정·삭제·무단 삽입은 탐지하지만, 데이터베이스에 쓸 수 있는 사람이 사슬 전체를 다시 계산하는 것은 막지 못합니다 (%s 를 설정하세요)\n", audit.EnvChainKey)
+	}
+	if report.Intact() {
+		fmt.Println("결과: 기록이 GoalForge 가 쓴 그대로입니다")
+		return nil
+	}
+	fmt.Printf("\n발견 %d건:\n", len(report.Findings))
+	for _, finding := range report.Findings {
+		fmt.Printf("  %-17s %-9s %-10s %s\n", finding.Kind, finding.RecordKind, finding.RecordID, finding.Detail)
+	}
+	return errors.New("integrity check failed")
 }
