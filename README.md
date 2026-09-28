@@ -134,6 +134,8 @@ goalforge merge --work-item WORK-1     # --no-ff into the default branch; confli
 goalforge effects [--reconcile]        # what was changed outside, and settle anything unresolved
 goalforge tui [--refresh 5s]           # terminal dashboard: progress, criteria, work, approvals, plan
 goalforge service systemd [--scope user|system]  # a systemd unit for the worker
+goalforge storage usage                # where the state database's space went
+goalforge storage prune --older-than 30d [--apply] [--vacuum]
 goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge backup --out FILE            # consistent copy of the state database
@@ -461,6 +463,17 @@ self-contained HTML page plus the same record as JSON, and the dashboard serves
 it at `/api/v1/projects/{id}/evidence`. The refusals and relaxations are in
 there deliberately: a bundle that only keeps the good news describes a
 different project than the one that happened.
+
+A worker left running accumulates: every event a provider emits is stored
+whole, and nothing removed them. `goalforge storage usage` says where the space
+went and `goalforge storage prune` drops the bulk of finished runs — the bodies
+go and the rows stay, so an event keeps its type, its time, and its hash and a
+prompt keeps its template and its hash. The audit still answers "what happened
+and when" and stops answering "in exactly these words", which is the part that
+costs gigabytes and the part least often needed. Evidence, approvals, and the
+integrity chain are never touched: removing one would make `integrity verify`
+report tampering, correctly and unhelpfully. It reports before it removes,
+because audit data deleted on a typo does not come back.
 
 Everything GoalForge claims rests on two kinds of record: the evidence that
 says a goal is done, and the approvals that say a change was allowed out. The
