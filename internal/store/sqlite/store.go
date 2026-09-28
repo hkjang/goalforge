@@ -1224,3 +1224,36 @@ func (s *Store) projectName(ctx context.Context, projectID string) string {
 	}
 	return name
 }
+
+// RelocateProject points a registered project at a new repository path.
+//
+// The path is how a project is found, so a repository that moves becomes
+// unreachable: every command reports "no project here" while the state — the
+// goal, the evidence, the approvals — is still in the database. Rewriting the
+// path is the whole recovery, and it is a rename rather than a re-registration
+// because re-registering would start a second project beside the first and
+// leave the history behind.
+func (s *Store) RelocateProject(ctx context.Context, projectID, newPath string) (model.Project, error) {
+	absolute, err := filepath.Abs(strings.TrimSpace(newPath))
+	if err != nil {
+		return model.Project{}, err
+	}
+	if info, statErr := os.Stat(absolute); statErr != nil || !info.IsDir() {
+		return model.Project{}, fmt.Errorf("%s 는 존재하는 디렉터리가 아닙니다", absolute)
+	}
+	// Another project already living there would mean two records pointing at
+	// one repository, and every later lookup answering arbitrarily.
+	if existing, pathErr := s.ProjectByPath(ctx, absolute); pathErr == nil && existing.ID != projectID {
+		return model.Project{}, fmt.Errorf("%s 에는 이미 프로젝트 %s 가 등록되어 있습니다", absolute, existing.Name)
+	} else if pathErr != nil && !errors.Is(pathErr, ErrNotFound) {
+		return model.Project{}, pathErr
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE projects SET repository_path=? WHERE id=?`, absolute, projectID)
+	if err != nil {
+		return model.Project{}, err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return model.Project{}, ErrNotFound
+	}
+	return s.ProjectByID(ctx, projectID)
+}
