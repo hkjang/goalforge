@@ -515,6 +515,14 @@ recoverable, and how to recreate it — rather than surfacing as
 path that exists holding a different branch is refused for the same reason:
 continuing there would write into somebody else's work.
 
+A project is found by its repository path, so a repository that moves becomes
+unreachable: every command reports "no project here" while the goal, the
+evidence, and the approvals are all still in the database. The message names
+the paths that *are* registered and marks the ones that no longer exist, and
+`goalforge project relocate` rewrites the path. It is a rename rather than a
+re-registration, because registering again would start a second project beside
+the first and leave the history behind.
+
 A stored session ID is a claim about the provider's storage, not GoalForge's.
 The provider can discard it at any time — expiry, a cleared cache, a different
 machine — and says so only when asked to resume. When a resume fails because

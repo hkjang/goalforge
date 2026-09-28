@@ -66,7 +66,7 @@ const usageText = `usage: goalforge [--db PATH] COMMAND
 
 setup      project init | project budget | project runtime | project concurrency | project profile
            project sandbox [--mode docker --image IMG]
-           project provider set | doctor [--probe-auth]
+           project provider set | project relocate [--name N] | doctor [--probe-auth]
 goal       goal set | goal show | goal contract | goal contract show | milestone add | decision add | decision list | decision supersede
 work       work add | work list | work status ID --set STATUS
 verify     verify template NAME | verify gate add | verify record | verify integration
@@ -185,6 +185,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "sandbox" {
 			return projectSandbox(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "relocate" {
+			return projectRelocate(ctx, s, args[2:])
 		}
 	case "service":
 		if len(args) > 1 && args[1] == "systemd" {
@@ -3282,12 +3285,44 @@ func projectInit(ctx context.Context, s *store.Store, args []string) error {
 	return nil
 }
 
+// currentProject resolves the project registered for this directory.
+//
+// When none matches, "not found" is true and useless: the state database
+// usually does hold a project, registered under a path that has since moved —
+// a repository relocated, a clone made somewhere else, or, once a PostgreSQL
+// queue is shared, the same project checked out at a different path on this
+// machine. Saying which paths are registered turns a dead end into the one
+// fact the user needs.
 func currentProject(ctx context.Context, s *store.Store) (model.Project, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return model.Project{}, err
 	}
-	return s.ProjectByPath(ctx, cwd)
+	project, err := s.ProjectByPath(ctx, cwd)
+	if !errors.Is(err, store.ErrNotFound) {
+		return project, err
+	}
+	return model.Project{}, unregisteredDirectory(ctx, s, cwd)
+}
+
+// unregisteredDirectory explains what is registered instead.
+func unregisteredDirectory(ctx context.Context, s *store.Store, cwd string) error {
+	projects, listErr := s.ListProjects(ctx)
+	if listErr != nil || len(projects) == 0 {
+		return fmt.Errorf("%s 에 등록된 프로젝트가 없습니다. goalforge project init 으로 등록하세요", cwd)
+	}
+	var lines []string
+	for _, project := range projects {
+		marker := ""
+		if _, statErr := os.Stat(project.RepositoryPath); os.IsNotExist(statErr) {
+			// A registered path that is gone is the likely explanation, so it
+			// is marked rather than listed as if it were still usable.
+			marker = "  (경로가 존재하지 않습니다)"
+		}
+		lines = append(lines, fmt.Sprintf("  %s\t%s%s", project.Name, project.RepositoryPath, marker))
+	}
+	return fmt.Errorf("현재 디렉터리 %s 에 등록된 프로젝트가 없습니다.\n등록된 프로젝트:\n%s\n저장소를 옮겼다면 `goalforge project relocate` 로 경로를 갱신하세요",
+		cwd, strings.Join(lines, "\n"))
 }
 
 func goalSet(ctx context.Context, s *store.Store, args []string) error {
@@ -3794,6 +3829,72 @@ func serviceSystemd(ctx context.Context, s *store.Store, args []string) error {
 	for _, note := range unit.InstallNotes() {
 		fmt.Fprintln(os.Stderr, note)
 	}
+	return nil
+}
+
+// projectRelocate points a registered project at the directory it is now in.
+//
+// A project is found by its repository path, so a repository that moves
+// becomes unreachable: every command says "no project here" while the goal,
+// the evidence, and the approvals are all still in the database. This is the
+// whole recovery, and it is deliberately not a re-registration — that would
+// start a second project beside the first and leave the history behind.
+func projectRelocate(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("project relocate", flag.ContinueOnError)
+	name := f.String("name", "", "project to move here (required when more than one is registered)")
+	to := f.String("to", "", "new repository path (default: this directory)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	target := *to
+	if target == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		target = cwd
+	}
+	projects, err := s.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	if len(projects) == 0 {
+		return errors.New("등록된 프로젝트가 없습니다")
+	}
+	var chosen *model.Project
+	switch {
+	case *name != "":
+		for i := range projects {
+			if projects[i].Name == *name {
+				chosen = &projects[i]
+				break
+			}
+		}
+		if chosen == nil {
+			return fmt.Errorf("프로젝트 %q 를 찾을 수 없습니다", *name)
+		}
+	case len(projects) == 1:
+		chosen = &projects[0]
+	default:
+		// Guessing which project moved would be a coin flip that rewrites the
+		// wrong record, so the ambiguity is handed back with the list needed
+		// to resolve it.
+		var names []string
+		for _, project := range projects {
+			names = append(names, fmt.Sprintf("  %s\t%s", project.Name, project.RepositoryPath))
+		}
+		return fmt.Errorf("프로젝트가 여러 개 등록되어 있어 어느 것을 옮길지 알 수 없습니다. --name 으로 지정하세요:\n%s",
+			strings.Join(names, "\n"))
+	}
+	previous := chosen.RepositoryPath
+	moved, err := s.RelocateProject(ctx, chosen.ID, target)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("project relocated: %s\n  이전: %s\n  현재: %s\n", moved.Name, previous, moved.RepositoryPath)
+	// Worktrees were created under the old path and do not follow it, so a
+	// silent success here would be followed by a confusing failure later.
+	fmt.Println("\n이전 경로에 만들어진 worktree 는 따라오지 않습니다. `goalforge worktree gc` 로 정리하거나 새 경로에서 다시 만들어집니다.")
 	return nil
 }
 
