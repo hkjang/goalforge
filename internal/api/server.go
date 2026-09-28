@@ -12,6 +12,7 @@ import (
 	"github.com/goalforge/goalforge/internal/app"
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/policy"
 	"github.com/goalforge/goalforge/internal/provider"
 	"github.com/goalforge/goalforge/internal/scheduler"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
@@ -397,11 +398,9 @@ func (s *Server) requireAuthority(w http.ResponseWriter, operation, cliRemedy st
 	if s.token != "" {
 		return true
 	}
-	// Every operation name on this list ends in a consonant, so the particle
-	// is fixed; spelling it "을(를)" would read like a form letter.
 	writeError(w, http.StatusForbidden, fmt.Sprintf(
-		"이 API 는 호출자를 확인할 수 없어 %s을 수행하지 않습니다. GOALFORGE_API_TOKEN 을 설정하고 다시 시작하거나, `%s` 로 수행하세요",
-		operation, cliRemedy))
+		"이 API 는 호출자를 확인할 수 없어 %s 수행하지 않습니다. GOALFORGE_API_TOKEN 을 설정하고 다시 시작하거나, `%s` 로 수행하세요",
+		policy.Object(operation), cliRemedy))
 	return false
 }
 

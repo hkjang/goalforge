@@ -39,6 +39,7 @@ import (
 	"github.com/goalforge/goalforge/internal/scheduler"
 	pgstore "github.com/goalforge/goalforge/internal/store/postgres"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
+	"github.com/goalforge/goalforge/internal/tui"
 	usagepolicy "github.com/goalforge/goalforge/internal/usage"
 	"github.com/goalforge/goalforge/internal/verification"
 )
@@ -70,7 +71,7 @@ work       work add | work list | work status ID --set STATUS
 verify     verify template NAME | verify gate add | verify record | verify integration
 run        plan [--json] | continue [--enqueue] | develop | run --until-quota | ideas | audit | replan
            worker [--once] | pause | resume | cancel
-review     status | usage | sessions | logs | report [--since 24h] | models | evidence export --out DIR
+review     tui | status | usage | sessions | logs | report [--since 24h] | models | evidence export --out DIR
            reproduce --run ID --out DIR | pr --work-item ID
 ship       approval request | approval list | approval approve ID | approval reject ID
            merge --work-item ID | publish --work-item ID | rollback | worktree gc
@@ -181,6 +182,8 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "sandbox" {
 			return projectSandbox(ctx, s, args[2:])
 		}
+	case "tui":
+		return runTUI(ctx, s, args[1:])
 	case "integrity":
 		if len(args) > 1 && args[1] == "verify" {
 			return integrityVerify(ctx, s, args[2:])
@@ -3524,4 +3527,19 @@ func integrityVerify(ctx context.Context, s *store.Store, args []string) error {
 		fmt.Printf("  %-17s %-9s %-10s %s\n", finding.Kind, finding.RecordKind, finding.RecordID, finding.Detail)
 	}
 	return errors.New("integrity check failed")
+}
+
+// runTUI opens the terminal interface. It is a view over the same store every
+// other surface uses, and the privileged actions inside it are checked where
+// they happen rather than at the door: opening a screen is not a permission.
+func runTUI(ctx context.Context, s *store.Store, args []string) error {
+	f := flag.NewFlagSet("tui", flag.ContinueOnError)
+	refresh := f.Duration("refresh", 5*time.Second, "how often to reload state")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if *refresh < time.Second {
+		return errors.New("--refresh must be at least 1s")
+	}
+	return tui.Run(ctx, tui.StoreLoader{DB: s}, tui.Options{RefreshEvery: *refresh})
 }

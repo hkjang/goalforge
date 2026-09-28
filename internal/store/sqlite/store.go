@@ -809,7 +809,6 @@ func (s *Store) RecordVerification(ctx context.Context, goalID, checkType, statu
 		return err
 	}
 	return tx.Commit()
-	return err
 }
 
 // CriterionMet is exported so a baseline arm is judged by the identical

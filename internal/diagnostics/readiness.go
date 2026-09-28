@@ -83,7 +83,7 @@ func CheckReadiness(input ReadinessInput) []Check {
 	}
 	if len(unmeasurable) > 0 {
 		sort.Strings(unmeasurable)
-		add(LevelFail, "criteria coverage", fmt.Sprintf("완료 조건 %s 을(를) 측정하는 게이트가 없어 증거가 영원히 쌓이지 않습니다 (같은 이름의 게이트를 추가하세요)", strings.Join(unmeasurable, ", ")))
+		add(LevelFail, "criteria coverage", fmt.Sprintf("완료 조건 %s 측정하는 게이트가 없어 증거가 영원히 쌓이지 않습니다 (같은 이름의 게이트를 추가하세요)", policy.Object(strings.Join(unmeasurable, ", "))))
 	} else {
 		add(LevelOK, "criteria coverage", "모든 완료 조건에 같은 이름의 게이트가 있습니다")
 	}

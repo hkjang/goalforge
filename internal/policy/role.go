@@ -37,7 +37,7 @@ func CurrentRole() string {
 type PrivilegedOperationError struct{ Operation string }
 
 func (e *PrivilegedOperationError) Error() string {
-	return fmt.Sprintf("%s 는 구현 세션이 수행할 수 없습니다: 완료 기준·승인·권한은 구현하는 쪽이 바꿀 수 없습니다", e.Operation)
+	return fmt.Sprintf("%s 구현 세션이 수행할 수 없습니다: 완료 기준·승인·권한은 구현하는 쪽이 바꿀 수 없습니다", Topic(e.Operation))
 }
 
 // RequireOperator refuses an operation that decides whether work is acceptable.
