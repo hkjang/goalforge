@@ -2155,6 +2155,7 @@ func decisionAdd(ctx context.Context, s *store.Store, args []string) error {
 	consequences := f.String("consequences", "", "what this commits the project to")
 	workItem := f.String("work-item", "", "work item the decision came out of")
 	supersedes := f.String("supersedes", "", "decision ID this replaces")
+	scope := f.String("scope", "", "files this decision is about, e.g. 'internal/session/**' — when they change, the decision is flagged for review")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -2174,7 +2175,7 @@ func decisionAdd(ctx context.Context, s *store.Store, args []string) error {
 	baseCommit, _ := gitops.HeadCommit(ctx, p.RepositoryPath, p.DefaultBranch)
 	record, err := s.RecordDecision(ctx, store.DesignDecision{ProjectID: p.ID, GoalID: goalID, WorkItem: *workItem,
 		Title: *title, Context: *context_, Decision: *decision, Alternatives: *alternatives,
-		Consequences: *consequences, BaseCommit: baseCommit})
+		Consequences: *consequences, BaseCommit: baseCommit, Scope: *scope})
 	if err != nil {
 		return err
 	}
@@ -2186,6 +2187,12 @@ func decisionAdd(ctx context.Context, s *store.Store, args []string) error {
 		return nil
 	}
 	fmt.Printf("decision recorded: %s\n", record.ID)
+	if *scope == "" {
+		// Without a scope every later commit unsettles the decision, which is
+		// correct but makes the signal useless. Say so once, here, rather than
+		// leaving the user to wonder why everything needs review.
+		fmt.Println("  note: --scope 를 지정하지 않으면 이후 어떤 변경이든 이 결정을 '재확인 필요'로 표시합니다")
+	}
 	return nil
 }
 
@@ -2207,14 +2214,31 @@ func decisionList(ctx context.Context, s *store.Store, args []string) error {
 		fmt.Println("no design decisions recorded")
 		return nil
 	}
-	for _, decision := range decisions {
-		fmt.Printf("%s  %-10s %s\n  %s\n", decision.ID, decision.Status, decision.Title, decision.Decision)
+	// Each decision is judged against the code it was made about, because a
+	// list that presents a note about a since-rewritten module the same way as
+	// one about untouched code is the reason stale reasoning survives.
+	standings := store.DecisionStandings(ctx, p.RepositoryPath, decisions)
+	needReview := 0
+	for _, standing := range standings {
+		decision := standing.Decision
+		fmt.Printf("%s  %-10s %s %s\n  %s\n", decision.ID, decision.Status,
+			standingMark(standing.Standing), decision.Title, decision.Decision)
+		if decision.Scope != "" {
+			fmt.Printf("  범위: %s\n", decision.Scope)
+		}
+		if standing.NeedsReview() {
+			needReview++
+			fmt.Printf("  %s\n", standing.Detail)
+		}
 		if decision.Alternatives != "" {
 			fmt.Printf("  제외: %s\n", decision.Alternatives)
 		}
 		if decision.SupersededBy != "" {
 			fmt.Printf("  대체됨: %s\n", decision.SupersededBy)
 		}
+	}
+	if needReview > 0 {
+		fmt.Printf("\n재확인 필요 %d건 — 실행 세션에는 '확인되지 않음'으로 전달됩니다\n", needReview)
 	}
 	return nil
 }
@@ -3542,4 +3566,17 @@ func runTUI(ctx context.Context, s *store.Store, args []string) error {
 		return errors.New("--refresh must be at least 1s")
 	}
 	return tui.Run(ctx, tui.StoreLoader{DB: s}, tui.Options{RefreshEvery: *refresh})
+}
+
+// standingMark labels how far a decision can be relied on, in text so the
+// listing is readable when piped.
+func standingMark(standing string) string {
+	switch standing {
+	case store.StandingCurrent:
+		return "[v]"
+	case store.StandingReviewNeeded:
+		return "[~]"
+	default:
+		return "[?]"
+	}
 }

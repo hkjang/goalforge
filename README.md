@@ -142,8 +142,8 @@ goalforge status | usage | sessions | logs [--limit 50]
 goalforge report [--since 24h] [--json]    # what ran, what stopped and why, what awaits you
 goalforge models [--task-type CONTINUE_GOAL]  # model records, the next choice and why, cost forecast
 goalforge verify integration               # verify the merged result on the default branch
-goalforge decision add --title T --decision "..." [--alternatives "..."] [--consequences "..."] [--supersedes DEC-1]
-goalforge decision list [--all]            # settled architecture, inherited by every later session
+goalforge decision add --title T --decision "..." [--scope "internal/session/**"] [--alternatives "..."] [--consequences "..."] [--supersedes DEC-1]
+goalforge decision list [--all]            # settled architecture, with whether each one still holds
 goalforge evidence export --out ./evidence        # handover/audit bundle as self-contained HTML + JSON
 goalforge reproduce --run RUN-1 [--out ./repro]   # commit, workspace, gate commands, logs, environment
 goalforge takeover --work-item WORK-1 --reason "..."        # stop automation and take the workspace

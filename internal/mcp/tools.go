@@ -69,7 +69,7 @@ func toolDescriptors() []toolDescriptor {
 		{"project_readiness", "Check whether a project could ever complete: goal, criteria, gates, whether every criterion has a gate that measures it, whether that gate proves the kind of thing the criterion demands, gate commands on PATH, budget, and pending integration verification.", schema(nil, map[string]any{"project": projectProperty})},
 		{"work_item_detail", "One work item with its specification, what is blocking it (dependencies, WIP limit, scope approval, human takeover), its run history, and the model that would execute it.", schema([]string{"work_item_id"}, map[string]any{"project": projectProperty, "work_item_id": stringProperty("Work item ID (WORK-...).")})},
 		{"decisions_list", "Settled design decisions with what was rejected and why. Treat these as already agreed rather than re-deriving them.", schema(nil, map[string]any{"project": projectProperty, "all": stringProperty("true to include superseded decisions.")})},
-		{"decision_add", "Record a design decision: what was decided, what was considered and rejected, and what it commits the project to.", schema([]string{"title", "decision"}, map[string]any{"project": projectProperty, "title": stringProperty("Short name."), "decision": stringProperty("What was decided."), "context": stringProperty("What problem forced it."), "alternatives": stringProperty("What was rejected and why."), "consequences": stringProperty("What this commits to."), "work_item_id": stringProperty("Work item it came out of.")})},
+		{"decision_add", "Record a design decision: what was decided, what was considered and rejected, and what it commits the project to.", schema([]string{"title", "decision"}, map[string]any{"project": projectProperty, "title": stringProperty("Short name."), "decision": stringProperty("What was decided."), "context": stringProperty("What problem forced it."), "alternatives": stringProperty("What was rejected and why."), "consequences": stringProperty("What this commits to."), "work_item_id": stringProperty("Work item it came out of."), "scope": stringProperty("Files the decision is about, e.g. 'internal/session/**'. When they change the decision is flagged for review instead of being handed to later sessions as current fact.")})},
 		{"activity_report", "What ran in a window, what stopped and why, what is waiting on a decision, and the cost.", schema(nil, map[string]any{"since": stringProperty("Duration such as 24h or 7d (default 24h).")})},
 		{"checkpoint_create", "Create a manual recovery checkpoint (also writes the CONTINUITY.md companion).", schema([]string{"next_action"}, map[string]any{"project": projectProperty, "next_action": stringProperty("The first concrete step on resume."), "completed": stringProperty("What was completed."), "remaining": stringProperty("What remains."), "risks": stringProperty("Open risks.")})},
 	}
@@ -648,7 +648,7 @@ func (s *Server) decisionAdd(ctx context.Context, args toolArgs) (string, error)
 	baseCommit, _ := gitops.HeadCommit(ctx, project.RepositoryPath, project.DefaultBranch)
 	return marshal(s.store.RecordDecision(ctx, store.DesignDecision{ProjectID: project.ID, GoalID: goalID,
 		WorkItem: args.WorkItemID, Title: args.Title, Decision: args.Decision, Context: args.Context,
-		Alternatives: args.Alternatives, Consequences: args.Consequences, BaseCommit: baseCommit}))
+		Alternatives: args.Alternatives, Consequences: args.Consequences, BaseCommit: baseCommit, Scope: args.Scope}))
 }
 
 func (s *Server) activityReport(ctx context.Context, args toolArgs) (string, error) {

@@ -367,6 +367,11 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "evaluation_trials", "arm", "TEXT NOT NULL DEFAULT 'goalforge'"); err != nil {
 		return err
 	}
+	// Decisions recorded before scopes existed are about the project as a
+	// whole, which is what an empty scope means here.
+	if err := s.ensureColumn(ctx, "design_decisions", "scope", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "verification_results", "evidence_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}

@@ -288,19 +288,32 @@ function decisionsPanel(){return'<section class="panel"><div class="row"><h2 sty
 '<label for="dec-context">왜 결정이 필요했는가</label><textarea id="dec-context"></textarea>'+
 '<label for="dec-alternatives">검토했지만 제외한 대안과 이유</label><textarea id="dec-alternatives"></textarea>'+
 '<label for="dec-consequences">이 결정이 감수하는 것</label><textarea id="dec-consequences"></textarea>'+
+'<label for="dec-scope">이 결정이 다루는 파일 (예: internal/session/**)</label><input id="dec-scope" placeholder="비우면 이후 어떤 변경이든 재확인 대상이 됩니다">'+
 '<div class="actions"><button onclick="saveDecision()">저장</button><button onclick="toggleDecisionForm()">취소</button></div></div>'+
 '<div id="decision-list" class="sub" style="margin-top:8px">불러오는 중…</div></section>'}
 function toggleDecisionForm(){var box=document.querySelector('#decision-form');if(box)box.style.display=box.style.display==='none'?'block':'none'}
 async function loadDecisions(){var box=document.querySelector('#decision-list');if(!box)return;
 try{var data=await api('/api/v1/projects/'+encodeURIComponent(detailCache.project.ID)+'/decisions');var list=data.decisions||[];
 if(!list.length){box.innerHTML='기록된 설계 결정이 없습니다. 구조를 정할 때 남겨 두면 이후 실행이 같은 결론을 다시 도출하지 않습니다.';return}
-var html='';list.forEach(function(dec){html+='<div class="attn warn" style="background:var(--card);border-color:var(--line)"><strong>'+esc(dec.Title)+'</strong> <span class="badge">'+esc(dec.Status)+'</span>'+
+// Each decision carries whether the code it was made about has moved since.
+// Shown flat, a note about a since-rewritten module reads exactly like one
+// about untouched code, which is how stale reasoning keeps being applied.
+var standing={};(data.standings||[]).forEach(function(s){standing[s.Decision.ID]=s});
+var html='';list.forEach(function(dec){var st=standing[dec.ID]||{};
+html+='<div class="attn '+(st.Standing&&st.Standing!=='CURRENT'?'warn':'')+'" style="background:var(--card);border-color:var(--line)"><strong>'+esc(dec.Title)+'</strong> <span class="badge">'+esc(dec.Status)+'</span> '+standingBadge(st.Standing)+
 '<div style="margin-top:4px">'+esc(dec.Decision)+'</div>'+
+(st.Standing&&st.Standing!=='CURRENT'?'<div class="sub" style="margin-top:4px">⚠ '+esc(st.Detail||'')+'</div>':'')+
+(dec.Scope?'<div class="sub mono" style="margin-top:4px">범위: '+esc(dec.Scope)+'</div>':'')+
 (dec.Alternatives?'<div class="sub" style="margin-top:4px">제외한 대안: '+esc(dec.Alternatives)+'</div>':'')+
 (dec.Consequences?'<div class="sub">영향: '+esc(dec.Consequences)+'</div>':'')+
 '<div class="sub mono" style="margin-top:4px;font-size:11px">'+esc(dec.ID)+(dec.BaseCommit?' @ '+shortSHA(dec.BaseCommit):'')+' · '+fmtTime(dec.CreatedAt)+'</div></div>'});
 box.innerHTML=html}catch(e){box.innerHTML='<span class="error">'+esc(e.message)+'</span>'}}
-async function saveDecision(){var body={title:document.querySelector('#dec-title').value,decision:document.querySelector('#dec-decision').value,context:document.querySelector('#dec-context').value,alternatives:document.querySelector('#dec-alternatives').value,consequences:document.querySelector('#dec-consequences').value};
+// standingBadge says how far a decision can be relied on now, in text as well
+// as colour so it survives a monochrome screen.
+function standingBadge(s){if(s==='REVIEW_NEEDED')return'<span class="badge unmet">↻ 재확인 필요</span>';
+if(s==='UNANCHORED')return'<span class="badge">? 판단 불가</span>';
+if(s==='CURRENT')return'<span class="badge met">✓ 유효</span>';return''}
+async function saveDecision(){var body={title:document.querySelector('#dec-title').value,decision:document.querySelector('#dec-decision').value,context:document.querySelector('#dec-context').value,alternatives:document.querySelector('#dec-alternatives').value,consequences:document.querySelector('#dec-consequences').value,scope:document.querySelector('#dec-scope')?document.querySelector('#dec-scope').value:''};
 if(!body.title||!body.decision){alert('제목과 결정 내용이 필요합니다');return}
 try{await api('/api/v1/projects/'+encodeURIComponent(detailCache.project.ID)+'/decisions',{method:'POST',body:JSON.stringify(body)});route()}catch(e){alert(e.message)}}
 function planTab(d){var p=d.project;
