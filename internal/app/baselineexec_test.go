@@ -83,7 +83,9 @@ func TestBaselinePassesWhenItSatisfiesTheSameGates(t *testing.T) {
 		Gates: []evaluation.Gate{{Type: "marker", Required: true, SuccessValue: "true", Timeout: 30,
 			Command: gateScript(t, scripts, "marker", `test -f "$PWD/done.txt"`)}}}
 	fake := &baselineProvider{name: "codex", usage: provider.Usage{OutputTokens: 120, CostUSD: 0.5},
-		effect: func(workDir string) error { return os.WriteFile(filepath.Join(workDir, "done.txt"), []byte("ok"), 0o600) }}
+		effect: func(workDir string) error {
+			return os.WriteFile(filepath.Join(workDir, "done.txt"), []byte("ok"), 0o600)
+		}}
 	outcome, err := BaselineExecutor{Provider: fake, Model: "haiku"}.Execute(context.Background(), env, spec)
 	if err != nil {
 		t.Fatal(err)

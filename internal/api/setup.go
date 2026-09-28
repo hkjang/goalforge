@@ -345,9 +345,9 @@ type decisionRequest struct {
 	Consequences string `json:"consequences"`
 	// Scope names the files the decision is about, so a later change to them
 	// flags it for review instead of leaving it to read as current forever.
-	Scope string `json:"scope"`
-	WorkItemID   string `json:"work_item_id"`
-	Supersedes   string `json:"supersedes"`
+	Scope      string `json:"scope"`
+	WorkItemID string `json:"work_item_id"`
+	Supersedes string `json:"supersedes"`
 }
 
 // recordDecision stores why a structure was chosen. Decisions are never
