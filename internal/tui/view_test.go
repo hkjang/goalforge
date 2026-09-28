@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -237,5 +238,56 @@ func TestTamperedRecordsWarnAboveEverything(t *testing.T) {
 	clean := sampleSnapshot()
 	if strings.Contains(View(clean, testState()), "기록 무결성") {
 		t.Error("an intact history must say nothing")
+	}
+}
+
+// The second reason down looked broken: the first screenful was rendered and
+// the rest dropped, so a cursor past the bottom moved invisibly — which is
+// indistinguishable from the key not working.
+func TestTheCursorStaysOnScreenInALongList(t *testing.T) {
+	snapshot := sampleSnapshot()
+	for i := 0; i < 80; i++ {
+		snapshot.Work = append(snapshot.Work, WorkRow{
+			Item: model.WorkItem{ID: fmt.Sprintf("W%02d", i), Title: fmt.Sprintf("작업 %02d", i), Status: "BACKLOG"}})
+	}
+	state := testState()
+	state.Tab = TabWork
+	for _, cursor := range []int{0, 1, 40, 78, 79} {
+		state.Cursor = cursor
+		rendered := View(snapshot, state)
+		want := fmt.Sprintf("작업 %02d", cursor)
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("cursor %d is off screen; %q is not rendered:\n%s", cursor, want, rendered)
+		}
+	}
+}
+
+// A list that silently shows part of itself reads as the whole thing, so what
+// is out of sight is counted.
+func TestHiddenRowsAreCounted(t *testing.T) {
+	snapshot := sampleSnapshot()
+	for i := 0; i < 80; i++ {
+		snapshot.Work = append(snapshot.Work, WorkRow{Item: model.WorkItem{Title: "x", Status: "BACKLOG"}})
+	}
+	state := testState()
+	state.Tab, state.Cursor = TabWork, 40
+	rendered := View(snapshot, state)
+	if !strings.Contains(rendered, "위로") || !strings.Contains(rendered, "아래로") {
+		t.Fatalf("rows out of sight must be counted:\n%s", rendered)
+	}
+}
+
+func TestWindowKeepsTheCursorVisible(t *testing.T) {
+	for _, tc := range []struct{ total, cursor, height int }{
+		{100, 0, 10}, {100, 50, 10}, {100, 99, 10}, {5, 4, 10}, {1, 0, 1},
+	} {
+		start, end, _, _ := window(tc.total, tc.cursor, tc.height)
+		if tc.cursor < start || tc.cursor >= end {
+			t.Errorf("total=%d cursor=%d height=%d gave [%d,%d): the cursor is outside it",
+				tc.total, tc.cursor, tc.height, start, end)
+		}
+		if end > tc.total || start < 0 {
+			t.Errorf("window [%d,%d) is out of bounds for %d rows", start, end, tc.total)
+		}
 	}
 }

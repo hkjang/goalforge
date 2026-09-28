@@ -118,6 +118,9 @@ func View(snapshot Snapshot, state UIState) string {
 	if state.Width < 40 || state.Height < 10 {
 		return "터미널이 너무 좁습니다 (최소 40x10)"
 	}
+	if state.ShowHelp {
+		return fitWidth(helpView(state), state.Width)
+	}
 	var sections []string
 	sections = append(sections, header(snapshot, state))
 	if warning := integrityBanner(snapshot); warning != "" {
@@ -232,7 +235,12 @@ func overviewView(snapshot Snapshot, state UIState) string {
 		return styleDim.Render("  goalforge project init --name <이름> --provider <제공자> 로 시작하세요")
 	}
 	lines = append(lines, styleDim.Render("  프로젝트"))
-	for i, row := range snapshot.Projects {
+	start, end, above, below := window(len(snapshot.Projects), snapshot.Selected, projectListHeight(state))
+	if above {
+		lines = append(lines, moreMarker(start, true))
+	}
+	for i := start; i < end; i++ {
+		row := snapshot.Projects[i]
 		marker := "  "
 		if i == snapshot.Selected {
 			marker = "▸ "
@@ -247,6 +255,9 @@ func overviewView(snapshot Snapshot, state UIState) string {
 			line = styleSelected.Render(pad(line, state.Width-1))
 		}
 		lines = append(lines, line)
+	}
+	if below {
+		lines = append(lines, moreMarker(len(snapshot.Projects)-end, false))
 	}
 	if snapshot.Goal != nil {
 		lines = append(lines, "", styleDim.Render("  목표"), "  "+truncate(snapshot.Goal.Title, state.Width-4))
@@ -319,9 +330,14 @@ func workView(snapshot Snapshot, state UIState) string {
 	if len(snapshot.Work) == 0 {
 		return styleDim.Render("  작업이 없습니다 — goalforge work add")
 	}
-	lines := []string{truncate(styleDim.Render(fmt.Sprintf("  %s %s %s",
-		pad("상태", 10), pad("제목", 34), "막힌 이유")), state.Width)}
-	for i, row := range snapshot.Work {
+	lines := []string{styleDim.Render(fmt.Sprintf("  %s %s %s",
+		pad("상태", 10), pad("제목", 34), "막힌 이유"))}
+	start, end, above, below := window(len(snapshot.Work), state.Cursor, state.bodyHeight()-3)
+	if above {
+		lines = append(lines, moreMarker(start, true))
+	}
+	for i := start; i < end; i++ {
+		row := snapshot.Work[i]
 		marker := "  "
 		if i == state.Cursor {
 			marker = "▸ "
@@ -336,6 +352,9 @@ func workView(snapshot Snapshot, state UIState) string {
 			line = styleSelected.Render(pad(truncate(line, state.Width-1), state.Width-1))
 		}
 		lines = append(lines, line)
+	}
+	if below {
+		lines = append(lines, moreMarker(len(snapshot.Work)-end, false))
 	}
 	return clip(lines, state.bodyHeight())
 }
@@ -354,7 +373,14 @@ func approvalsView(snapshot Snapshot, state UIState) string {
 		return styleDim.Render("  대기 중인 승인이 없습니다")
 	}
 	var lines []string
-	for i, approval := range snapshot.Approvals {
+	// Each selected row also prints its grounds, so a window sized by rows
+	// alone would overflow; one line is reserved for that.
+	start, end, above, below := window(len(snapshot.Approvals), state.Cursor, state.bodyHeight()-3)
+	if above {
+		lines = append(lines, moreMarker(start, true))
+	}
+	for i := start; i < end; i++ {
+		approval := snapshot.Approvals[i]
 		marker := "  "
 		if i == state.Cursor {
 			marker = "▸ "
@@ -373,6 +399,9 @@ func approvalsView(snapshot Snapshot, state UIState) string {
 				lines = append(lines, "      "+styleDim.Render(detail))
 			}
 		}
+	}
+	if below {
+		lines = append(lines, moreMarker(len(snapshot.Approvals)-end, false))
 	}
 	return clip(lines, state.bodyHeight())
 }
@@ -485,7 +514,7 @@ func footer(snapshot Snapshot, state UIState) string {
 		}
 		return "  " + style.Render(state.Message)
 	}
-	keys := "1-5 탭 · ↑↓ 이동 · ←→ 프로젝트 · r 새로고침 · q 종료"
+	keys := "? 도움말 · 1-5 탭 · ↑↓ 이동 · r 새로고침 · q 종료"
 	if state.Tab == TabApprovals && len(snapshot.Approvals) > 0 {
 		keys = "a 승인 · x 반려 · " + keys
 	}
@@ -498,6 +527,45 @@ func clip(lines []string, height int) string {
 		lines = lines[:height]
 	}
 	return strings.Join(lines, "\n")
+}
+
+// window returns the slice of a list that keeps the cursor on screen, and
+// whether rows are hidden above or below.
+//
+// Without it the first screenful was rendered and the rest dropped, so a
+// cursor past the bottom moved invisibly: pressing down did nothing anyone
+// could see, which is indistinguishable from the key not working. The window
+// is computed from the cursor rather than stored, so it cannot drift out of
+// step with it.
+func window(total, cursor, height int) (start, end int, above, below bool) {
+	if height < 1 {
+		height = 1
+	}
+	if total <= height {
+		return 0, total, false, false
+	}
+	// Keep the cursor roughly centred once the list is long enough to scroll,
+	// so the rows around it stay visible on both sides.
+	start = cursor - height/2
+	if start < 0 {
+		start = 0
+	}
+	if start > total-height {
+		start = total - height
+	}
+	return start, start + height, start > 0, start+height < total
+}
+
+// moreMarker says how many rows are out of sight, because a list that silently
+// shows part of itself reads as the whole thing.
+func moreMarker(count int, above bool) string {
+	if count <= 0 {
+		return ""
+	}
+	if above {
+		return styleDim.Render(fmt.Sprintf("  ↑ 위로 %d개 더", count))
+	}
+	return styleDim.Render(fmt.Sprintf("  ↓ 아래로 %d개 더", count))
 }
 
 func orDash(value string) string {
@@ -550,4 +618,45 @@ func fitWidth(rendered string, width int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// projectListHeight leaves room on the overview for the goal and the recent
+// runs below the list, so a long project list does not push them off screen.
+func projectListHeight(state UIState) int {
+	height := state.bodyHeight() - 8
+	if height < 3 {
+		return 3
+	}
+	if height > 12 {
+		return 12
+	}
+	return height
+}
+
+// helpView lists every key on its own screen.
+//
+// The footer is one line and gets truncated on a narrow terminal, which is
+// where someone is most likely to be looking for it. A key that exists and
+// cannot be discovered is a key that does not exist.
+func helpView(state UIState) string {
+	rows := [][2]string{
+		{"1 – 5", "탭 이동 (개요 · 완료 조건 · 작업 · 승인 · 계획)"},
+		{"Tab / Shift+Tab", "다음 / 이전 탭"},
+		{"↑ ↓  또는  k j", "목록 이동 (개요에서는 프로젝트 선택)"},
+		{"← →  또는  h l", "프로젝트 전환"},
+		{"PgUp / PgDn", "한 화면씩"},
+		{"Home / End  (g / G)", "처음 / 끝"},
+		{"a", "선택한 승인을 승인 (승인 탭)"},
+		{"x", "선택한 승인을 반려 (승인 탭)"},
+		{"r", "새로고침"},
+		{"?", "이 화면 닫기"},
+		{"q / Esc / Ctrl+C", "종료"},
+	}
+	lines := []string{styleTitle.Render("  GoalForge 터미널 — 키"), ""}
+	for _, row := range rows {
+		lines = append(lines, fmt.Sprintf("  %s  %s", pad(row[0], 20), styleDim.Render(row[1])))
+	}
+	lines = append(lines, "",
+		styleDim.Render("  승인 결정은 누를 때 권한을 확인합니다. 구현 세션은 이 화면을 열어도 승인할 수 없습니다."))
+	return clip(lines, state.Height-1)
 }

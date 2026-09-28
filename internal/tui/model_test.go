@@ -236,3 +236,95 @@ func TestQuitAlwaysWorks(t *testing.T) {
 		}
 	}
 }
+
+// The reported bug: on a one-project install, every arrow key was inert on the
+// tab the user lands on. Up and down did nothing because the overview counted
+// zero rows, and left and right did nothing because there was no other project
+// to switch to.
+func TestArrowsMoveTheProjectListOnTheOverview(t *testing.T) {
+	loader := &fakeLoader{snapshot: Snapshot{TakenAt: time.Now(), Projects: []ProjectRow{
+		{Project: model.Project{ID: "PRJ-1", Name: "one"}},
+		{Project: model.Project{ID: "PRJ-2", Name: "two"}},
+		{Project: model.Project{ID: "PRJ-3", Name: "three"}},
+	}}}
+	m := loaded(t, loader)
+	if m.state.Tab != TabOverview {
+		t.Fatalf("the overview is where a user lands: %d", m.state.Tab)
+	}
+	m, cmd := press(t, m, "down")
+	if m.state.Cursor != 1 {
+		t.Fatalf("down must move the visible list: cursor=%d", m.state.Cursor)
+	}
+	if cmd == nil {
+		t.Fatal("moving to another project must reload what the other tabs describe")
+	}
+	if m.snapshot.Selected != 1 {
+		t.Fatalf("the cursor is the selection on the overview: selected=%d", m.snapshot.Selected)
+	}
+	m, _ = press(t, m, "down")
+	m, _ = press(t, m, "up")
+	if m.state.Cursor != 1 || m.snapshot.Selected != 1 {
+		t.Fatalf("up must come back: cursor=%d selected=%d", m.state.Cursor, m.snapshot.Selected)
+	}
+}
+
+// A single project is the common case and the one that made every key look
+// broken: the arrows must still be handled, they just have nowhere to go.
+func TestArrowsAreHarmlessWithOneProject(t *testing.T) {
+	loader := &fakeLoader{snapshot: Snapshot{TakenAt: time.Now(),
+		Projects: []ProjectRow{{Project: model.Project{ID: "PRJ-1", Name: "only"}}}}}
+	m := loaded(t, loader)
+	for _, key := range []string{"up", "down", "left", "right"} {
+		m, _ = press(t, m, key)
+		if m.state.Cursor != 0 || m.snapshot.Selected != 0 {
+			t.Fatalf("%s moved past the only project: cursor=%d selected=%d", key, m.state.Cursor, m.snapshot.Selected)
+		}
+	}
+}
+
+// Page and home/end keys exist so a long backlog is navigable without holding
+// down an arrow.
+func TestPageAndEdgeKeysMove(t *testing.T) {
+	rows := make([]WorkRow, 60)
+	for i := range rows {
+		rows[i] = WorkRow{Item: model.WorkItem{ID: "W", Title: "item"}}
+	}
+	loader := &fakeLoader{snapshot: Snapshot{TakenAt: time.Now(),
+		Projects: []ProjectRow{{Project: model.Project{ID: "PRJ-1", Name: "p"}}}, Work: rows}}
+	m := loaded(t, loader)
+	m, _ = press(t, m, "3")
+	m, _ = press(t, m, "end")
+	if m.state.Cursor != 59 {
+		t.Fatalf("end must reach the last row: %d", m.state.Cursor)
+	}
+	m, _ = press(t, m, "home")
+	if m.state.Cursor != 0 {
+		t.Fatalf("home must reach the first row: %d", m.state.Cursor)
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = updated.(Model)
+	if m.state.Cursor == 0 {
+		t.Fatal("page down must move")
+	}
+}
+
+// The footer is one line and truncates on a narrow terminal, which is where
+// someone is most likely to be looking for the keys.
+func TestHelpIsReachableAndDismissable(t *testing.T) {
+	loader := &fakeLoader{snapshot: approvalSnapshot()}
+	m := loaded(t, loader)
+	m, _ = press(t, m, "?")
+	if !m.state.ShowHelp {
+		t.Fatal("? must open help")
+	}
+	rendered := m.View()
+	for _, want := range []string{"↑ ↓", "← →", "PgUp", "승인 탭"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("help must list %q:\n%s", want, rendered)
+		}
+	}
+	m, _ = press(t, m, "?")
+	if m.state.ShowHelp {
+		t.Fatal("? must close help")
+	}
+}
