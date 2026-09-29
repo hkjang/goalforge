@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/goalforge/goalforge/internal/gitops"
+	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/observer"
 	"github.com/goalforge/goalforge/internal/standards"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
@@ -193,6 +194,78 @@ func resultMark(result string) string {
 		return "[-]"
 	}
 	return "[?]"
+}
+
+// standardsPass runs a pass only when there is a reason to.
+//
+// It is what a schedule or a hook calls. Unlike `assess`, which does what it
+// is told, this decides — and says what it decided when it decides not to,
+// because "nothing changed" and "the budget is gone" look identical from
+// outside and call for completely different responses.
+func standardsPass(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("standards pass", flag.ContinueOnError)
+	interval := set.Duration("interval", 24*time.Hour, "아무 일이 없어도 다시 볼 주기")
+	floor := set.Int("backlog-floor", 3, "실행 가능한 대기 작업이 이보다 적으면 평가한다")
+	budget := set.Int("daily-budget", 4, "하루에 허용할 평가 횟수 (구현 예산과 별개)")
+	perRun := set.Int("supply-limit", 3, "한 번에 공급할 최대 작업 수")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, profile, pack, err := standardsContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	head, err := gitops.HeadCommit(ctx, project.RepositoryPath, project.DefaultBranch)
+	if err != nil {
+		return err
+	}
+	goal, err := s.CurrentGoal(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	result, err := observer.RunScheduledPass(ctx, s, observer.PassRequest{
+		ProjectID: project.ID, GoalID: goal.ID, Repository: project.RepositoryPath, HeadSHA: head,
+		ToolVersion: version, Pack: pack, Profile: profile, Detectors: observer.Default(),
+		Schedule: observer.SchedulePolicy{Interval: *interval, BacklogFloor: *floor, DiscoveryBudget: *budget},
+		Supply:   observer.SupplyPolicy{PerRun: *perRun, MaxOutstanding: 10}})
+	if errors.Is(err, observer.ErrDiscoveryBudgetSpent) {
+		fmt.Printf("발견 예산을 다 썼습니다: %v\n", err)
+		return nil
+	}
+	if errors.Is(err, observer.ErrSupplyPaused) {
+		fmt.Printf("공급을 멈췄습니다: %v\n", err)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !result.Ran {
+		fmt.Printf("평가하지 않았습니다: %s\n", result.Detail)
+		return nil
+	}
+	fmt.Printf("평가했습니다 (%s): %s\n", result.Decision.Trigger, result.Decision.Reason)
+	if len(result.Result.Filed) > 0 {
+		fmt.Printf("공급: %s\n", strings.Join(result.Result.Filed, ", "))
+	}
+	if len(result.Result.Deferred) > 0 {
+		fmt.Printf("보류(다음 회차): %s\n", strings.Join(result.Result.Deferred, ", "))
+	}
+	return nil
+}
+
+// standardsContext loads the three things every standards command needs.
+func standardsContext(ctx context.Context, s *store.Store) (model.Project, standards.Profile, standards.Pack, error) {
+	project, err := currentProject(ctx, s)
+	if err != nil {
+		return project, standards.Profile{}, standards.Pack{}, err
+	}
+	profile, _, err := s.StandardProfile(ctx, project.ID)
+	if err != nil {
+		return project, profile, standards.Pack{},
+			fmt.Errorf("먼저 `goalforge standards profile` 로 적용할 팩을 정하세요: %w", err)
+	}
+	pack, err := packByRef(profile.PackRef)
+	return project, profile, pack, err
 }
 
 // standardsAssess reads the repository at a commit and files what is missing.

@@ -113,6 +113,12 @@ goalforge standards assess [--commit SHA] [--supply] [--supply-limit 3]
                    # absence — a CDN URL in a bundled asset, a fifth required environment
                    # variable — and cannot prove that anything works, so it reports UNMET
                    # where it sees a gap and UNKNOWN everywhere else, never MET.
+goalforge standards pass [--interval 24h] [--backlog-floor 3] [--daily-budget 4]
+                   # runs a pass only when there is a reason: the branch moved, the board
+                   # emptied, or the interval elapsed. Re-reading an unchanged commit gives
+                   # the same answers and spends budget doing it. The discovery budget is
+                   # separate from the implementation budget — a loop that can borrow from
+                   # implementation spends the day deciding what to do and none of it doing it.
 goalforge standards status            # every criterion in force, including the unexamined ones
 goalforge standards except --standard ID --reason R --decider D [--review-when W | --review-by DATE]
 goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]

@@ -233,3 +233,19 @@ JOIN work_items w ON w.id=f.work_item_id
 WHERE f.project_id=? AND w.status NOT IN ('DONE','DISCARDED')`, projectID).Scan(&count)
 	return count, err
 }
+
+// RunnableWorkCount is how many items could be picked up right now.
+//
+// It counts what is actually available — approved or backlogged, owned by
+// automation, with every predecessor done — rather than everything on the
+// board. A board holding forty items that all wait on one another is an empty
+// board from the runner's point of view, and a supplier that counted rows
+// would never notice the project had stalled.
+func (s *Store) RunnableWorkCount(ctx context.Context, goalID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM work_items w
+WHERE w.goal_id=? AND w.status IN ('APPROVED','BACKLOG') AND COALESCE(w.owner,'AI')='AI'
+AND NOT EXISTS(SELECT 1 FROM work_item_dependencies d LEFT JOIN work_items p ON p.id=d.depends_on_id
+               WHERE d.work_item_id=w.id AND COALESCE(p.status,'')<>'DONE')`, goalID).Scan(&count)
+	return count, err
+}
