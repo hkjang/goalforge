@@ -54,6 +54,8 @@ var executedEvidence = map[string]bool{
 	"build_log":               true,
 	"release_asset":           true,
 	"screenshot":              true,
+	"test_result":             true,
+	"performance_result":      true,
 }
 
 // ExecutedEvidence reports whether a kind of evidence requires having run or
