@@ -219,6 +219,19 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "show" {
 			return goalShow(ctx, s)
 		}
+	case "standards":
+		if len(args) > 1 && args[1] == "profile" {
+			return standardsProfile(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "except" {
+			return standardsExcept(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "status" {
+			return standardsStatus(ctx, s)
+		}
+		if len(args) > 1 && args[1] == "assess" {
+			return standardsAssess(ctx, s, args[2:])
+		}
 	case "status":
 		return goalShow(ctx, s)
 	case "milestone":

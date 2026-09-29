@@ -108,6 +108,11 @@ func (s Standard) Validate() error {
 		return fmt.Errorf("%s: revision must start at 1", s.ID)
 	case s.Severity != SeverityRequired && s.Severity != SeverityRecommended:
 		return fmt.Errorf("%s: severity must be %s or %s", s.ID, SeverityRequired, SeverityRecommended)
+	case strings.TrimSpace(s.Intent) == "":
+		// The intent is what a generated work card quotes to explain why the
+		// work exists. Without it the card says "NET-002 미충족" and sends
+		// whoever picks it up back to the catalogue.
+		return fmt.Errorf("%s: intent is required — a criterion that cannot say what it is for cannot explain itself on a card", s.ID)
 	case len(s.Checks) == 0:
 		return fmt.Errorf("%s: a criterion with no check cannot be judged, only quoted", s.ID)
 	case len(s.EvidenceRequired) == 0:

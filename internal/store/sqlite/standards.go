@@ -218,3 +218,18 @@ func (s *Store) FindingFor(ctx context.Context, projectID, standardID, defectKin
 	}
 	return workItemID, err
 }
+
+// OutstandingSuppliedWork counts the work items filed from a finding that are
+// still unfinished.
+//
+// It is the brake on supply. A board nobody is working through does not need
+// more findings on it; it needs the ones it has closed, and a supplier that
+// keeps adding while nothing leaves is generating a backlog rather than
+// progress.
+func (s *Store) OutstandingSuppliedWork(ctx context.Context, projectID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM standard_findings f
+JOIN work_items w ON w.id=f.work_item_id
+WHERE f.project_id=? AND w.status NOT IN ('DONE','DISCARDED')`, projectID).Scan(&count)
+	return count, err
+}
