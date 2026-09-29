@@ -57,6 +57,9 @@ amd64·arm64 여섯 조합을 `-trimpath` 로 빌드하고, 각 압축 파일에
 
 ## 사용 가이드
 
+- [docs/GUIDE.md](docs/GUIDE.md) — 설치부터 운영까지
+- [docs/STANDARDS.md](docs/STANDARDS.md) — 여러 프로젝트에 같은 요구를 적용하는 공통 개발 기준
+
 처음부터 끝까지 한 번 돌려 보는 순서는 [docs/GUIDE.md](docs/GUIDE.md) 에 있습니다.
 
 ## Quick start

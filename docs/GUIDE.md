@@ -163,6 +163,23 @@ goalforge goal contract --title "상담 시스템" \
 
 계약을 바꾸면 사유와 결정자가 있는 새 버전이 생기고, 이전 버전은 자신이 요구했던 것을 그대로 유지합니다. **범위를 줄여도 과거 판정이 바뀌지 않습니다.**
 
+### 공통 개발 기준
+
+여러 프로젝트에 같은 요구를 적용할 때는 목표마다 조건을 다시 쓰는 대신 **공통 개발팩**을 고정합니다.
+
+```go
+profile := standards.Profile{ProjectID: "PRJ-1",
+    PackRef:    "go-react-offline-service@0.1",
+    Attributes: map[string]string{"frontend": "react", "network": "offline"}}
+db.SaveStandardProfile(ctx, profile, standards.GoReactOfflineService())
+```
+
+기준 하나가 무엇으로 정산되는지와 그러려면 어떤 근거가 필요한지를 함께 싣습니다. 프로필의 속성에 맞지 않는 기준은 이 프로젝트의 결함이 아니므로 현황에 나오지 않습니다 — AI 가 없는 프로젝트는 스트리밍 기준을 어기고 있는 게 아닙니다.
+
+**판정은 위로 올라가는 실패만 막습니다.** 근거가 없거나, 있어도 내용이 비었거나, 실행이 아니라 추정이면 `MET` 이 아니라 `UNKNOWN` 입니다. `UNMET` 은 불필요할 수도 있는 작업을 만들고 `MET` 은 아무도 확인하지 않은 것을 내보냅니다.
+
+자세한 내용은 [docs/STANDARDS.md](STANDARDS.md) 를 보세요.
+
 ---
 
 ## 4. 검증 게이트
