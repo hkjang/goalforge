@@ -107,6 +107,14 @@ goalforge work list | work status ID --set APPROVED
                    # IN_PROGRESS, VERIFYING and DONE belong to the engine. A person moving a
                    # card there would be claiming a verification that never ran, so the store
                    # refuses it identically from the CLI, the API and MCP.
+goalforge standards profile --attributes "frontend=react,network=offline"   # pin a common criteria pack
+goalforge standards assess [--commit SHA] [--supply] [--supply-limit 3]
+                   # reads the repository at a pinned commit. A static read can prove an
+                   # absence — a CDN URL in a bundled asset, a fifth required environment
+                   # variable — and cannot prove that anything works, so it reports UNMET
+                   # where it sees a gap and UNKNOWN everywhere else, never MET.
+goalforge standards status            # every criterion in force, including the unexamined ones
+goalforge standards except --standard ID --reason R --decider D [--review-when W | --review-by DATE]
 goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
 goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100] [--kind build|test|integration|journey|security|performance|review]
                           [--value-pattern 'coverage:\s+([0-9.]+)%']   # measure, do not assume
