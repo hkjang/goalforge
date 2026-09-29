@@ -288,7 +288,7 @@ return fmtTokens(total)+' 토큰 <span class="sub">(예상치가 있는 '+known.
 // criterion is shown with the evidence that decided it.
 function criteriaPanel(d){if(!d.criteria||!d.criteria.length)return'<section class="panel"><h2>완료 조건</h2><div class="sub">완료 조건이 없어 목표는 완료로 판정되지 않습니다. <code>goalforge goal set --criterion build_passed=true</code></div></section>';
 var html='<section class="panel"><h2>완료 조건과 근거</h2><table><tr><th>조건</th><th>기준</th><th>측정값</th><th>상태</th><th>근거</th></tr>';
-d.criteria.forEach(function(c){var evidence='<span class="sub">없음</span>';if(c.Status==='STALE')evidence='<span class="sub">'+esc(c.StaleReason||'재검증 필요')+'</span>';else if(c.RunID)evidence='<a class="plain mono" href="#/project/'+encodeURIComponent(d.project.ID)+'/run/'+encodeURIComponent(c.RunID)+'">'+esc(c.RunID)+'</a>'+(c.MeasuredAt?' <span class="sub">'+fmtTime(c.MeasuredAt)+'</span>':'');
+d.criteria.forEach(function(c){var evidence='<span class="sub">없음</span>';if(c.Status==='STALE')evidence='<span class="sub">'+esc(c.StaleReason||'재검증 필요')+'</span>';else if(c.Status==='UNMET'&&c.Shortfall)evidence='<span class="sub">'+esc(c.Shortfall)+'</span>';else if(c.RunID)evidence='<a class="plain mono" href="#/project/'+encodeURIComponent(d.project.ID)+'/run/'+encodeURIComponent(c.RunID)+'">'+esc(c.RunID)+'</a>'+(c.MeasuredAt?' <span class="sub">'+fmtTime(c.MeasuredAt)+'</span>':'');
 html+='<tr><td>'+esc(c.Type)+'</td><td class="mono">'+esc(c.ExpectedValue)+'</td><td class="mono">'+esc(c.ActualValue||'-')+'</td><td>'+critBadge(c)+'</td><td>'+evidence+'</td></tr>'});
 return html+'</table></section>'}
 // planTab is the whole backlog with search and status filters; the kanban only

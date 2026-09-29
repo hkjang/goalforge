@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -913,12 +912,8 @@ func (s *Store) RecordVerification(ctx context.Context, goalID, checkType, statu
 func CriterionMet(expected, actual string) bool { return criterionMet(expected, actual) }
 
 func criterionMet(expected, actual string) bool {
-	if expected == actual {
-		return true
-	}
-	e, eerr := strconv.ParseFloat(expected, 64)
-	a, aerr := strconv.ParseFloat(actual, 64)
-	return eerr == nil && aerr == nil && a >= e
+	met, _ := JudgeCriterion(expected, actual)
+	return met
 }
 
 type RunRecord struct {
