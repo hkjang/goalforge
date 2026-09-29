@@ -363,3 +363,22 @@ func TestRequiredCriteriaAskForExecutedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A card generated from a criterion quotes its intent to explain why the work
+// exists. Without one the card says "NET-002 미충족" and sends whoever picks
+// it up back to the catalogue.
+func TestEveryShippedCriterionSaysWhatItIsFor(t *testing.T) {
+	for _, standard := range GoReactOfflineService().Standards {
+		if strings.TrimSpace(standard.Intent) == "" {
+			t.Fatalf("%s has no intent", standard.ID)
+		}
+		if standard.Intent == standard.Title {
+			t.Fatalf("%s: the intent must say what the criterion is for, not repeat its name", standard.ID)
+		}
+	}
+	noIntent := standard("XX-001", SeverityRecommended)
+	noIntent.Intent = ""
+	if err := noIntent.Validate(); err == nil {
+		t.Fatal("a criterion with no intent must be refused")
+	}
+}
