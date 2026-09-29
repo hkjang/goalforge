@@ -163,7 +163,17 @@ func ObserveAndSupply(ctx context.Context, db *store.Store, projectID, goalID, r
 		return SupplyResult{}, err
 	}
 	observation.ProjectID, observation.CommitSHA, observation.ToolVersion = projectID, sha, toolVersion
+	// Gates first. A criterion a passing gate has already settled must not
+	// then be overwritten by a static read that could only ever say UNKNOWN
+	// about it — the weaker method would erase the stronger one's answer.
+	settled, err := SettleFromGates(ctx, db, projectID, goalID, sha, pack, profile, toolVersion)
+	if err != nil {
+		return SupplyResult{}, err
+	}
 	for _, finding := range observation.Findings {
+		if result, decided := settled[finding.StandardID]; decided && result != standards.ResultUnknown {
+			continue
+		}
 		standard, _ := pack.Standard(finding.StandardID)
 		if _, err = db.RecordAssessment(ctx, standard, standards.Assessment{ProjectID: projectID,
 			StandardID: finding.StandardID, CommitSHA: sha, Result: finding.Result, Detail: finding.Detail,
@@ -171,5 +181,15 @@ func ObserveAndSupply(ctx context.Context, db *store.Store, projectID, goalID, r
 			return SupplyResult{}, err
 		}
 	}
+	// And a criterion a gate settled is not a gap, whatever the static read
+	// thought of it.
+	kept := observation.Findings[:0]
+	for _, finding := range observation.Findings {
+		if settled[finding.StandardID] == standards.ResultMet {
+			continue
+		}
+		kept = append(kept, finding)
+	}
+	observation.Findings = kept
 	return Supply(ctx, db, goalID, observation, pack, policy)
 }

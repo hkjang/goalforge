@@ -235,6 +235,12 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "pass" {
 			return standardsPass(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "gate" {
+			return standardsGate(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "settle" {
+			return standardsSettle(ctx, s, args[2:])
+		}
 	case "status":
 		return goalShow(ctx, s)
 	case "milestone":
@@ -3259,6 +3265,7 @@ func verifyRecord(ctx context.Context, s *store.Store, args []string) error {
 	status := f.String("status", "", "PASSED, FAILED, or UNKNOWN")
 	actual := f.String("actual", "", "actual value")
 	output := f.String("output", "", "evidence")
+	kind := f.String("kind", "", "무엇을 확인한 것인지: build, test, integration, journey, security, performance, review")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -3268,6 +3275,23 @@ func verifyRecord(ctx context.Context, s *store.Store, args []string) error {
 	g, err := activeGoal(ctx, s)
 	if err != nil {
 		return err
+	}
+	if *kind != "" {
+		// Recorded with a kind, this can settle a criterion that asks for that
+		// kind. Unclassified evidence cannot — not because a person's word is
+		// worth less, but because "something passed" does not say what it
+		// established, and a criterion asking for a journey cannot be settled
+		// by an unnamed check.
+		if err = policy.ValidGateKind(*kind); err != nil {
+			return err
+		}
+		record := store.VerificationRecord{CheckType: *check, Status: strings.ToUpper(*status),
+			ActualValue: *actual, Output: *output, EvidenceKind: strings.ToLower(*kind), Required: true}
+		if err = s.RecordHumanEvidence(ctx, g.ID, "", []store.VerificationRecord{record}); err != nil {
+			return err
+		}
+		fmt.Printf("verification recorded: %s %s (%s)\n", *check, strings.ToUpper(*status), *kind)
+		return nil
 	}
 	if err := s.RecordVerification(ctx, g.ID, *check, strings.ToUpper(*status), *actual, *output); err != nil {
 		return err

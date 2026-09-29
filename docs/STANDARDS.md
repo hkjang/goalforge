@@ -304,6 +304,70 @@ $ goalforge standards pass --daily-budget 2
 
 ---
 
+## 실행해서 판정하기
+
+정적 읽기는 `MET` 을 낼 수 없습니다. **게이트를 돌리는 것만이 기준을 위로 올립니다.**
+
+```sh
+goalforge standards gate --type offline_boot --settles CFG-001
+goalforge standards gate --type route_restore --settles UX-004 --produces route,screenshot
+goalforge verify record --check offline_boot --status PASSED --actual true --kind integration --output "..."
+goalforge standards settle
+```
+
+```
+$ goalforge standards settle
+[v]  CFG-001
+
+$ goalforge standards status
+충족 1 · 미충족 0 · 일부 0 · 미확인 27 · 적용 제외 0
+```
+
+### 게이트가 무엇을 정산하는지는 선언해야 합니다
+
+게이트와 기준을 **종류만으로** 맺으면, 아무 여정 테스트나 모든 여정 기준을 정산하게 됩니다. 빌드 게이트가 여정 기준을 정산하는 것과 같은 실수가 한 층 위로 올라간 것입니다 — 초록색인 무언가가 돌았고, 그것이 이 기준에 관한 것인지는 아무도 확인하지 않았습니다.
+
+```
+$ goalforge standards gate --type x --settles CFG-999
+error: CFG-999: no such criterion in go-react-offline-service@0.1
+```
+
+없는 기준을 가리키는 연결은 아무것도 정산하지 못하면서 커버리지처럼 보입니다. 오타도 거절합니다.
+
+### 게이트 종류와 근거
+
+| 게이트 종류 | 만들어 내는 근거 |
+| --- | --- |
+| `journey` | `browser_test_result` |
+| `integration` | `integration_test_result` |
+| `security` | `security_test_result` |
+| `build` | `build_log` |
+| `test` | `test_result` |
+| `performance` | `performance_result` |
+
+`review` 는 없습니다. 사람의 판단이고, 그것을 실행 근거로 기록하면 **"누가 봤다"** 가 **"누가 돌렸다"** 자리에 서게 됩니다.
+
+`--produces` 로 게이트가 추가로 만들어 내는 근거를 적습니다. 경로를 밟고 화면을 찍는 여정 러너는 `route` 와 `screenshot` 도 만들어 냅니다 — 적지 않으면 그것을 요구하는 기준은 영원히 정산되지 않습니다.
+
+**종류가 맞지 않는 게이트는 선언해도 믿지 않습니다.** 빌드 게이트에 `--produces browser_test_result` 를 붙이는 것은 원래의 실수를 명시적으로 저지르는 것이고, 명시적인 버전도 거절해야 합니다. 위치를 가리킬 뿐인 근거(`route`, `commit_sha`)는 어떤 주장도 하지 않으므로 그대로 통과합니다.
+
+### 설정과 실행은 다릅니다
+
+게이트를 연결만 하고 돌리지 않으면 기준은 **그대로 있습니다.**
+
+돌리지 않은 것을 통과로 보면 설정 파일을 고쳐서 기준을 충족시킬 수 있게 되고, 실패로 보면 아무도 확인하지 않은 일을 망가진 일로 보고하게 됩니다.
+
+### 증명된 기준은 카드가 되지 않습니다
+
+```
+$ goalforge standards assess --supply
+공급: NET-002, REL-001        ← CFG-001 은 게이트가 통과를 증명했으므로 빠집니다
+```
+
+게이트를 먼저 정산하고 그다음에 정적 읽기를 적용합니다. 약한 방법이 강한 방법의 답을 지우면 안 됩니다.
+
+---
+
 ## 아직 없는 것
 
-1·2·3단계까지 구현되어 있습니다. 다음은 승인된 저위험 범위의 자동 구현, 실제 여정 검증, 문서·캡처·이미지 검증입니다.
+1~4단계의 검증 연결까지 구현되어 있습니다. 남은 것은 승인된 저위험 범위의 자동 구현, 페이지 캡처 자동 생성, 이미지 반입 검증입니다.

@@ -268,6 +268,82 @@ func standardsContext(ctx context.Context, s *store.Store) (model.Project, stand
 	return project, profile, pack, err
 }
 
+// standardsGate records which criteria a verification gate settles.
+//
+// The link is declared rather than inferred. Matching a gate to a criterion by
+// kind alone would let any journey test settle every journey criterion — the
+// same mistake as letting a build gate settle a journey one, moved up a level.
+func standardsGate(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("standards gate", flag.ContinueOnError)
+	checkType := set.String("type", "", "게이트의 check type")
+	settles := set.String("settles", "", "이 게이트가 정산하는 기준 ID 목록 (쉼표 구분)")
+	produces := set.String("produces", "", "이 게이트가 만들어 내는 근거 종류 (쉼표 구분)")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*checkType) == "" {
+		return errors.New("--type 이 필요합니다")
+	}
+	project, _, pack, err := standardsContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	claim := store.GateClaim{CheckType: *checkType, Settles: splitList(*settles), Produces: splitList(*produces)}
+	if err = s.SetGateClaim(ctx, project.ID, claim, pack); err != nil {
+		return err
+	}
+	fmt.Printf("%s 게이트가 정산하는 기준: %s\n", claim.CheckType, strings.Join(claim.Settles, ", "))
+	if len(claim.Produces) > 0 {
+		fmt.Printf("추가로 만들어 내는 근거: %s\n", strings.Join(claim.Produces, ", "))
+	}
+	return nil
+}
+
+// standardsSettle reads the project's gate results and re-judges the criteria
+// they claim.
+//
+// It is the only path by which a criterion can reach MET: the static read
+// proves absences and cannot prove that anything works, so until something is
+// actually run every criterion it cannot see stays unknown.
+func standardsSettle(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("standards settle", flag.ContinueOnError)
+	commit := set.String("commit", "", "근거로 기록할 커밋 (기본: 기본 브랜치의 HEAD)")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, profile, pack, err := standardsContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	sha := *commit
+	if sha == "" {
+		if sha, err = gitops.HeadCommit(ctx, project.RepositoryPath, project.DefaultBranch); err != nil {
+			return err
+		}
+	}
+	goal, err := s.CurrentGoal(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	settled, err := observer.SettleFromGates(ctx, s, project.ID, goal.ID, sha, pack, profile, version)
+	if err != nil {
+		return err
+	}
+	if len(settled) == 0 {
+		fmt.Println("게이트가 정산한 기준이 없습니다 — `goalforge standards gate --type T --settles ID` 로 연결하세요")
+		return nil
+	}
+	ids := make([]string, 0, len(settled))
+	for id := range settled {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		fmt.Printf("%s  %s\n", resultMark(settled[id]), id)
+	}
+	return nil
+}
+
 // standardsAssess reads the repository at a commit and files what is missing.
 func standardsAssess(ctx context.Context, s *store.Store, args []string) error {
 	set := flag.NewFlagSet("standards assess", flag.ContinueOnError)

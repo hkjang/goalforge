@@ -119,6 +119,13 @@ goalforge standards pass [--interval 24h] [--backlog-floor 3] [--daily-budget 4]
                    # the same answers and spends budget doing it. The discovery budget is
                    # separate from the implementation budget — a loop that can borrow from
                    # implementation spends the day deciding what to do and none of it doing it.
+goalforge standards gate --type T --settles ID[,ID] [--produces route,screenshot]
+                   # which criteria a gate settles. Declared, not inferred: matching by kind
+                   # alone would let any journey test settle every journey criterion.
+                   # A gate of the wrong kind is not believed even when it names the criterion.
+goalforge standards settle [--commit SHA]   # re-judge the criteria the project's gates claim.
+                   # The only path by which a criterion reaches MET — a static read proves
+                   # absences and cannot prove that anything works.
 goalforge standards status            # every criterion in force, including the unexamined ones
 goalforge standards except --standard ID --reason R --decider D [--review-when W | --review-by DATE]
 goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
