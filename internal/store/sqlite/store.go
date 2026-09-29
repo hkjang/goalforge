@@ -86,6 +86,21 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS standard_profiles (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), pack_ref TEXT NOT NULL, pack_checksum TEXT NOT NULL DEFAULT '',
+ attributes TEXT NOT NULL DEFAULT '{}', exceptions TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS standard_assessments (
+ project_id TEXT NOT NULL REFERENCES projects(id), standard_id TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+ commit_sha TEXT NOT NULL, result TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+ evidence TEXT NOT NULL DEFAULT '[]', tool_version TEXT NOT NULL DEFAULT '', assessed_at TEXT NOT NULL,
+ PRIMARY KEY(project_id,standard_id)
+);
+CREATE TABLE IF NOT EXISTS standard_findings (
+ dedup_key TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), standard_id TEXT NOT NULL,
+ defect_kind TEXT NOT NULL DEFAULT '', target_scope TEXT NOT NULL DEFAULT '',
+ work_item_id TEXT NOT NULL DEFAULT '', filed_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS integration_checks (
  project_id TEXT PRIMARY KEY REFERENCES projects(id), pending INTEGER NOT NULL DEFAULT 0,
  reason TEXT NOT NULL DEFAULT '', target_sha TEXT NOT NULL DEFAULT '',
