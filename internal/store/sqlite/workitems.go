@@ -39,8 +39,8 @@ type WorkItemDetail struct {
 
 func (s *Store) WorkItemByID(ctx context.Context, goalID, workID string) (model.WorkItem, error) {
 	var w model.WorkItem
-	err := s.db.QueryRowContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).
-		Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason)
+	err := s.db.QueryRowContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason,COALESCE(version,1) FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).
+		Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason, &w.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, ErrNotFound
 	}
@@ -195,7 +195,7 @@ func (s *Store) SearchWorkItems(ctx context.Context, goalID string, query WorkIt
 		limit = 200
 	}
 	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason FROM work_items WHERE `+
+	rows, err := s.db.QueryContext(ctx, `SELECT id,goal_id,COALESCE(milestone_id,''),type,title,priority,status,risk,change_scope,weight,estimated_tokens,objective,acceptance,blocked_reason,COALESCE(version,1) FROM work_items WHERE `+
 		strings.Join(conditions, " AND ")+` ORDER BY CASE status WHEN 'IN_PROGRESS' THEN 0 WHEN 'APPROVED' THEN 1 WHEN 'BACKLOG' THEN 2 ELSE 3 END, priority DESC, id LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -204,7 +204,7 @@ func (s *Store) SearchWorkItems(ctx context.Context, goalID string, query WorkIt
 	var result []model.WorkItem
 	for rows.Next() {
 		var w model.WorkItem
-		if err = rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason); err != nil {
+		if err = rows.Scan(&w.ID, &w.GoalID, &w.MilestoneID, &w.Type, &w.Title, &w.Priority, &w.Status, &w.Risk, &w.ChangeScope, &w.Weight, &w.EstimatedTokens, &w.Objective, &w.Acceptance, &w.BlockedReason, &w.Version); err != nil {
 			return nil, err
 		}
 		result = append(result, w)

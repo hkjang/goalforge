@@ -3191,11 +3191,30 @@ func workStatus(ctx context.Context, s *store.Store, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.SetWorkItemStatus(ctx, g.ID, workID, strings.ToUpper(*status)); err != nil {
+	// The same rule the board and the API apply. Setting DONE from here used
+	// to work, which meant a person could mark work verified without a gate
+	// having run — a boundary the API enforced and this surface did not.
+	target := strings.ToUpper(*status)
+	if _, err := s.ApplyManualTransition(ctx, g.ID, workID, target, 0); err != nil {
+		var refusal *store.TransitionRefusal
+		if errors.As(err, &refusal) {
+			return fmt.Errorf("%s: %s\n허용된 이동: %s", workID, refusal.Reason,
+				strings.Join(allowedTargetsFor(ctx, s, g.ID, workID), ", "))
+		}
 		return err
 	}
-	fmt.Printf("work item updated: %s %s\n", workID, strings.ToUpper(*status))
+	fmt.Printf("work item updated: %s %s\n", workID, target)
 	return nil
+}
+
+// allowedTargetsFor lists where this item may go, so a refusal is followed by
+// the answer rather than by a rule the user has to infer.
+func allowedTargetsFor(ctx context.Context, s *store.Store, goalID, workID string) []string {
+	item, err := s.WorkItemByID(ctx, goalID, workID)
+	if err != nil {
+		return nil
+	}
+	return store.AllowedManualTargets(item.Status)
 }
 
 // splitLeadingArg pulls a leading positional argument off a command line so the

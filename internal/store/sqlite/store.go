@@ -378,6 +378,11 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 	if err := s.ensureColumn(ctx, "runs", "base_commit", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// The version a board read, so an edit made against a stale view is
+	// refused instead of overwriting whatever happened in between.
+	if err := s.ensureColumn(ctx, "work_items", "version", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
 	if err := s.ensureColumn(ctx, "verification_results", "evidence_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -839,6 +844,16 @@ func (s *Store) SetWorkItemStatus(ctx context.Context, goalID, workID, status st
 		return err
 	}
 	defer tx.Rollback()
+	if err = s.setWorkItemStatusTx(ctx, tx, goalID, workID, status); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// setWorkItemStatusTx applies the change inside a caller's transaction, so a
+// manual transition can check the item's version and change its status without
+// a window between the two where somebody else's edit lands.
+func (s *Store) setWorkItemStatusTx(ctx context.Context, tx *sql.Tx, goalID, workID, status string) error {
 	var exists string
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM work_items WHERE id=? AND goal_id=?`, workID, goalID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
@@ -864,7 +879,7 @@ func (s *Store) SetWorkItemStatus(ctx context.Context, goalID, workID, status st
 	if n, _ := result.RowsAffected(); n != 1 {
 		return ErrNotFound
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) RecordVerification(ctx context.Context, goalID, checkType, status, actual, output string) error {

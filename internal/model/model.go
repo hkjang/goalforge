@@ -65,7 +65,11 @@ type WorkItem struct {
 	// execution session or a reviewer can work from.
 	Objective, Acceptance string
 	// BlockedReason explains a BLOCKED status in the user's terms.
-	BlockedReason    string
+	BlockedReason string
+	// Version is bumped on every change, so an edit made against a view that
+	// has since moved is refused instead of overwriting whatever happened —
+	// another person's change, or the engine's own.
+	Version          int64
 	Priority, Weight float64
 	EstimatedTokens  int64
 }
