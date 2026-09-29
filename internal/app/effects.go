@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
@@ -103,6 +104,12 @@ func GuardEffectAs(ctx context.Context, db *store.Store, project model.Project, 
 	if err := db.Fence(ctx, lease); err != nil {
 		return err
 	}
+	// Checked before BeginEffect so a refused merge leaves no intent behind:
+	// an intent recorded for something that was never attempted would make the
+	// next attempt reconcile a merge that never happened.
+	if err := integrationGate(ctx, db, project, effect); err != nil {
+		return err
+	}
 	existing, created, err := db.BeginEffect(ctx, effect)
 	if err != nil {
 		return err
@@ -143,4 +150,46 @@ func shortSHA(sha string) string {
 		return sha[:12]
 	}
 	return sha
+}
+
+// ErrIntegrationBroken means the default branch is known not to work, so
+// merging more into it is refused.
+//
+// A merge leaves the branch unverified by construction: each item was verified
+// in its own worktree and nothing has checked the combination. That is normal
+// and does not block anything. What does block is a check that has *run* and
+// come back broken — stacking a second merge on top of that buries which
+// change broke it and turns a one-change rollback into a two-change one.
+var ErrIntegrationBroken = errors.New("default branch failed integration verification")
+
+// integrationGate refuses a merge into a branch already known to be broken.
+//
+// The pending flag was recorded on every merge and read by five screens that
+// display it. None of them was the merge gate, so the state everybody could
+// see stopped nobody.
+func integrationGate(ctx context.Context, db *store.Store, project model.Project, effect store.ExternalEffect) error {
+	if effect.Kind != store.EffectMergeBranch {
+		// Publishing a branch to a remote does not touch the default branch,
+		// and blocking it would stop the one action that lets someone else
+		// look at the fix.
+		return nil
+	}
+	status, err := db.IntegrationStatus(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	if status.LastSHA == "" || status.LastPassed {
+		return nil
+	}
+	repair, err := db.IsIntegrationRepair(ctx, effect.WorkItemID)
+	if err != nil {
+		return err
+	}
+	if repair {
+		// The repair item is how the branch gets fixed. A gate that blocks its
+		// own remedy is a deadlock.
+		return nil
+	}
+	return fmt.Errorf("%w: %s 에서 %s — 먼저 통합 검증을 복구하세요 (`goalforge verify integration`). 깨진 브랜치 위에 더 쌓으면 무엇이 깨뜨렸는지 묻힙니다",
+		ErrIntegrationBroken, shortSHA(status.LastSHA), strings.TrimSpace(status.LastDetails))
 }
