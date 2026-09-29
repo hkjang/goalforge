@@ -623,7 +623,13 @@ html+='<tr><td colspan="5"><details'+(ok?'':' open')+'><summary class="sub" styl
 return html+'</table></section>'}
 function diffPanel(d){if(d.diff_error)return'<section class="panel"><h2>코드 차이</h2><div class="sub">차이를 읽을 수 없습니다: '+esc(d.diff_error)+'</div></section>';
 if(!d.diff)return'';
-return'<section class="panel"><h2>코드 차이'+(d.diff_truncated?' <span class="pill">일부만 표시</span>':'')+'</h2>'+diffHTML(d.diff)+'</section>'}
+// When the approval went stale the delta comes first and open, and the full
+// change comes second and collapsed. A reviewer being asked to look again
+// needs the part that moved, not the part they already read.
+var html='';
+if(d.since_approval)html+='<section class="panel"><h2>승인 이후 바뀐 부분</h2><div class="sub" style="margin-bottom:8px">이미 검토한 부분을 뺀 차이입니다. 아래 전체 변경은 참고용입니다.</div>'+diffHTML(d.since_approval)+'</section>';
+html+='<section class="panel"><h2>'+(d.since_approval?'전체 변경':'코드 차이')+(d.diff_truncated?' <span class="pill">일부만 표시</span>':'')+'</h2>'+(d.since_approval?'<details><summary class="sub" style="cursor:pointer;margin-bottom:8px">전체 변경 보기</summary>'+diffHTML(d.diff)+'</details>':diffHTML(d.diff))+'</section>';
+return html}
 // renderRun is the change review: what changed, why, whether it verified, and
 // what it contributes to the goal — side by side instead of across a terminal
 // and a git client.
