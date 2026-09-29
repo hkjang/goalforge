@@ -21,6 +21,20 @@ section.panel{background:color-mix(in srgb,var(--panel) 92%,transparent);border:
 section.panel h2{font-size:15px;margin:0 0 10px;color:var(--muted);font-weight:500}
 .crit{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:6px;font-size:13px}
 .kanban{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.board{display:grid;grid-template-columns:repeat(var(--cols,6),minmax(0,1fr));gap:8px;align-items:start}
+.bcol{min-width:0}
+.bcard b{overflow-wrap:anywhere}
+.bblock{overflow-wrap:anywhere}
+.bcol{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px;min-height:90px}
+.bcol.drop{outline:2px dashed var(--ok);outline-offset:-3px}
+.bcol.nodrop{opacity:.55}
+.bcol h3{margin:2px 4px 6px;font-size:12px;display:flex;justify-content:space-between;gap:6px}
+.bcard{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px;margin-bottom:6px;cursor:grab;font-size:12px}
+.bcard:focus{outline:2px solid var(--ok)}
+.bcard.sel{border-color:var(--ok)}
+.bmeta{font-size:11px;opacity:.75;margin-top:3px;display:flex;flex-wrap:wrap;gap:6px}
+.bblock{font-size:11px;color:var(--warn);margin-top:3px}
+.bdel{margin-top:4px}
 .col{background:var(--card);border-radius:10px;padding:10px}.col h3{font-size:12px;color:var(--muted);margin:0 0 8px;font-weight:500}
 .item{background:#182242;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;margin-bottom:6px}.item small{color:var(--muted)}
 table{width:100%;font-size:12.5px;border-collapse:collapse}th{color:var(--muted);font-weight:400;text-align:left;padding:4px 8px 4px 0}td{padding:6px 8px 6px 0;border-top:1px solid #1e2946;vertical-align:top}
@@ -152,7 +166,7 @@ list.forEach(function(r){html+='<tr><td><span class="badge unmet">'+esc(relaxati
 return html+'</table></section>'}
 function shortSHA(v){return esc(String(v||'').slice(0,12))}
 function fmtUSD(v){return '$'+(v||0).toFixed(v&&v<1?4:2)}
-function tabsHTML(projectID,active){var tabs=[['overview','개요'],['plan','계획'],['runs','실행'],['verify','검증'],['cost','비용']];var html='<div class="tabs">';tabs.forEach(function(t){var href='#/project/'+encodeURIComponent(projectID)+(t[0]==='overview'?'':'/tab/'+t[0]);html+='<a class="'+(active===t[0]?'on':'')+'" href="'+href+'">'+t[1]+'</a>'});return html+'</div>'}
+function tabsHTML(projectID,active){var tabs=[['overview','개요'],['board','보드'],['plan','계획'],['runs','실행'],['verify','검증'],['cost','비용']];var html='<div class="tabs">';tabs.forEach(function(t){var href='#/project/'+encodeURIComponent(projectID)+(t[0]==='overview'?'':'/tab/'+t[0]);html+='<a class="'+(active===t[0]?'on':'')+'" href="'+href+'">'+t[1]+'</a>'});return html+'</div>'}
 // diffHTML colours a patch by line kind. The patch is escaped first: it is
 // untrusted repository content being rendered into the page.
 function diffHTML(text){var out='';String(text).split('\n').forEach(function(line){var cls='';if(line.indexOf('+++')===0||line.indexOf('---')===0||line.indexOf('diff --git')===0||line.indexOf('index ')===0)cls='meta';else if(line.indexOf('@@')===0)cls='hunk';else if(line.charAt(0)==='+')cls='add';else if(line.charAt(0)==='-')cls='del';out+='<i class="'+cls+'">'+esc(line||' ')+'</i>'});return'<pre class="diff">'+out+'</pre>'}
@@ -279,6 +293,110 @@ html+='<tr><td>'+esc(c.Type)+'</td><td class="mono">'+esc(c.ExpectedValue)+'</td
 return html+'</table></section>'}
 // planTab is the whole backlog with search and status filters; the kanban only
 // ever showed four items per column and offered no way to the rest.
+
+// The board is the control screen: every work item by column, with the reason
+// each one cannot proceed taken from the server rather than re-derived here.
+// A board that computes its own idea of "why is this waiting" eventually
+// disagrees with the thing that actually decides.
+var boardState={q:'',status:'',verification:'',selected:null,dragging:null};
+function boardTab(){return'<section class="panel"><div class="row"><h2 style="margin:0">보드</h2>'+
+'<input id="bq" placeholder="제목 또는 ID 검색" value="'+esc(boardState.q)+'" oninput="boardSearch(this.value)" style="flex:1;min-width:160px">'+
+'<label class="sub"><input type="checkbox" id="bfail" '+(boardState.verification==='failed'?'checked':'')+' onchange="boardFailedOnly(this.checked)"> 검증 실패만</label>'+
+'<label class="sub"><input type="checkbox" id="barch" '+(boardState.archive?'checked':'')+' onchange="boardArchive(this.checked)"> 보관 보기</label>'+
+'<button onclick="loadBoard()">새로고침</button></div>'+
+'<div id="bsummary" class="sub"></div>'+
+'<div id="board" class="board"></div></section>'+
+'<section class="panel" id="bdetail"><h2>작업 상세</h2><div class="sub">카드를 선택하면 여기에 표시됩니다.</div></section>'}
+function boardSearch(v){boardState.q=v;clearTimeout(boardState.timer);boardState.timer=setTimeout(loadBoard,250)}
+function boardFailedOnly(on){boardState.verification=on?'failed':'';loadBoard()}
+// Discarded work is an archive, not a column to keep on screen: seven columns
+// do not fit and the one that gets cut off is the one nobody needs while they
+// are working.
+function boardArchive(on){boardState.archive=on;renderBoard(boardState.board||{columns:[]})}
+async function loadBoard(){var host=document.querySelector('#board');if(!host)return;
+var qs=[];if(boardState.q)qs.push('q='+encodeURIComponent(boardState.q));
+if(boardState.verification)qs.push('verification='+boardState.verification);
+try{var b=await api('/api/v1/projects/'+encodeURIComponent(detailCache.project.ID)+'/board'+(qs.length?'?'+qs.join('&'):''));
+boardState.board=b;renderBoard(b)}catch(e){host.innerHTML='<span class="error">'+esc(e.message)+'</span>'}}
+function renderBoard(b){
+var summary=document.querySelector('#bsummary');
+if(summary)summary.innerHTML='진행 중 '+b.in_progress+' / 동시 실행 한도 '+b.wip_limit+(b.filtered?' · <b>필터 적용됨</b> (총계는 조건에 맞는 것만)':'');
+var shown=(b.columns||[]).filter(function(col){return boardState.archive||col.status!=='DISCARDED'});
+var host=document.querySelector('#board');if(host)host.style.setProperty('--cols',shown.length);
+var html='';shown.forEach(function(col){
+html+='<div class="bcol" data-status="'+esc(col.status)+'" ondragover="boardOver(event,\''+esc(col.status)+'\')" ondragleave="boardLeave(event)" ondrop="boardDrop(event,\''+esc(col.status)+'\')">'+
+'<h3><span>'+esc(col.label)+'</span><span class="sub">'+col.total+'</span></h3>';
+(col.cards||[]).forEach(function(c){html+=boardCard(c)});
+if(col.total>(col.cards||[]).length)html+='<div class="sub" style="font-size:11px">+'+(col.total-(col.cards||[]).length)+'건 더 있음</div>';
+html+='</div>'});
+document.querySelector('#board').innerHTML=html}
+function boardCard(c){var w=c.item;var sel=boardState.selected===w.ID?' sel':'';
+// Status is spelled out as well as positioned, so the board is readable
+// without relying on which column something happens to sit in.
+var meta=[];meta.push('P'+(w.Priority||0));
+if(w.EstimatedTokens)meta.push(fmtTokens(w.EstimatedTokens)+' 토큰');
+if(c.dependencies)meta.push('선행 '+c.dependencies);
+if(c.dependents)meta.push('후행 '+c.dependents);
+if(c.verification==='FAILED')meta.push('<span class="badge unmet">검증 실패</span>');
+else if(c.verification==='PASSED')meta.push('<span class="badge met">검증 통과</span>');
+return'<div class="bcard'+sel+'" draggable="true" tabindex="0" data-id="'+esc(w.ID)+'"'+
+' ondragstart="boardDragStart(event,\''+esc(w.ID)+'\')" ondragend="boardDragEnd()"'+
+' onclick="boardSelect(\''+esc(w.ID)+'\')" onkeydown="boardCardKey(event,\''+esc(w.ID)+'\')">'+
+'<b>'+esc(w.Title||w.ID)+'</b>'+
+'<div class="bmeta">'+meta.join(' · ')+'</div>'+
+(c.blockers&&c.blockers.length?'<div class="bblock">막힘: '+esc(c.blockers[0].Detail)+'</div>':'')+
+deliveryRow(c)+
+'</div>'}
+// The delivery badge is deliberately its own line rather than another chip in
+// the meta row. DONE says this item's gates passed; whether it was merged,
+// whether the branches held up together and whether it may ship are later
+// facts, and a reader who takes the column for the answer ships a broken main.
+function deliveryRow(c){var d=c.delivery||{};if(!d.state)return'';
+var cls=d.blocking?'unmet':(d.state==='RELEASABLE'?'met':'');
+return'<div class="bdel"><span class="badge '+cls+'" title="'+esc(d.detail||'')+'">'+esc(d.label)+'</span></div>'}
+function findCard(id){var found=null;((boardState.board||{}).columns||[]).forEach(function(col){(col.cards||[]).forEach(function(c){if(c.item.ID===id)found=c})});return found}
+// Dragging highlights only the columns the server would accept, and marks the
+// rest with the reason it would give, so a drop never lands and then bounces.
+function boardDragStart(e,id){boardState.dragging=id;var c=findCard(id);if(!c)return;
+document.querySelectorAll('.bcol').forEach(function(col){var st=col.getAttribute('data-status');
+if((c.allowed_targets||[]).indexOf(st)>=0)col.classList.add('drop');
+else{col.classList.add('nodrop');col.title=(c.refused_targets||{})[st]||''}})}
+function boardDragEnd(){boardState.dragging=null;document.querySelectorAll('.bcol').forEach(function(col){col.classList.remove('drop');col.classList.remove('nodrop');col.removeAttribute('title')})}
+function boardOver(e,st){var c=findCard(boardState.dragging);if(c&&(c.allowed_targets||[]).indexOf(st)>=0)e.preventDefault()}
+function boardLeave(e){}
+async function boardDrop(e,st){e.preventDefault();var id=boardState.dragging;boardDragEnd();if(!id)return;await boardMove(id,st)}
+async function boardMove(id,st){var c=findCard(id);if(!c)return;
+if((c.allowed_targets||[]).indexOf(st)<0){alert((c.refused_targets||{})[st]||'이 열로는 옮길 수 없습니다');return}
+try{await api('/api/v1/projects/'+encodeURIComponent(detailCache.project.ID)+'/work/'+encodeURIComponent(id)+'/transition',
+{method:'POST',body:JSON.stringify({status:st,version:c.item.Version||0})});await loadBoard();if(boardState.selected===id)boardSelect(id)}
+catch(e){alert(e.message);await loadBoard()}}
+function boardSelect(id){boardState.selected=id;renderBoard(boardState.board||{columns:[]});loadBoardDetail(id)}
+// Keyboard reaches everything drag does, so the board works without a mouse
+// and without telling colours apart.
+function boardCardKey(e,id){var c=findCard(id);if(!c)return;
+if(e.key==='Enter'||e.key===' '){e.preventDefault();boardSelect(id);return}
+var targets=c.allowed_targets||[];
+if(e.key==='m'||e.key==='M'){e.preventDefault();
+if(!targets.length){alert('지금 이 작업을 옮길 수 있는 열이 없습니다');return}
+var choice=prompt('어느 열로 옮길까요?\n'+targets.join(', '),targets[0]);
+if(choice)boardMove(id,choice.toUpperCase().trim())}}
+async function loadBoardDetail(id){var host=document.querySelector('#bdetail');if(!host)return;
+host.innerHTML='<h2>작업 상세</h2><div class="sub">불러오는 중…</div>';
+try{var d=await api('/api/v1/projects/'+encodeURIComponent(detailCache.project.ID)+'/work/'+encodeURIComponent(id));
+var w=d.item;var html='<h2>'+esc(w.Title||w.ID)+' <span class="badge">'+esc(workLabel(w.Status))+'</span></h2>';
+html+='<div class="sub mono" style="font-size:11px">'+esc(w.ID)+'</div>';
+if(w.Objective)html+='<div style="margin-top:6px">'+esc(w.Objective)+'</div>';
+if(w.Acceptance)html+='<div class="sub" style="margin-top:4px">완료 기준: '+esc(w.Acceptance)+'</div>';
+if(w.ChangeScope)html+='<div class="sub mono" style="margin-top:4px">범위: '+esc(w.ChangeScope)+'</div>';
+if((d.blockers||[]).length){html+='<div class="attn warn" style="margin-top:8px"><b>막힌 이유</b>';
+d.blockers.forEach(function(b){html+='<div class="sub">'+esc(b.Kind)+': '+esc(b.Detail)+'</div>'});html+='</div>'}
+if((d.dependencies||[]).length){html+='<div style="margin-top:8px"><b>선행 작업</b>';
+d.dependencies.forEach(function(x){html+='<div class="sub">'+esc(x.Title||x.ID)+' · '+esc(workLabel(x.Status))+'</div>'});html+='</div>'}
+if((d.runs||[]).length){html+='<div style="margin-top:8px"><b>실행</b>';
+d.runs.slice(0,5).forEach(function(r){html+='<div class="sub mono" style="font-size:11px">'+esc(r.ID)+' · '+esc(r.State)+'</div>'});html+='</div>'}
+html+='<div class="actions" style="margin-top:8px"><a class="plain" href="#/project/'+encodeURIComponent(detailCache.project.ID)+'/work/'+encodeURIComponent(w.ID)+'">전체 화면으로 열기</a></div>';
+host.innerHTML=html}catch(e){host.innerHTML='<h2>작업 상세</h2><span class="error">'+esc(e.message)+'</span>'}}
+
 // decisionsPanel keeps settled architecture visible where planning happens,
 // so a decision is inherited rather than re-derived by the next session.
 function decisionsPanel(){return'<section class="panel"><div class="row"><h2 style="margin:0">설계 결정</h2><button onclick="toggleDecisionForm()">결정 기록</button></div>'+
@@ -363,13 +481,15 @@ var d=await api('/api/v1/projects/'+encodeURIComponent(id));detailCache=d;var p=
 status.className='sub';status.textContent='';
 document.querySelector('#crumb').innerHTML='<a class="sub" href="#">프로젝트</a> / '+esc(p.Name);
 tab=tab||'overview';var live=null;var body='';
-if(tab==='plan')body=planTab(d);
+if(tab==='board')body=boardTab(d);
+else if(tab==='plan')body=planTab(d);
 else if(tab==='runs')body=runsTab(d);
 else if(tab==='verify')body=verifyTab(d);
 else if(tab==='cost')body=costTab(d);
 else{var o=overviewTab(d);body=o.html;live=o.live}
 view.innerHTML=goalHead(d,tab)+body;countdown();
 if(tab==='plan'){loadPlan();loadDecisions()}
+if(tab==='board')loadBoard();
 if(live)startLive(p.ID,live)}
 // renderWork is the work item as an executable specification rather than a
 // title: why it exists, what "done" means, what blocks it, and every attempt.
