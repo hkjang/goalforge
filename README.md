@@ -92,11 +92,18 @@ goalforge goal contract --title T --outcome "key|method|judge" --measure "p95=la
                         [--users ...] [--exclude ...] [--reason ...] [--decider ...]
 goalforge goal contract show           # required outcomes, what is unconfirmed, what conflicts
 goalforge goal set --title T --objective O --criterion build_passed=true [--criterion NAME@journey=true] [--reason ...]
+                   # numeric criteria carry a direction and a unit: "<=200ms", ">=99.9%", "=0".
+                   # A bare number still means "at least". Units convert within a family
+                   # (time, bytes, percent) and a cross-family comparison is refused rather
+                   # than guessed, so a latency target is never settled by a memory reading.
 goalforge goal show
 goalforge milestone add --title T --weight 2
 goalforge work add --title T --priority 90 --weight 3 --estimated-tokens 12000 --scope "internal/session/**"
                    [--depends-on WORK-1,WORK-2]   # every predecessor must be DONE first
 goalforge work list | work status ID --set APPROVED
+                   # IN_PROGRESS, VERIFYING and DONE belong to the engine. A person moving a
+                   # card there would be claiming a verification that never ran, so the store
+                   # refuses it identically from the CLI, the API and MCP.
 goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
 goalforge verify gate add --type T --command-json '["go","test","./..."]' [--success-value 100] [--kind build|test|integration|journey|security|performance|review]
                           [--value-pattern 'coverage:\s+([0-9.]+)%']   # measure, do not assume
@@ -137,7 +144,6 @@ goalforge service systemd [--scope user|system]  # a systemd unit for the worker
 goalforge storage usage                # where the state database's space went
 goalforge storage prune --older-than 30d [--apply] [--vacuum]
 goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
-goalforge integrity verify [--json]    # detect edited, deleted, or unchained evidence and approvals
 goalforge backup --out FILE            # consistent copy of the state database
 goalforge restore --from FILE --to PATH  # verify the records, settle outside work, then resume
 goalforge approval request --action publish-branch --work-item WORK-1 [--remote origin] --reason "..."
@@ -174,6 +180,11 @@ goalforge pr --work-item WORK-1            # a PR body carrying the goal, criter
 goalforge checkpoint --next-action "..."   # also writes continuity/<project>.md beside the DB
 goalforge pause | resume | cancel
 goalforge serve --addr 127.0.0.1:8787      # dashboard + JSON API + Prometheus /metrics
+                   # the Board tab is a kanban over the same work items: priority, dependency
+                   # counts, blocker reasons and the verification outcome on each card, with a
+                   # separate delivery badge. DONE means this item's own gates passed; whether
+                   # it merged, whether the merged result holds up, and whether it may ship are
+                   # three further facts a column cannot carry without claiming one for another.
 goalforge approval request --action protected-files|remove-tests|publish-branch|merge-branch [--work-item WORK-1] --reason "..."
 goalforge approval approve APR-ID
 GOALFORGE_POSTGRES_DSN='postgres://...' goalforge storage postgres migrate
