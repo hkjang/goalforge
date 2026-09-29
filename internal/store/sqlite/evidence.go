@@ -139,7 +139,8 @@ func (s *Store) recordExternalEvidence(ctx context.Context, goalID, source strin
 			return idErr
 		}
 		if err = appendChain(ctx, tx, ChainEvidence, fmt.Sprint(id),
-			evidenceDigest(goalID, "", record.CheckType, record.Status, record.ActualValue, record.EvidenceKind, now, required), now); err != nil {
+			evidenceDigest(goalID, "", record.CheckType, record.Status, record.ActualValue, record.EvidenceKind, now,
+				record.Output, required), now); err != nil {
 			return err
 		}
 	}

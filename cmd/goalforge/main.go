@@ -3646,6 +3646,13 @@ func integrityVerify(ctx context.Context, s *store.Store, args []string) error {
 	} else {
 		fmt.Printf("사슬 보호: 키 없음 — 수정·삭제·무단 삽입은 탐지하지만, 데이터베이스에 쓸 수 있는 사람이 사슬 전체를 다시 계산하는 것은 막지 못합니다 (%s 를 설정하세요)\n", audit.EnvChainKey)
 	}
+	if report.UnprotectedOutputs > 0 {
+		// These verify, and their outputs could still be rewritten without
+		// detection. Folding that into "intact" would be the same kind of
+		// overstatement the chain exists to catch.
+		fmt.Printf("게이트 출력이 보호되지 않는 오래된 증거 %d건 — 이 행들은 검증되지만, 실패 사유를 고쳐도 탐지되지 않습니다\n",
+			report.UnprotectedOutputs)
+	}
 	if report.Intact() {
 		fmt.Println("결과: 기록이 GoalForge 가 쓴 그대로입니다")
 		return nil
