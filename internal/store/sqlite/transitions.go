@@ -151,3 +151,14 @@ func StatusLabel(status string) string { return statusLabelKo(status) }
 
 // ManualStatus reports whether a person may move an item into this status.
 func ManualStatus(status string) bool { return manualStatuses[strings.ToUpper(status)] }
+
+// ApplyAutomaticTransition is ApplyManualTransition for the autonomy policy.
+//
+// It goes through the same rule rather than writing the status directly: the
+// engine's own states stay the engine's, and automation acting on a person's
+// behalf is held to what a person could have done. The separate entry point
+// exists so the two are distinguishable in a stack trace and so this one can
+// never be reached from a request handler by accident.
+func (s *Store) ApplyAutomaticTransition(ctx context.Context, goalID, workID, to string, expectedVersion int64) (model.WorkItem, error) {
+	return s.ApplyManualTransition(ctx, goalID, workID, to, expectedVersion)
+}

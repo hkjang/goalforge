@@ -241,6 +241,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "settle" {
 			return standardsSettle(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "autonomy" {
+			return standardsAutonomy(ctx, s, args[2:])
+		}
 	case "status":
 		return goalShow(ctx, s)
 	case "milestone":
