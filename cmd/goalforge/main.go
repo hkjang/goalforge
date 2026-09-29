@@ -232,6 +232,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "assess" {
 			return standardsAssess(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "pass" {
+			return standardsPass(ctx, s, args[2:])
+		}
 	case "status":
 		return goalShow(ctx, s)
 	case "milestone":

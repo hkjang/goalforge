@@ -12,6 +12,18 @@ import (
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
 
+// supplyStoreFixture is supplyFixture with the project returned too, for the
+// schedule tests that need its ID.
+func supplyStoreFixture(t *testing.T) (context.Context, *store.Store, model.Project, model.Goal) {
+	t.Helper()
+	ctx, db, goal := supplyFixture(t)
+	project, err := db.ProjectByID(ctx, "PRJ-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx, db, project, goal
+}
+
 func supplyFixture(t *testing.T) (context.Context, *store.Store, model.Goal) {
 	t.Helper()
 	ctx := context.Background()

@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS supply_runs (
+ id TEXT PRIMARY KEY, supply_key TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL REFERENCES projects(id),
+ commit_sha TEXT NOT NULL, trigger_kind TEXT NOT NULL, status TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+ started_at TEXT NOT NULL, ended_at TEXT NOT NULL DEFAULT '',
+ filed INTEGER NOT NULL DEFAULT 0, already_filed INTEGER NOT NULL DEFAULT 0,
+ deferred INTEGER NOT NULL DEFAULT 0, unchecked INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS standard_profiles (
  project_id TEXT PRIMARY KEY REFERENCES projects(id), pack_ref TEXT NOT NULL, pack_checksum TEXT NOT NULL DEFAULT '',
  attributes TEXT NOT NULL DEFAULT '{}', exceptions TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL
