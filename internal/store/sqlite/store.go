@@ -620,6 +620,20 @@ type ProgressDetail struct {
 	TotalItems, DoneItems, DiscardedItems    int
 	Criteria                                 []CriterionStatus
 	CriteriaMet                              bool
+	// UnconfirmedOutcomes and OutcomeConflicts are the contract's own reasons
+	// the goal is not finished.
+	//
+	// The contract states what the goal requires. An outcome nobody has agreed
+	// how to settle is a requirement that cannot be met, and two that cannot
+	// both hold mean the goal has no achievable definition — in either case
+	// the work being done says nothing. These were reported by the plan
+	// preview as advice and ignored by the verdict, so a goal could be marked
+	// complete against a contract that could not be satisfied.
+	UnconfirmedOutcomes []string
+	OutcomeConflicts    []string
+	// IncompleteReason is the first thing standing between here and done,
+	// stated once so every surface says the same thing.
+	IncompleteReason string
 }
 
 // GoalProgress reports percent complete and whether the goal is finished.
@@ -661,7 +675,63 @@ FROM work_items WHERE goal_id=?`, goal.ID).Scan(&detail.TotalWeight, &detail.Don
 		detail.Percent = detail.DoneWeight / detail.TotalWeight * 100
 	}
 	detail.Complete = detail.CriteriaMet && detail.TotalWeight > 0 && detail.DoneWeight == detail.TotalWeight
+	if err = s.applyContractToCompletion(ctx, goal.ProjectID, &detail); err != nil {
+		return detail, err
+	}
+	detail.IncompleteReason = incompleteReason(detail)
 	return detail, nil
+}
+
+// applyContractToCompletion lets the contract have its say.
+//
+// A missing contract is not a reason to be incomplete: contracts are optional
+// and a project without one is judged exactly as it was before.
+func (s *Store) applyContractToCompletion(ctx context.Context, projectID string, detail *ProgressDetail) error {
+	if projectID == "" {
+		return nil
+	}
+	contract, err := s.CurrentContract(ctx, projectID)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, outcome := range contract.Unconfirmed() {
+		detail.UnconfirmedOutcomes = append(detail.UnconfirmedOutcomes, outcome.Key)
+	}
+	for _, conflict := range contract.Conflicts() {
+		detail.OutcomeConflicts = append(detail.OutcomeConflicts,
+			fmt.Sprintf("%s vs %s: %s", conflict.Left.Key, conflict.Right.Key, conflict.Detail))
+	}
+	if len(detail.UnconfirmedOutcomes) > 0 || len(detail.OutcomeConflicts) > 0 {
+		detail.Complete = false
+	}
+	return nil
+}
+
+// incompleteReason names the first thing standing between here and done, so
+// every surface gives the same answer instead of each deriving its own.
+func incompleteReason(detail ProgressDetail) string {
+	switch {
+	case len(detail.OutcomeConflicts) > 0:
+		return "계약의 필수 결과가 서로 충돌합니다: " + detail.OutcomeConflicts[0]
+	case len(detail.UnconfirmedOutcomes) > 0:
+		return "판정 방법이나 주체가 정해지지 않은 필수 결과: " + strings.Join(detail.UnconfirmedOutcomes, ", ")
+	}
+	for _, criterion := range detail.Criteria {
+		if !criterion.Satisfied {
+			return fmt.Sprintf("완료 조건 %s 미충족 (%s)", criterion.Type, criterion.Status)
+		}
+	}
+	switch {
+	case detail.TotalWeight == 0:
+		return "작업이 없습니다"
+	case detail.DoneWeight < detail.TotalWeight:
+		return fmt.Sprintf("조건은 모두 충족되었으나 작업이 %.0f%% 진행되었습니다", detail.Percent)
+	default:
+		return ""
+	}
 }
 
 func (s *Store) CreateMilestone(ctx context.Context, m model.Milestone) (model.Milestone, error) {

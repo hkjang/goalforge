@@ -22,12 +22,28 @@ type ModelStat struct {
 // measured by verification outcomes rather than by whether the provider call
 // returned. A run that finished and failed its gates is not a success.
 func (s *Store) ModelStats(ctx context.Context, projectID, taskType string) ([]ModelStat, error) {
-	query := `SELECT COALESCE(NULLIF(r.model,''),'default'),COUNT(DISTINCT r.id),
+	// Usage is summed per run *before* the join, so each run contributes
+	// exactly one row here.
+	//
+	// Joining the ledger directly counted every per-run fact once per usage
+	// row: a provider reports input, output, and cost separately, so a single
+	// successful run with three rows scored three successes against one run
+	// and the rate came out at 300%. The duration average was weighted the
+	// same way — a run that wrote more accounting counted as several runs.
+	query := `SELECT COALESCE(NULLIF(r.model,''),'default'),
+COUNT(*),
 COALESCE(SUM(CASE WHEN r.state IN ('CHECKPOINTING','COMPLETED') THEN 1 ELSE 0 END),0),
-COALESCE(SUM(CASE WHEN l.token_type<>'cost_usd' THEN l.amount ELSE 0 END),0),
-COALESCE(SUM(l.cost),0),
+COALESCE(SUM(COALESCE(u.tokens,0)),0),
+COALESCE(SUM(COALESCE(u.cost,0)),0),
 COALESCE(AVG(CASE WHEN r.ended_at IS NOT NULL THEN (julianday(r.ended_at)-julianday(r.started_at))*86400 END),0)
-FROM runs r LEFT JOIN usage_ledger l ON l.run_id=r.id WHERE r.project_id=?`
+FROM runs r
+LEFT JOIN (
+ SELECT run_id,
+  SUM(CASE WHEN token_type<>'cost_usd' THEN amount ELSE 0 END) AS tokens,
+  SUM(cost) AS cost
+ FROM usage_ledger GROUP BY run_id
+) u ON u.run_id=r.id
+WHERE r.project_id=?`
 	args := []any{projectID}
 	if taskType != "" {
 		query += ` AND r.task_type=?`
