@@ -307,23 +307,9 @@ func criteriaView(snapshot Snapshot, state UIState) string {
 	if snapshot.Progress.Complete {
 		lines = append(lines, "  "+styleOK.Render("모든 필수 조건이 충족되었고 작업이 모두 끝났습니다"))
 	} else {
-		lines = append(lines, "  "+styleWarn.Render(incompleteReason(snapshot.Progress)))
+		lines = append(lines, "  "+styleWarn.Render("완료 아님: "+snapshot.Progress.IncompleteReason))
 	}
 	return clip(lines, state.bodyHeight())
-}
-
-// incompleteReason says the first thing standing between here and done.
-func incompleteReason(progress store.ProgressDetail) string {
-	for _, criterion := range progress.Criteria {
-		if !criterion.Satisfied {
-			label, _ := criterionMark(criterion.Status)
-			return fmt.Sprintf("완료 아님: %s %s", criterion.Type, label)
-		}
-	}
-	if progress.TotalWeight > 0 && progress.DoneWeight < progress.TotalWeight {
-		return fmt.Sprintf("완료 아님: 조건은 모두 충족되었으나 작업 %.0f%% 진행", progress.Percent)
-	}
-	return "완료 아님: 작업이 없습니다"
 }
 
 func workView(snapshot Snapshot, state UIState) string {

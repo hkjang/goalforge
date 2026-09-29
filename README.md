@@ -464,6 +464,14 @@ it at `/api/v1/projects/{id}/evidence`. The refusals and relaxations are in
 there deliberately: a bundle that only keeps the good news describes a
 different project than the one that happened.
 
+A contract states what a goal requires, and it now decides whether the goal is
+finished rather than only warning about it. A required outcome with no method
+or no judge cannot be settled, and two that cannot both hold mean the goal has
+no achievable definition — in either case the work being done says nothing, so
+completion is refused on every path rather than in the plan preview alone. The
+reason a goal is not finished is computed once and shown the same way by the
+CLI, the dashboard, and the terminal UI.
+
 A worker left running accumulates: every event a provider emits is stored
 whole, and nothing removed them. `goalforge storage usage` says where the space
 went and `goalforge storage prune` drops the bulk of finished runs — the bodies

@@ -84,7 +84,7 @@ func TestEveryCriterionStateRendersAsText(t *testing.T) {
 		{Type: "vet_clean", ExpectedValue: "true", Status: "STALE", StaleReason: "코드가 바뀌었습니다"},
 		{Type: "note_saves", ExpectedValue: "true", Status: "WRONG_KIND", RequiredKind: "journey", EvidenceKind: "build"},
 		{Type: "latency", ExpectedValue: "200", Status: "NO_EVIDENCE"},
-	}}
+	}, IncompleteReason: "완료 조건 coverage 미충족 (UNMET)"}
 	state := testState()
 	state.Tab = TabCriteria
 	rendered := View(snapshot, state)
@@ -100,6 +100,11 @@ func TestEveryCriterionStateRendersAsText(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "완료 아님") {
 		t.Errorf("the screen must state the conclusion, not leave the reader to add it up:\n%s", rendered)
+	}
+	// The reason comes from the store's single judgment rather than being
+	// re-derived here, so every surface gives the same answer.
+	if !strings.Contains(rendered, snapshot.Progress.IncompleteReason) {
+		t.Errorf("the screen must show the shared reason %q:\n%s", snapshot.Progress.IncompleteReason, rendered)
 	}
 }
 
