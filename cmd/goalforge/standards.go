@@ -354,10 +354,20 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 	enable := set.Bool("enable", false, "이 실행에서 자동 승인을 켠다")
 	allowStandards := set.String("standards", "", "자동 승인할 기준 ID 목록 (쉼표 구분)")
 	allowScopes := set.String("scopes", "", "자동 승인할 변경 범위 목록 (쉼표 구분)")
-	maxTokens := set.Int64("max-tokens", 20000, "자동 승인할 작업 하나의 크기 한도")
-	dailyLimit := set.Int("daily-limit", 3, "하루에 자동 승인할 최대 건수")
+	allStandards := set.Bool("all-standards", false, "모든 기준을 자동 승인 대상으로 한다")
+	allScopes := set.Bool("all-scopes", false, "변경 범위 제한을 두지 않는다")
+	autoMerge := set.Bool("merge", false, "검증이 끝난 작업의 병합 승인까지 자동으로 한다")
+	maxTokens := set.Int64("max-tokens", 20000, "자동 승인할 작업 하나의 크기 한도 (0 이면 제한 없음)")
+	dailyLimit := set.Int("daily-limit", 3, "하루에 자동 승인할 최대 건수 (0 이면 제한 없음)")
+	full := set.Bool("full", false, "모든 기준·범위를 열고 병합 승인까지 자동으로 한다")
 	if err := set.Parse(args); err != nil {
 		return err
+	}
+	if *full {
+		// One flag for "run the whole loop". Spelling it out as four is how an
+		// operator ends up with three of them set and wonders why nothing
+		// moves.
+		*enable, *allStandards, *allScopes, *autoMerge = true, true, true, true
 	}
 	project, _, _, err := standardsContext(ctx, s)
 	if err != nil {
@@ -368,13 +378,35 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 		return err
 	}
 	policy := observer.AutonomyPolicy{Enabled: *enable, AllowedStandards: splitList(*allowStandards),
-		AllowedScopes: splitList(*allowScopes), MaxTokens: *maxTokens, DailyLimit: *dailyLimit}
-	decisions, err := observer.AutoApprove(ctx, s, project.ID, goal.ID, policy)
+		AllStandards: *allStandards, AllowedScopes: splitList(*allowScopes), AllScopes: *allScopes,
+		MaxTokens: *maxTokens, DailyLimit: *dailyLimit, AutoMerge: *autoMerge}
+	execution, err := observer.AutoApprove(ctx, s, project.ID, goal.ID, policy)
 	if err != nil {
 		return err
 	}
+	printDecisions("실행", execution)
+	if !policy.AutoMerge {
+		fmt.Println("병합은 자동 승인 대상이 아닙니다 — `--merge` 또는 `--full` 로 켭니다")
+		return nil
+	}
+	merges, err := observer.AutoApproveMerges(ctx, s, project.ID, goal.ID, policy)
+	if err != nil {
+		return err
+	}
+	printDecisions("병합", merges)
+	if len(merges.Approved) > 0 {
+		fmt.Println("`goalforge merge --work-item ID` 로 반영합니다 — 승인은 이미 되어 있습니다")
+	}
+	return nil
+}
+
+// printDecisions reports what one pass decided, including what it declined and
+// why. A run that only printed its approvals would read as "nothing else was
+// eligible" when the truth is usually "several things were and here is what
+// stopped them".
+func printDecisions(label string, decisions observer.AutoDecisions) {
 	if len(decisions.Approved) > 0 {
-		fmt.Printf("자동 승인: %s\n", strings.Join(decisions.Approved, ", "))
+		fmt.Printf("%s 자동 승인: %s\n", label, strings.Join(decisions.Approved, ", "))
 	}
 	ids := make([]string, 0, len(decisions.Refused))
 	for id := range decisions.Refused {
@@ -382,16 +414,14 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		fmt.Printf("보류 %s: %s\n", id, decisions.Refused[id])
+		fmt.Printf("%s 보류 %s: %s\n", label, id, decisions.Refused[id])
 	}
 	if decisions.Detail != "" {
-		fmt.Println(decisions.Detail)
+		fmt.Printf("%s: %s\n", label, decisions.Detail)
 	}
 	if len(decisions.Approved) == 0 && len(decisions.Refused) == 0 && decisions.Detail == "" {
-		fmt.Println("자동 승인 대상이 없습니다")
+		fmt.Printf("%s 자동 승인 대상이 없습니다\n", label)
 	}
-	fmt.Println("병합은 자동 승인 대상이 아닙니다 — `goalforge approval request --action merge-branch` 가 필요합니다")
-	return nil
 }
 
 // standardsAssess reads the repository at a commit and files what is missing.
