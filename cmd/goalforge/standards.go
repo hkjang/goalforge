@@ -344,6 +344,56 @@ func standardsSettle(ctx context.Context, s *store.Store, args []string) error {
 	return nil
 }
 
+// standardsAutonomy approves the findings inside the operator's envelope.
+//
+// It approves work to *run* and nothing further. The merge boundary stays a
+// person's: a supplier that could approve its own merges would be the only
+// reviewer of its own work.
+func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("standards autonomy", flag.ContinueOnError)
+	enable := set.Bool("enable", false, "이 실행에서 자동 승인을 켠다")
+	allowStandards := set.String("standards", "", "자동 승인할 기준 ID 목록 (쉼표 구분)")
+	allowScopes := set.String("scopes", "", "자동 승인할 변경 범위 목록 (쉼표 구분)")
+	maxTokens := set.Int64("max-tokens", 20000, "자동 승인할 작업 하나의 크기 한도")
+	dailyLimit := set.Int("daily-limit", 3, "하루에 자동 승인할 최대 건수")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, _, _, err := standardsContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	goal, err := s.CurrentGoal(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	policy := observer.AutonomyPolicy{Enabled: *enable, AllowedStandards: splitList(*allowStandards),
+		AllowedScopes: splitList(*allowScopes), MaxTokens: *maxTokens, DailyLimit: *dailyLimit}
+	decisions, err := observer.AutoApprove(ctx, s, project.ID, goal.ID, policy)
+	if err != nil {
+		return err
+	}
+	if len(decisions.Approved) > 0 {
+		fmt.Printf("자동 승인: %s\n", strings.Join(decisions.Approved, ", "))
+	}
+	ids := make([]string, 0, len(decisions.Refused))
+	for id := range decisions.Refused {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		fmt.Printf("보류 %s: %s\n", id, decisions.Refused[id])
+	}
+	if decisions.Detail != "" {
+		fmt.Println(decisions.Detail)
+	}
+	if len(decisions.Approved) == 0 && len(decisions.Refused) == 0 && decisions.Detail == "" {
+		fmt.Println("자동 승인 대상이 없습니다")
+	}
+	fmt.Println("병합은 자동 승인 대상이 아닙니다 — `goalforge approval request --action merge-branch` 가 필요합니다")
+	return nil
+}
+
 // standardsAssess reads the repository at a commit and files what is missing.
 func standardsAssess(ctx context.Context, s *store.Store, args []string) error {
 	set := flag.NewFlagSet("standards assess", flag.ContinueOnError)

@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS auto_approvals (
+ work_item_id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+ standard_id TEXT NOT NULL DEFAULT '', basis TEXT NOT NULL DEFAULT '', approved_at TEXT NOT NULL,
+ settled INTEGER NOT NULL DEFAULT 0, passed INTEGER NOT NULL DEFAULT 0, outcome TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS gate_claims (
  project_id TEXT NOT NULL REFERENCES projects(id), check_type TEXT NOT NULL,
  settles TEXT NOT NULL DEFAULT '[]', produces TEXT NOT NULL DEFAULT '[]',

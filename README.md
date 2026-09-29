@@ -126,6 +126,11 @@ goalforge standards gate --type T --settles ID[,ID] [--produces route,screenshot
 goalforge standards settle [--commit SHA]   # re-judge the criteria the project's gates claim.
                    # The only path by which a criterion reaches MET — a static read proves
                    # absences and cannot prove that anything works.
+goalforge standards autonomy --enable --standards ID --scopes "web/**" [--max-tokens N] [--daily-limit N]
+                   # approves supplied findings to RUN, and nothing further. The strongest
+                   # rule: work no gate can judge is never approved — the machine would write
+                   # code and nothing could say whether it worked, so the change would land as
+                   # done on the strength of having been attempted. Merge stays a person's.
 goalforge standards status            # every criterion in force, including the unexamined ones
 goalforge standards except --standard ID --reason R --decider D [--review-when W | --review-by DATE]
 goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
