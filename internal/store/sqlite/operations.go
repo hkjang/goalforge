@@ -89,6 +89,11 @@ type CriterionStatus struct {
 	MeasuredAt  time.Time
 	HasEvidence bool
 	Satisfied   bool
+	// Shortfall says what was asked for and what was measured, in that order.
+	// "UNMET" alone sends the reader to the run log to find out whether the
+	// number was close or tenfold off, and whether the target was a floor or a
+	// ceiling in the first place.
+	Shortfall string
 }
 
 func (s *Store) CriteriaStatus(ctx context.Context, goal model.Goal) ([]CriterionStatus, error) {
@@ -134,11 +139,19 @@ func (s *Store) criterionStatus(ctx context.Context, goalID string, criterion mo
 		entry.Status, entry.Satisfied = "WRONG_KIND", false
 		return entry, nil
 	}
-	entry.Satisfied = entry.CheckStatus == "PASSED" && criterionMet(criterion.ExpectedValue, entry.ActualValue)
+	met, shortfall := JudgeCriterion(criterion.ExpectedValue, entry.ActualValue)
+	entry.Satisfied = entry.CheckStatus == "PASSED" && met
 	if entry.Satisfied {
 		entry.Status = "MET"
 	} else {
 		entry.Status = "UNMET"
+		entry.Shortfall = shortfall
+		if entry.CheckStatus != "PASSED" {
+			// The gate itself did not pass, so whatever number it reported is
+			// not a measurement of anything. Saying "200ms 를 기대했는데 …"
+			// about a crashed check points the reader at the wrong problem.
+			entry.Shortfall = "검증이 " + entry.CheckStatus + " 로 끝나 측정값이 없습니다"
+		}
 	}
 	return entry, nil
 }

@@ -167,6 +167,11 @@ func evidenceRef(status store.CriterionStatus) string {
 		return status.KindMismatch()
 	case "NO_EVIDENCE":
 		return "없음"
+	case "UNMET":
+		if status.Shortfall != "" {
+			return status.Shortfall
+		}
+		fallthrough
 	default:
 		ref := status.RunID
 		if ref == "" {

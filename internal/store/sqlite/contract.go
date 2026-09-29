@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -112,43 +112,108 @@ func (c GoalContract) Conflicts() []Conflict {
 	return conflicts
 }
 
-// incompatible reports whether two numeric requirements on the same metric
-// leave no value that satisfies both.
+// incompatible reports whether two requirements on the same metric leave no
+// value that satisfies both.
+//
+// Each requirement is read as an interval, and two requirements conflict when
+// their intervals do not intersect. The earlier version compared a pair of
+// "at least / at most" flags, which lost the two distinctions that matter:
+// ">= 200" and "<= 200" meet at exactly 200 and are fine, while "> 200" and
+// "<= 200" admit nothing — and an exact requirement was only ever compared
+// against another exact one, so "오류 = 0" beside "오류 >= 1" went unreported.
 func incompatible(left, right RequiredOutcome) (string, bool) {
-	leftValue, leftErr := strconv.ParseFloat(strings.TrimSpace(left.Threshold), 64)
-	rightValue, rightErr := strconv.ParseFloat(strings.TrimSpace(right.Threshold), 64)
-	if leftErr != nil || rightErr != nil {
+	leftRange, leftOK := outcomeRange(left)
+	rightRange, rightOK := outcomeRange(right)
+	if !leftOK || !rightOK {
 		return "", false
 	}
-	lower, upper := normalize(left, leftValue), normalize(right, rightValue)
-	// One requires at least X, the other at most Y, and Y < X.
-	if lower.atLeast && upper.atMost && upper.value < lower.value {
-		return fmt.Sprintf("%s 는 %g 이상이어야 하는데 %g 이하도 요구됩니다", left.Metric, lower.value, upper.value), true
+	// A threshold written without a unit is taken to be in whatever unit the
+	// metric is measured in, so it compares with anything. Two *different*
+	// named units are a different kind of quantity, and nothing can be
+	// concluded from them — a detector that concluded anyway would be guessing,
+	// and a guessed conflict is how people learn to ignore the real ones.
+	if leftRange.family != "" && rightRange.family != "" && leftRange.family != rightRange.family {
+		return "", false
 	}
-	if upper.atLeast && lower.atMost && lower.value < upper.value {
-		return fmt.Sprintf("%s 는 %g 이상이어야 하는데 %g 이하도 요구됩니다", left.Metric, upper.value, lower.value), true
+	if leftRange.intersects(rightRange) {
+		return "", false
 	}
-	// Both pin an exact value, and the values differ.
-	if lower.exact && upper.exact && lower.value != upper.value {
-		return fmt.Sprintf("%s 를 %g 와 %g 로 동시에 요구합니다", left.Metric, lower.value, upper.value), true
-	}
-	return "", false
+	return fmt.Sprintf("%s 에 대해 %s 와 %s 를 동시에 요구합니다 — 두 조건을 모두 만족하는 값이 없습니다",
+		left.Metric, left.describe(), right.describe()), true
 }
 
-type bound struct {
-	value                  float64
-	atLeast, atMost, exact bool
+// interval is one requirement as the set of values that satisfy it. The
+// inclusive flags are what separate a shared endpoint from an empty overlap.
+type interval struct {
+	low, high                   float64
+	lowInclusive, highInclusive bool
+	family                      string
 }
 
-func normalize(outcome RequiredOutcome, value float64) bound {
-	switch strings.TrimSpace(outcome.Comparator) {
-	case ">=", ">", "min", "at_least":
-		return bound{value: value, atLeast: true}
-	case "<=", "<", "max", "at_most":
-		return bound{value: value, atMost: true}
+func (i interval) intersects(other interval) bool {
+	low, lowInclusive := i.low, i.lowInclusive
+	if other.low > low || (other.low == low && !other.lowInclusive) {
+		low, lowInclusive = other.low, other.lowInclusive
+	}
+	high, highInclusive := i.high, i.highInclusive
+	if other.high < high || (other.high == high && !other.highInclusive) {
+		high, highInclusive = other.high, other.highInclusive
+	}
+	if low > high {
+		return false
+	}
+	if low == high {
+		return lowInclusive && highInclusive
+	}
+	return true
+}
+
+// outcomeRange reads a requirement's comparator and threshold into an interval,
+// converting the threshold into its unit family's base unit so "1s" and
+// "200ms" are compared as the same quantity rather than as 1 and 200.
+func outcomeRange(out RequiredOutcome) (interval, bool) {
+	value, unit, ok := splitValueAndUnit(strings.TrimSpace(out.Threshold))
+	if !ok {
+		return interval{}, false
+	}
+	normalized, family := normalizeUnit(value, unit)
+	span := interval{low: math.Inf(-1), high: math.Inf(1), lowInclusive: true, highInclusive: true, family: family}
+	switch strings.TrimSpace(strings.ToLower(out.Comparator)) {
+	case ">=", "min", "at_least":
+		span.low = normalized
+	case ">", "over":
+		span.low, span.lowInclusive = normalized, false
+	case "<=", "max", "at_most":
+		span.high = normalized
+	case "<", "under":
+		span.high, span.highInclusive = normalized, false
+	case "!=", "ne":
+		// "not this value" excludes a single point, which cannot be written as
+		// one interval and never makes a pair unsatisfiable on its own.
+		return interval{}, false
 	default:
-		return bound{value: value, exact: true}
+		span.low, span.high = normalized, normalized
 	}
+	return span, true
+}
+
+// describe says the requirement the way it was written, so the conflict message
+// names both clauses rather than making the reader open the contract.
+func (out RequiredOutcome) describe() string {
+	threshold := strings.TrimSpace(out.Threshold)
+	switch strings.TrimSpace(strings.ToLower(out.Comparator)) {
+	case ">=", "min", "at_least":
+		return threshold + " 이상"
+	case ">", "over":
+		return threshold + " 초과"
+	case "<=", "max", "at_most":
+		return threshold + " 이하"
+	case "<", "under":
+		return threshold + " 미만"
+	case "!=", "ne":
+		return threshold + " 이 아님"
+	}
+	return threshold
 }
 
 // SaveContract records a new contract version. A change after the first needs

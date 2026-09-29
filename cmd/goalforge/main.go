@@ -3469,6 +3469,14 @@ func criterionEvidence(status store.CriterionStatus) string {
 		return "검증 종류 불일치: " + status.KindMismatch()
 	case "NO_EVIDENCE":
 		return "증거 없음"
+	case "UNMET":
+		// The shortfall says which direction the target was and how far the
+		// measurement is from it, which is the difference between "rerun it"
+		// and "this design cannot get there".
+		if status.Shortfall != "" {
+			return status.Shortfall
+		}
+		fallthrough
 	default:
 		evidence := "근거 " + dashIfEmpty(status.RunID)
 		if !status.MeasuredAt.IsZero() {
