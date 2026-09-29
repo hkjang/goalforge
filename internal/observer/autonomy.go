@@ -25,12 +25,25 @@ type AutonomyPolicy struct {
 	// AllowedStandards names the criteria whose findings may be approved
 	// automatically. Empty means none — an empty allowlist is an allowlist.
 	AllowedStandards []string
+	// AllStandards opens the envelope to every criterion. An operator who
+	// wants the whole loop running should not have to enumerate forty IDs, and
+	// enumerating them badly is worse than saying plainly that all are in.
+	AllStandards bool
 	// AllowedScopes limits where the work may reach.
 	AllowedScopes []string
+	// AllScopes removes the scope limit.
+	AllScopes bool
 	// MaxTokens caps the size of a single piece of work.
 	MaxTokens int64
 	// DailyLimit caps how many approvals may be made in a day.
 	DailyLimit int
+	// AutoMerge grants the merge approval too, once the work is finished and
+	// its gates have passed on the commit being released.
+	//
+	// It is a separate switch because it is a separate decision: approving
+	// execution keeps the change in its own worktree, and approving a merge
+	// puts it on the branch everyone else builds from.
+	AutoMerge bool
 }
 
 // AutoDecisions is what one automatic approval pass did.
@@ -135,10 +148,10 @@ func admits(policy AutonomyPolicy, item model.WorkItem, standardID string, gates
 		// the change lands as done on the strength of having been attempted.
 		return fmt.Sprintf("%s 를 정산할 게이트가 없어 결과를 판정할 수 없습니다", standardID)
 	}
-	if !contains(policy.AllowedStandards, standardID) {
+	if !policy.AllStandards && !contains(policy.AllowedStandards, standardID) {
 		return fmt.Sprintf("기준 %s 는 자동 승인 허용 목록에 없습니다", standardID)
 	}
-	if !scopeAllowed(policy.AllowedScopes, item.ChangeScope) {
+	if !policy.AllScopes && !scopeAllowed(policy.AllowedScopes, item.ChangeScope) {
 		return fmt.Sprintf("범위 %s 는 자동 승인 허용 범위 밖입니다", dashIfEmpty(item.ChangeScope))
 	}
 	if policy.MaxTokens > 0 && item.EstimatedTokens > policy.MaxTokens {
