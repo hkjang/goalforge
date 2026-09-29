@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -339,4 +342,110 @@ func jsonBody(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+// commitIn writes a file and commits it, returning the SHA.
+func commitIn(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", "c " + name}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// The screen used to say "새 변경을 다시 검토해야 합니다" and then display the
+// diff of the commit that had already been approved. A reviewer re-approving
+// from that is approving code that is no longer there.
+func TestAStaleApprovalShowsTheNewCommitAndTheDeltaSinceReview(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	ctx := context.Background()
+	repo := gitRepo(t)
+	if _, err := db.RelocateProject(ctx, "P-API", repo); err != nil {
+		t.Fatal(err)
+	}
+	commitIn(t, repo, "base.txt", "base\n")
+	reviewed := commitIn(t, repo, "reviewed.txt", "THE-PART-ALREADY-REVIEWED\n")
+	if err := db.StartRun(ctx, store.RunRecord{ID: "R-1", ProjectID: "P-API", WorkItemID: "W-API", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordRunCommit(ctx, store.RunCommit{RunID: "R-1", ProjectID: "P-API", GoalID: goalID(t, db),
+		WorkItemID: "W-API", CommitSHA: reviewed, Branch: "goalforge/W-API", FilesCommitted: 1}); err != nil {
+		t.Fatal(err)
+	}
+	approval, err := db.RequestScopedApproval(ctx, "P-API", store.ApprovalMergeBranch, "merge it",
+		store.ApprovalScope{WorkItemID: "W-API", SourceBranch: "goalforge/W-API", TargetRef: "main", CommitSHA: reviewed, FilesChanged: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The work item is re-run and produces a second commit.
+	if err := db.FinishRun(ctx, "R-1", "COMPLETED", "READY"); err != nil {
+		t.Fatal(err)
+	}
+	latest := commitIn(t, repo, "added.txt", "THE-PART-NOBODY-HAS-SEEN\n")
+	if err := db.StartRun(ctx, store.RunRecord{ID: "R-2", ProjectID: "P-API", WorkItemID: "W-API", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordRunCommit(ctx, store.RunCommit{RunID: "R-2", ProjectID: "P-API", GoalID: goalID(t, db),
+		WorkItemID: "W-API", CommitSHA: latest, Branch: "goalforge/W-API", FilesCommitted: 1}); err != nil {
+		t.Fatal(err)
+	}
+	var view ApprovalDetailView
+	get(t, server, "/api/v1/projects/P-API/approvals/"+approval.ID, &view)
+	if !view.Stale {
+		t.Fatalf("a commit made after review must be flagged: %+v", view)
+	}
+	if view.DiffError != "" {
+		t.Fatalf("diff error: %s", view.DiffError)
+	}
+	// The main diff is the commit the reviewer is now being asked about.
+	if !strings.Contains(view.Diff, "THE-PART-NOBODY-HAS-SEEN") {
+		t.Fatalf("the diff must be of the new commit:\n%s", view.Diff)
+	}
+	// And the delta holds only what moved since the review.
+	if !strings.Contains(view.SinceApproval, "THE-PART-NOBODY-HAS-SEEN") {
+		t.Fatalf("the delta must carry the new change:\n%s", view.SinceApproval)
+	}
+	if strings.Contains(view.SinceApproval, "THE-PART-ALREADY-REVIEWED") {
+		t.Fatalf("the delta must not repeat what was already approved:\n%s", view.SinceApproval)
+	}
+}
+
+// A fresh approval has no delta: there is nothing to have changed since.
+func TestAFreshApprovalHasNoDelta(t *testing.T) {
+	server, db := apiFixture(t, "")
+	defer db.Close()
+	ctx := context.Background()
+	repo := gitRepo(t)
+	if _, err := db.RelocateProject(ctx, "P-API", repo); err != nil {
+		t.Fatal(err)
+	}
+	commitIn(t, repo, "base.txt", "base\n")
+	sha := commitIn(t, repo, "a.txt", "a\n")
+	if err := db.StartRun(ctx, store.RunRecord{ID: "R-1", ProjectID: "P-API", WorkItemID: "W-API", Provider: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordRunCommit(ctx, store.RunCommit{RunID: "R-1", ProjectID: "P-API", GoalID: goalID(t, db),
+		WorkItemID: "W-API", CommitSHA: sha, Branch: "goalforge/W-API", FilesCommitted: 1}); err != nil {
+		t.Fatal(err)
+	}
+	approval, err := db.RequestScopedApproval(ctx, "P-API", store.ApprovalMergeBranch, "merge it",
+		store.ApprovalScope{WorkItemID: "W-API", SourceBranch: "goalforge/W-API", TargetRef: "main", CommitSHA: sha, FilesChanged: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view ApprovalDetailView
+	get(t, server, "/api/v1/projects/P-API/approvals/"+approval.ID, &view)
+	if view.SinceApproval != "" {
+		t.Fatalf("nothing has changed since review: %q", view.SinceApproval)
+	}
 }

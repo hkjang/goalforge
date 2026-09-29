@@ -56,11 +56,13 @@ func Discover(policy Policy, existing []model.WorkItem, candidates []Candidate) 
 	if unimplemented >= policy.MaxUnimplemented {
 		return result, ErrImplementationPreferred
 	}
+	// Validate, de-duplicate and rank the whole batch before the cycle limit
+	// cuts it. The limit used to be applied while walking the input, so the
+	// first N candidates were taken and only then sorted: a generator that
+	// emitted its weakest idea first spent the cycle budget on it and the
+	// strongest candidate in the batch was rejected with "cycle idea limit
+	// reached". The ranking ran on a list the limit had already decided.
 	for _, candidate := range candidates {
-		if len(result.Accepted) >= policy.MaxNewIdeas {
-			result.Rejected[candidate.Title] = "cycle idea limit reached"
-			continue
-		}
 		if err := validateCandidate(candidate); err != nil {
 			result.Rejected[candidate.Title] = err.Error()
 			continue
@@ -82,11 +84,24 @@ func Discover(policy Policy, existing []model.WorkItem, candidates []Candidate) 
 			status = "BLOCKED"
 		}
 		result.Accepted = append(result.Accepted, Accepted{Candidate: candidate, Score: score, Status: status})
+		// Added to the known set as we go, so two near-identical proposals in
+		// one batch are one idea however many of them fit. Collapsing them only
+		// after ranking would put the same work on the board twice.
 		known = append(known, candidate.Title)
 	}
 	sort.SliceStable(result.Accepted, func(i, j int) bool {
 		return result.Accepted[i].Score.PriorityScore > result.Accepted[j].Score.PriorityScore
 	})
+	if len(result.Accepted) > policy.MaxNewIdeas {
+		// The ones that lost lost on rank, and the reason says so — "limit
+		// reached" would tell a reader their idea arrived too late when what
+		// actually happened is that better ones were in the same batch.
+		for _, dropped := range result.Accepted[policy.MaxNewIdeas:] {
+			result.Rejected[dropped.Candidate.Title] = fmt.Sprintf(
+				"cycle idea limit reached: %d candidates scored higher in this batch", policy.MaxNewIdeas)
+		}
+		result.Accepted = result.Accepted[:policy.MaxNewIdeas]
+	}
 	return result, nil
 }
 

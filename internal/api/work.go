@@ -172,8 +172,13 @@ type ApprovalDetailView struct {
 	DiffError     string                     `json:"diff_error,omitempty"`
 	Stale         bool                       `json:"stale"`
 	StaleReason   string                     `json:"stale_reason,omitempty"`
-	Rollback      string                     `json:"rollback"`
-	ApprovedAt    *time.Time                 `json:"approved_at,omitempty"`
+	// SinceApproval is what moved since the reviewer last looked. It is shown
+	// instead of the full change when the approval went stale: a reviewer who
+	// has to re-read a thousand lines to find the twenty that changed stops
+	// reading and starts stamping.
+	SinceApproval string     `json:"since_approval,omitempty"`
+	Rollback      string     `json:"rollback"`
+	ApprovedAt    *time.Time `json:"approved_at,omitempty"`
 }
 
 func (s *Server) approvalDetail(w http.ResponseWriter, r *http.Request) {
@@ -230,7 +235,20 @@ func (s *Server) approvalDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, latestErr.Error())
 		return
 	}
-	if diff, truncated, diffErr := gitops.CommitDiff(r.Context(), project.RepositoryPath, approval.Scope.CommitSHA, diffLimitBytes); diffErr == nil {
+	// The commit whose diff to show. When the work was re-run after review the
+	// approved commit is no longer what anyone is being asked about — showing
+	// it while the page says "새 변경을 다시 검토해야 합니다" makes the screen
+	// say one thing and display another, and a reviewer who re-approves from it
+	// approves code that is no longer there.
+	subject := approval.Scope.CommitSHA
+	if view.Stale && view.Commit != nil {
+		subject = view.Commit.CommitSHA
+		if delta, _, deltaErr := gitops.RangeDiff(r.Context(), project.RepositoryPath,
+			approval.Scope.CommitSHA, subject, diffLimitBytes); deltaErr == nil {
+			view.SinceApproval = delta
+		}
+	}
+	if diff, truncated, diffErr := gitops.CommitDiff(r.Context(), project.RepositoryPath, subject, diffLimitBytes); diffErr == nil {
 		view.Diff, view.DiffTruncated = diff, truncated
 	} else {
 		view.DiffError = diffErr.Error()

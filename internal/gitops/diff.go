@@ -67,3 +67,51 @@ func ChangedSince(ctx context.Context, repository, commit string) ([]string, err
 // ErrUnknownCommit means the recorded baseline is not in this repository, so
 // nothing can be said about what changed since.
 var ErrUnknownCommit = errors.New("commit is not in this repository")
+
+// RangeDiff is what changed between two commits.
+//
+// It exists for re-review. When the work item is re-run after someone approved
+// it, the approval screen used to show the diff of the commit that was already
+// approved while telling the reader to review the new change — the screen said
+// one thing and displayed another. What a reviewer needs is the part that moved
+// since they last looked; re-reading a thousand lines to find the twenty that
+// changed is how a re-review becomes a rubber stamp.
+func RangeDiff(ctx context.Context, repository, from, to string, maxBytes int) (string, bool, error) {
+	if repository == "" {
+		return "", false, errors.New("repository is required")
+	}
+	// Both ends are validated as commit SHAs rather than passed to git as
+	// written. A ref name would work by luck and an option-shaped string would
+	// not be an argument at all.
+	for _, sha := range []string{from, to} {
+		if !commitSHA.MatchString(sha) {
+			return "", false, fmt.Errorf("%q is not a commit SHA", sha)
+		}
+	}
+	if maxBytes <= 0 {
+		maxBytes = 200000
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repository, "diff", "--stat", "--patch", "--no-color",
+		"--find-renames", from, to)
+	output, err := cmd.Output()
+	if err != nil {
+		// An unreachable commit — the branch was rebuilt, the object pruned —
+		// must say so. An empty delta would read as "nothing changed", which is
+		// the one wrong answer a re-review screen can give.
+		return "", false, fmt.Errorf("git diff %s..%s: %w", abbreviate(from), abbreviate(to), err)
+	}
+	diff := string(output)
+	if len(diff) > maxBytes {
+		return strings.ToValidUTF8(diff[:maxBytes], ""), true, nil
+	}
+	return strings.ToValidUTF8(diff, ""), false, nil
+}
+
+// abbreviate shortens a SHA for a message. The full forty characters in an
+// error line push the part that says what went wrong off the edge.
+func abbreviate(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
+}
