@@ -28,6 +28,7 @@ import (
 	"github.com/goalforge/goalforge/internal/mcp"
 	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/notify"
+	"github.com/goalforge/goalforge/internal/observer"
 	"github.com/goalforge/goalforge/internal/orchestrator"
 	"github.com/goalforge/goalforge/internal/planner"
 	"github.com/goalforge/goalforge/internal/policy"
@@ -1000,6 +1001,8 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 	once := f.Bool("once", false, "process at most one due job")
 	poll := f.Duration("poll", time.Second, "poll interval")
 	lease := f.Duration("lease", time.Minute, "scheduler and project lease duration")
+	standardsEvery := f.Duration("standards-every", 15*time.Minute,
+		"기준 평가 스윕 주기 (0 이면 워커가 돌지 않습니다). 실제 평가 여부는 프로젝트별 주기·예산이 정합니다")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -1068,7 +1071,24 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 	ticker := time.NewTicker(*poll)
 	defer ticker.Stop()
 	lastPrune := time.Time{}
+	lastSweep := time.Time{}
 	for {
+		// The standards sweep rides along with the job pump, the way retention
+		// pruning does. Everything the schedule is built from — a daily
+		// interval, a discovery budget, an idempotency key that survives two
+		// workers seeing the same commit — is machinery for something that
+		// runs while nobody is watching, and until something turned it on a
+		// timer all of it described a loop that only moved when a person
+		// typed a command.
+		//
+		// This cadence is only how often the question is asked. Whether a
+		// project is actually assessed is the project's own interval, budget
+		// and backlog floor, which is why asking every fifteen minutes is
+		// cheap.
+		if now := time.Now().UTC(); *standardsEvery > 0 && now.Sub(lastSweep) >= *standardsEvery {
+			sweepStandards(ctx, s)
+			lastSweep = now
+		}
 		// SESSION-010: retention pruning rides along with the job pump.
 		if now := time.Now().UTC(); now.Sub(lastPrune) >= time.Hour {
 			if pruned, pruneErr := s.PruneSessions(ctx, now); pruneErr != nil {
@@ -1089,6 +1109,41 @@ func runWorker(ctx context.Context, s *store.Store, args []string) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+		}
+	}
+}
+
+// sweepStandards runs the supply and autonomy loop across every enrolled
+// project, reporting only what happened.
+//
+// A sweep that printed a line per project per tick would bury the one project
+// that broke under a hundred saying nothing changed, and an operator who
+// scrolls past the log stops reading it.
+func sweepStandards(ctx context.Context, s *store.Store) {
+	result, err := observer.Tick(ctx, s, version, observer.Default(),
+		observer.DefaultSchedulePolicy(), observer.DefaultSupplyPolicy())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "worker standards sweep error:", err)
+		return
+	}
+	if !result.Acted() {
+		return
+	}
+	for _, project := range result.Projects {
+		switch {
+		case project.Err != nil:
+			fmt.Fprintf(os.Stderr, "worker standards %s: %v\n", project.ProjectName, project.Err)
+		case project.Ran && len(project.Filed) > 0:
+			fmt.Printf("worker standards %s: %s — 공급 %d건\n",
+				project.ProjectName, project.Decision.Trigger, len(project.Filed))
+		case project.Ran:
+			fmt.Printf("worker standards %s: %s — 새 공급 없음\n", project.ProjectName, project.Decision.Trigger)
+		}
+		if len(project.Approved) > 0 {
+			fmt.Printf("worker standards %s: 자동 실행 승인 %d건\n", project.ProjectName, len(project.Approved))
+		}
+		if len(project.Merged) > 0 {
+			fmt.Printf("worker standards %s: 자동 병합 승인 %d건\n", project.ProjectName, len(project.Merged))
 		}
 	}
 }

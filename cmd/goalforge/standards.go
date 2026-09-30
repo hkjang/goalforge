@@ -360,6 +360,8 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 	maxTokens := set.Int64("max-tokens", 20000, "자동 승인할 작업 하나의 크기 한도 (0 이면 제한 없음)")
 	dailyLimit := set.Int("daily-limit", 3, "하루에 자동 승인할 최대 건수 (0 이면 제한 없음)")
 	full := set.Bool("full", false, "모든 기준·범위를 열고 병합 승인까지 자동으로 한다")
+	save := set.Bool("save", false, "이 설정을 저장해 워커가 무인으로 적용하게 한다")
+	show := set.Bool("show", false, "저장된 설정을 보여 준다")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -380,6 +382,36 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 	policy := observer.AutonomyPolicy{Enabled: *enable, AllowedStandards: splitList(*allowStandards),
 		AllStandards: *allStandards, AllowedScopes: splitList(*allowScopes), AllScopes: *allScopes,
 		MaxTokens: *maxTokens, DailyLimit: *dailyLimit, AutoMerge: *autoMerge}
+	if *show || (!*enable && !*save) {
+		// Reading with no flags shows what is saved rather than running with
+		// the flag defaults. The defaults say "switched off", and a command
+		// that reported that while a saved envelope was quietly running would
+		// tell the operator the opposite of the truth.
+		saved, loadErr := s.AutonomyConfigFor(ctx, project.ID)
+		if errors.Is(loadErr, store.ErrNotFound) {
+			fmt.Println("저장된 자동 승인 설정이 없습니다 — `--full --save` 로 켭니다")
+			return nil
+		}
+		if loadErr != nil {
+			return loadErr
+		}
+		printAutonomyConfig(saved)
+		if *show {
+			return nil
+		}
+		policy = observer.AutonomyPolicy{Enabled: saved.Enabled, AllowedStandards: saved.AllowedStandards,
+			AllStandards: saved.AllStandards, AllowedScopes: saved.AllowedScopes, AllScopes: saved.AllScopes,
+			MaxTokens: saved.MaxTokens, DailyLimit: saved.DailyLimit, AutoMerge: saved.AutoMerge}
+	}
+	if *save {
+		if err = s.SaveAutonomyConfig(ctx, store.AutonomyConfig{ProjectID: project.ID, Enabled: policy.Enabled,
+			AllStandards: policy.AllStandards, AllowedStandards: policy.AllowedStandards,
+			AllScopes: policy.AllScopes, AllowedScopes: policy.AllowedScopes, MaxTokens: policy.MaxTokens,
+			DailyLimit: policy.DailyLimit, AutoMerge: policy.AutoMerge}); err != nil {
+			return err
+		}
+		fmt.Println("저장했습니다 — `goalforge worker` 가 무인으로 적용합니다")
+	}
 	execution, err := observer.AutoApprove(ctx, s, project.ID, goal.ID, policy)
 	if err != nil {
 		return err
@@ -422,6 +454,35 @@ func printDecisions(label string, decisions observer.AutoDecisions) {
 	if len(decisions.Approved) == 0 && len(decisions.Refused) == 0 && decisions.Detail == "" {
 		fmt.Printf("%s 자동 승인 대상이 없습니다\n", label)
 	}
+}
+
+// printAutonomyConfig shows a saved envelope in the terms it was written in.
+func printAutonomyConfig(config store.AutonomyConfig) {
+	state := "꺼짐"
+	if config.Enabled {
+		state = "켜짐"
+	}
+	criteria := strings.Join(config.AllowedStandards, ", ")
+	if config.AllStandards {
+		criteria = "전체"
+	}
+	scopes := strings.Join(config.AllowedScopes, ", ")
+	if config.AllScopes {
+		scopes = "전체"
+	}
+	merge := "사람이 승인"
+	if config.AutoMerge {
+		merge = "자동 승인"
+	}
+	fmt.Printf("자동 승인 %s · 기준 %s · 범위 %s · 크기 한도 %d · 하루 %d건 · 병합 %s\n",
+		state, dashIfBlank(criteria), dashIfBlank(scopes), config.MaxTokens, config.DailyLimit, merge)
+}
+
+func dashIfBlank(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "없음"
+	}
+	return value
 }
 
 // standardsAssess reads the repository at a commit and files what is missing.
