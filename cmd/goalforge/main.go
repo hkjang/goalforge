@@ -223,6 +223,16 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "show" {
 			return goalShow(ctx, s)
 		}
+	case "config":
+		if len(args) > 1 && args[1] == "calibrate" {
+			return configCalibrate(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "selection" {
+			return configSelection(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "judge" {
+			return configJudge(ctx, s, args[2:])
+		}
 	case "pattern":
 		if len(args) > 1 && args[1] == "list" {
 			return patternList(ctx, s)
