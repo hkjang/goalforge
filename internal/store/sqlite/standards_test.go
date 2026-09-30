@@ -18,7 +18,7 @@ func standardsFixture(t *testing.T) (context.Context, *Store, standards.Pack) {
 
 func reactProfile(pack standards.Pack, exceptions ...standards.Exception) standards.Profile {
 	return standards.Profile{ProjectID: "PRJ-1", PackRef: pack.Ref(),
-		Attributes: map[string]string{"frontend": "react", "network": "offline"}, Exceptions: exceptions}
+		Attributes: map[string]string{"frontend": "react", "network": "offline", "deployment": "service"}, Exceptions: exceptions}
 }
 
 // A profile holding an exception nobody owns, or a required criterion excepted

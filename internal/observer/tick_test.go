@@ -65,7 +65,7 @@ func enrol(t *testing.T, ctx context.Context, db *store.Store, id string) {
 	t.Helper()
 	pack := standards.GoReactOfflineService()
 	if err := db.SaveStandardProfile(ctx, standards.Profile{ProjectID: id, PackRef: pack.Ref(),
-		Attributes: map[string]string{"frontend": "react", "network": "offline"}}, pack); err != nil {
+		Attributes: map[string]string{"frontend": "react", "network": "offline", "deployment": "service"}}, pack); err != nil {
 		t.Fatal(err)
 	}
 }

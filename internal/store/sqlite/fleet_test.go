@@ -33,7 +33,7 @@ func fleetProject(t *testing.T, ctx context.Context, s *Store, pack standards.Pa
 		t.Fatal(err)
 	}
 	profile := standards.Profile{ProjectID: id, PackRef: pack.Ref(),
-		Attributes: map[string]string{"frontend": "react", "network": "offline"}, Exceptions: exceptions}
+		Attributes: map[string]string{"frontend": "react", "network": "offline", "deployment": "service"}, Exceptions: exceptions}
 	if err := s.SaveStandardProfile(ctx, profile, pack); err != nil {
 		t.Fatal(err)
 	}

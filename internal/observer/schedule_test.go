@@ -338,7 +338,7 @@ func passRequest(t *testing.T, ctx context.Context, db *store.Store, goalID stri
 	head := strings.TrimSpace(string(out))
 	pack := standards.GoReactOfflineService()
 	profile := standards.Profile{ProjectID: "PRJ-1", PackRef: pack.Ref(),
-		Attributes: map[string]string{"frontend": "react", "network": "offline"}}
+		Attributes: map[string]string{"frontend": "react", "network": "offline", "deployment": "service"}}
 	if err = db.SaveStandardProfile(ctx, profile, pack); err != nil {
 		t.Fatal(err)
 	}

@@ -382,3 +382,66 @@ func TestEveryShippedCriterionSaysWhatItIsFor(t *testing.T) {
 		t.Fatal("a criterion with no intent must be refused")
 	}
 }
+
+// A criterion that presumes the project is a particular shape has to say so.
+// Running the pack against GoalForge itself — a command-line tool that ships
+// binaries — reported that it was missing a React dependency, a Dockerfile and
+// a four-variable runtime contract. None of those is a defect in a CLI; all
+// three were criteria describing a deployed web service and not saying so.
+func TestCriteriaPresumingAWebServiceSayItInTheirConditions(t *testing.T) {
+	pack := GoReactOfflineService()
+	// A Go command-line tool: no web front end, not a deployed service.
+	cli := Profile{ProjectID: "P-CLI", PackRef: pack.Ref(),
+		Attributes: map[string]string{"frontend": "none", "deployment": "cli"}}
+	if err := cli.Validate(pack); err != nil {
+		t.Fatal(err)
+	}
+	inForce := map[string]bool{}
+	for _, standard := range InForce(pack, cli, time.Now()) {
+		inForce[standard.ID] = true
+	}
+	for _, id := range []string{"CORE-001", "CFG-001", "REL-001", "UX-001", "QA-001", "DOC-004"} {
+		if inForce[id] {
+			t.Fatalf("%s describes a deployed web service and must not apply to a CLI", id)
+		}
+	}
+	// The criteria that genuinely apply to anything published still do.
+	for _, id := range []string{"DOC-003"} {
+		if !inForce[id] {
+			t.Fatalf("%s applies to anything with users", id)
+		}
+	}
+	// And the full-shape project is still held to all of them.
+	service := Profile{ProjectID: "P-SVC", PackRef: pack.Ref(),
+		Attributes: map[string]string{"frontend": "react", "deployment": "service", "network": "offline"}}
+	held := map[string]bool{}
+	for _, standard := range InForce(pack, service, time.Now()) {
+		held[standard.ID] = true
+	}
+	for _, id := range []string{"CORE-001", "CFG-001", "REL-001", "UX-001", "QA-001", "DOC-004", "NET-001"} {
+		if !held[id] {
+			t.Fatalf("%s must apply to the project the pack is named after", id)
+		}
+	}
+}
+
+// A required criterion with no condition claims to apply to every project that
+// pins this pack. The pack is named after one shape of project, so that claim
+// has to be true of anything — and almost none of these are.
+func TestRequiredCriteriaWithNoConditionApplyToAnyProject(t *testing.T) {
+	universal := map[string]bool{
+		// The only required criteria that hold whatever the project is.
+		"NET-001": true, "NET-002": true, "AUTH-002": true, "AUTH-003": true, "AUTH-005": true,
+		"AI-001": true, "AI-002": true, "AI-003": true, "KEY-001": true, "KEY-002": true,
+		"INT-002": true, "INT-003": true, "WF-001": true, "WF-002": true,
+	}
+	for _, standard := range GoReactOfflineService().Standards {
+		if standard.Severity != SeverityRequired || len(standard.AppliesWhen) > 0 {
+			continue
+		}
+		if !universal[standard.ID] {
+			t.Fatalf("%s (%s) is required with no condition — say which projects it is about",
+				standard.ID, standard.Title)
+		}
+	}
+}
