@@ -98,6 +98,18 @@ func tickProject(ctx context.Context, db *store.Store, projectID, name, reposito
 		return tick
 	}
 	goal, err := db.CurrentGoal(ctx, projectID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Enrolling a project and setting its goal are separate commands, so a
+		// project sits in this state for as long as it takes someone to run the
+		// second one. There is nothing to supply work against, but nothing is
+		// broken either — and calling it a failure makes the sweep print an
+		// error every quarter of an hour, forever, about a project that only
+		// needs a goal. The loop is the one place that cost compounds silently:
+		// nobody is watching, so the noise is discovered as a habit of ignoring
+		// the log.
+		tick.Note = "목표가 아직 없습니다 — `goalforge goal set` 이후에 공급이 시작됩니다"
+		return tick
+	}
 	if err != nil {
 		tick.Err = fmt.Errorf("목표를 읽지 못했습니다: %w", err)
 		return tick
