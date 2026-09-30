@@ -119,6 +119,15 @@ goalforge standards pass [--interval 24h] [--backlog-floor 3] [--daily-budget 4]
                    # the same answers and spends budget doing it. The discovery budget is
                    # separate from the implementation budget — a loop that can borrow from
                    # implementation spends the day deciding what to do and none of it doing it.
+goalforge browser check                     # is the playwright-player service reachable?
+goalforge browser run --script KEY [--base-url URL] [--variables k=v]
+                   # runs a browser journey on the service and exits non-zero when it did not
+                   # pass. Three failures look like success and each is refused: an unreachable
+                   # service, a run that executed nothing (exit 0 because there was nothing to
+                   # fail), and a run still going when the clock ran out.
+goalforge browser gate --type T --script KEY --settles ID
+                   # registers the gate and its criterion claim together, and declares the
+                   # route and screenshot evidence a journey run produces.
 goalforge standards gate --type T --settles ID[,ID] [--produces route,screenshot]
                    # which criteria a gate settles. Declared, not inferred: matching by kind
                    # alone would let any journey test settle every journey criterion.

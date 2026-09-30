@@ -98,6 +98,7 @@ var privilegedCommands = map[string]string{
 	"approval request":         "승인 요청",
 	"goal set":                 "목표 변경",
 	"verify gate add":          "검증 게이트 변경",
+	"browser gate":             "검증 게이트 변경",
 	"verify template":          "검증 게이트 일괄 설정",
 	"project budget":           "예산 변경",
 	"project profile":          "운영 정책 변경",
@@ -218,6 +219,16 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "show" {
 			return goalShow(ctx, s)
+		}
+	case "browser":
+		if len(args) > 1 && args[1] == "run" {
+			return browserRun(ctx, args[2:])
+		}
+		if len(args) > 1 && args[1] == "check" {
+			return browserCheck(ctx, args[2:])
+		}
+		if len(args) > 1 && args[1] == "gate" {
+			return browserGate(ctx, s, args[2:])
 		}
 	case "standards":
 		if len(args) > 1 && args[1] == "profile" {
