@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS config_proposals (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), round INTEGER NOT NULL DEFAULT 0,
+ label TEXT NOT NULL DEFAULT '', edits TEXT NOT NULL DEFAULT '[]', verdict TEXT NOT NULL DEFAULT '',
+ score_delta REAL NOT NULL DEFAULT 0, cost_delta REAL NOT NULL DEFAULT 0, score REAL NOT NULL DEFAULT 0,
+ accepted INTEGER NOT NULL DEFAULT 0, screen_refusal TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_config_proposals ON config_proposals(project_id,round);
 CREATE TABLE IF NOT EXISTS selection_policies (
  project_id TEXT PRIMARY KEY REFERENCES projects(id), noise_band REAL NOT NULL DEFAULT 0,
  calibrated_from TEXT NOT NULL DEFAULT '', beta0 REAL NOT NULL DEFAULT 0, beta1 REAL NOT NULL DEFAULT 0,

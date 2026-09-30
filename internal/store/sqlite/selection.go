@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -82,4 +83,102 @@ WHERE condition_hash=? AND status IN ('PASSED','FAILED') ORDER BY case_id,repeti
 		trials = append(trials, rrsi.CaseTrials{CaseID: caseID, Outcomes: byCase[caseID]})
 	}
 	return trials, nil
+}
+
+// RecordProposal stores one candidate's edits and what measuring it
+// established.
+//
+// The record is written to be read: it is what stops the search re-drawing an
+// explanation it has already falsified. A history nobody consults is the same
+// as no history, and the run spends its rounds rediscovering what it knew.
+func (s *Store) RecordProposal(ctx context.Context, projectID string, record rrsi.Record) error {
+	if projectID == "" || len(record.Edits) == 0 {
+		return errors.New("project and at least one edit are required")
+	}
+	edits, err := json.Marshal(record.Edits)
+	if err != nil {
+		return err
+	}
+	accepted := 0
+	if record.Accepted {
+		accepted = 1
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO config_proposals(id,project_id,round,label,edits,verdict,score_delta,cost_delta,score,accepted,screen_refusal,created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		NewID("PRP"), projectID, record.Round, record.Label, string(edits), record.Verdict,
+		record.ScoreDelta, record.CostDelta, record.Score, accepted, record.ScreenRefusal,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// ProposalHistory returns a project's proposals oldest first.
+//
+// Oldest first because the order is the evidence: a run of failures ending in
+// a success means something different from a success followed by failures, and
+// the falsified set is built by walking forward.
+func (s *Store) ProposalHistory(ctx context.Context, projectID string) (rrsi.History, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT round,label,edits,verdict,score_delta,cost_delta,score,accepted,screen_refusal
+FROM config_proposals WHERE project_id=? ORDER BY round,created_at,id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var history rrsi.History
+	for rows.Next() {
+		var record rrsi.Record
+		var edits string
+		var accepted int
+		if err = rows.Scan(&record.Round, &record.Label, &edits, &record.Verdict, &record.ScoreDelta,
+			&record.CostDelta, &record.Score, &accepted, &record.ScreenRefusal); err != nil {
+			return nil, err
+		}
+		record.Accepted = accepted == 1
+		if err = json.Unmarshal([]byte(edits), &record.Edits); err != nil {
+			return nil, err
+		}
+		history = append(history, record)
+	}
+	return history, rows.Err()
+}
+
+// ScoreTrajectory is the accepted score after each round, which is what a
+// stall is measured over.
+//
+// Only accepted proposals move it. A round where every candidate was refused
+// left the incumbent where it was, and recording the best refused candidate's
+// score would show movement that never happened.
+func (s *Store) ScoreTrajectory(ctx context.Context, projectID string) ([]float64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT score FROM config_proposals
+WHERE project_id=? AND accepted=1 ORDER BY round,created_at,id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var trajectory []float64
+	for rows.Next() {
+		var score float64
+		if err = rows.Scan(&score); err != nil {
+			return nil, err
+		}
+		trajectory = append(trajectory, score)
+	}
+	return trajectory, rows.Err()
+}
+
+// EvaluationCaseNames is what the leakage screen compares a change against.
+func (s *Store) EvaluationCaseNames(ctx context.Context, projectID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM evaluation_cases WHERE project_id=? ORDER BY name`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err = rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
 }

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/rrsi"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
@@ -252,4 +253,153 @@ func verdictMark(verdict string) string {
 		return "[ ]"
 	}
 	return "[?]"
+}
+
+// configDirection tells the operator what the search should try next.
+func configDirection(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("config direction", flag.ContinueOnError)
+	round := set.Int("round", -1, "이번 회차 (기본: 기록된 회차 다음)")
+	total := set.Int("rounds", 10, "계획한 전체 회차")
+	minEdits := set.Int("min-edits", 1, "회차당 최소 편집 한도")
+	maxEdits := set.Int("max-edits", 4, "회차당 최대 편집 한도")
+	window := set.Int("window", 3, "정체를 판단할 회차 수")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, policy, history, err := proposalContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	trajectory, err := s.ScoreTrajectory(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	current := *round
+	if current < 0 {
+		current = nextRound(history)
+	}
+	direction := rrsi.Next(history, trajectory, current, *total, *minEdits, *maxEdits, *window, policy.NoiseBand)
+	fmt.Printf("%d/%d 회차 — %s\n", current, *total, direction.Summary)
+	if len(direction.Avoid) == 0 {
+		return nil
+	}
+	fmt.Println("\n이미 시험해서 성립하지 않은 설명:")
+	components := make([]string, 0, len(direction.Avoid))
+	for component := range direction.Avoid {
+		components = append(components, component)
+	}
+	sort.Strings(components)
+	for _, component := range components {
+		for _, hypothesis := range direction.Avoid[component] {
+			fmt.Printf("  %s: %s\n", component, hypothesis)
+		}
+	}
+	return nil
+}
+
+// configPropose screens a candidate before any evaluation is spent on it.
+func configPropose(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("config propose", flag.ContinueOnError)
+	round := set.Int("round", -1, "이번 회차")
+	label := set.String("label", "", "후보 라벨")
+	editSpecs := multiFlag{}
+	set.Var(&editSpecs, "edit", "구성:가설[:설명] 형식 (여러 번 지정 가능)")
+	budget := set.Int("budget", 0, "편집 한도 (0 이면 회차에서 계산)")
+	total := set.Int("rounds", 10, "계획한 전체 회차")
+	record := set.Bool("record", false, "심사 결과를 이력에 남긴다")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, policy, history, err := proposalContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	_ = policy
+	edits, err := parseEdits(editSpecs)
+	if err != nil {
+		return err
+	}
+	current := *round
+	if current < 0 {
+		current = nextRound(history)
+	}
+	limit := *budget
+	if limit <= 0 {
+		limit = rrsi.EditBudget(current, *total, 1, 4)
+	}
+	names, err := s.EvaluationCaseNames(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	refusals := rrsi.Screen(rrsi.ScreenInput{Edits: edits, Budget: limit, CaseNames: names, History: history})
+	if rrsi.Passed(refusals) {
+		fmt.Printf("심사 통과 — 편집 %d개 (한도 %d) · 새 구조 구성 %d개\n",
+			len(edits), limit, history.NovelComponents(edits))
+		fmt.Println("측정하고 `goalforge config judge` 로 판정하세요")
+		return nil
+	}
+	fmt.Println(rrsi.Explain(refusals))
+	if *record {
+		// Recorded without a measurement. It counts as having reached for
+		// those components and does not count as having falsified anything —
+		// a wall of refusals is a feedback loop, not a set of failures.
+		if err = s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current, Label: *label,
+			Edits: edits, ScreenRefusal: refusals[0].Kind}); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("심사에서 거절되었습니다 (%d건) — 평가 비용을 쓰기 전에 고치세요", len(refusals))
+}
+
+func proposalContext(ctx context.Context, s *store.Store) (model.Project, rrsi.Policy, rrsi.History, error) {
+	project, err := currentProject(ctx, s)
+	if err != nil {
+		return project, rrsi.Policy{}, nil, err
+	}
+	policy, err := s.SelectionPolicyFor(ctx, project.ID)
+	if err != nil {
+		return project, policy, nil, err
+	}
+	history, err := s.ProposalHistory(ctx, project.ID)
+	return project, policy, history, err
+}
+
+func nextRound(history rrsi.History) int {
+	highest := -1
+	for _, record := range history {
+		if record.Round > highest {
+			highest = record.Round
+		}
+	}
+	return highest + 1
+}
+
+// parseEdits reads component:hypothesis[:detail] specifications.
+func parseEdits(specs []string) ([]rrsi.Edit, error) {
+	if len(specs) == 0 {
+		return nil, errors.New("--edit 이 하나 이상 필요합니다")
+	}
+	edits := make([]rrsi.Edit, 0, len(specs))
+	for _, spec := range specs {
+		parts := strings.SplitN(spec, ":", 3)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("%q 는 구성:가설[:설명] 형식이 아닙니다", spec)
+		}
+		edit := rrsi.Edit{Component: strings.TrimSpace(parts[0]), Hypothesis: strings.TrimSpace(parts[1])}
+		if len(parts) == 3 {
+			edit.Detail = strings.TrimSpace(parts[2])
+		}
+		edits = append(edits, edit)
+	}
+	return edits, nil
+}
+
+// multiFlag collects a flag given more than once.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ", ") }
+
+func (m *multiFlag) Set(value string) error {
+	*m = append(*m, value)
+	return nil
 }
