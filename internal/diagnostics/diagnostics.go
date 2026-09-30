@@ -10,6 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/goalforge/goalforge/internal/browser"
 )
 
 // Levels, ordered by severity. Only FAIL blocks readiness.
@@ -131,7 +134,32 @@ func Run(ctx context.Context, options Options) Report {
 	for _, name := range providers {
 		checkProvider(ctx, &report, name, missingLevel, options.ProbeAuth)
 	}
+	checkBrowserService(ctx, &report)
 	return report
+}
+
+// checkBrowserService reports whether the browser service can be reached.
+//
+// Without it a project whose journey criteria all sit at UNKNOWN gives an
+// operator nothing to go on: the board looks the same whether nobody has
+// written the scripts yet or one container is down. It is a warning rather
+// than a failure — a project with no browser criteria does not need the
+// service, and blocking those projects on a container they never use would
+// teach people to ignore the diagnostic.
+func checkBrowserService(ctx context.Context, report *Report) {
+	base := strings.TrimSpace(os.Getenv("GOALFORGE_BROWSER_URL"))
+	if base == "" {
+		report.add(LevelOK, "browser service",
+			"설정되지 않았습니다 — 브라우저 여정 기준을 쓰려면 GOALFORGE_BROWSER_URL 에 playwright-player 주소를 넣으세요")
+		return
+	}
+	health, err := browser.Client{BaseURL: base, Timeout: 10 * time.Second}.Health(ctx)
+	if err != nil {
+		report.add(LevelWarn, "browser service", err.Error())
+		return
+	}
+	report.add(LevelOK, "browser service",
+		fmt.Sprintf("%s %s (%s) — 스크립트 %d개", health.Service, health.Version, base, health.ScriptCount))
 }
 
 func checkProvider(ctx context.Context, report *Report, name, missingLevel string, probeAuth bool) {
