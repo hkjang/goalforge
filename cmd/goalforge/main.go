@@ -1126,26 +1126,47 @@ func sweepStandards(ctx context.Context, s *store.Store) {
 		fmt.Fprintln(os.Stderr, "worker standards sweep error:", err)
 		return
 	}
+	out, errs := sweepReport(result)
+	for _, line := range out {
+		fmt.Println(line)
+	}
+	for _, line := range errs {
+		fmt.Fprintln(os.Stderr, line)
+	}
+}
+
+// sweepReport turns one sweep into the lines an operator reads, keeping
+// failures on their own stream so a broken project cannot hide among the quiet
+// ones.
+func sweepReport(result observer.TickResult) (out, errs []string) {
 	if !result.Acted() {
-		return
+		return nil, nil
 	}
 	for _, project := range result.Projects {
 		switch {
 		case project.Err != nil:
-			fmt.Fprintf(os.Stderr, "worker standards %s: %v\n", project.ProjectName, project.Err)
+			errs = append(errs, fmt.Sprintf("worker standards %s: %v", project.ProjectName, project.Err))
 		case project.Ran && len(project.Filed) > 0:
-			fmt.Printf("worker standards %s: %s — 공급 %d건\n",
-				project.ProjectName, project.Decision.Trigger, len(project.Filed))
+			out = append(out, fmt.Sprintf("worker standards %s: %s — 공급 %d건",
+				project.ProjectName, project.Decision.Trigger, len(project.Filed)))
 		case project.Ran:
-			fmt.Printf("worker standards %s: %s — 새 공급 없음\n", project.ProjectName, project.Decision.Trigger)
+			out = append(out, fmt.Sprintf("worker standards %s: %s — 새 공급 없음", project.ProjectName, project.Decision.Trigger))
+		case project.Note != "":
+			// Only reached when the sweep already had something to say. A
+			// reason nobody prints is a reason nobody has: an operator whose
+			// project has been idle for a week could otherwise only find out
+			// why by running the command by hand, which is the one thing an
+			// unattended loop exists to remove.
+			out = append(out, fmt.Sprintf("worker standards %s: %s", project.ProjectName, project.Note))
 		}
 		if len(project.Approved) > 0 {
-			fmt.Printf("worker standards %s: 자동 실행 승인 %d건\n", project.ProjectName, len(project.Approved))
+			out = append(out, fmt.Sprintf("worker standards %s: 자동 실행 승인 %d건", project.ProjectName, len(project.Approved)))
 		}
 		if len(project.Merged) > 0 {
-			fmt.Printf("worker standards %s: 자동 병합 승인 %d건\n", project.ProjectName, len(project.Merged))
+			out = append(out, fmt.Sprintf("worker standards %s: 자동 병합 승인 %d건", project.ProjectName, len(project.Merged)))
 		}
 	}
+	return out, errs
 }
 
 // continueHandler drives a project toward its goal one work item at a time:

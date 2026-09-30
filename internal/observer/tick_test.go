@@ -18,6 +18,17 @@ import (
 // defects, so an unattended sweep has something to find.
 func tickProjectIn(t *testing.T, ctx context.Context, db *store.Store, id string, broken bool) string {
 	t.Helper()
+	repo := tickRepoIn(t, ctx, db, id, broken)
+	if _, err := db.SetGoal(ctx, id, "G", "o", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}}); err != nil {
+		t.Fatal(err)
+	}
+	return repo
+}
+
+// tickRepoIn is the same registration without a goal, which is the state a
+// project is in between `goalforge project add` and `goalforge goal set`.
+func tickRepoIn(t *testing.T, ctx context.Context, db *store.Store, id string, broken bool) string {
+	t.Helper()
 	repo := t.TempDir()
 	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"config", "user.email", "t@e.com"}, {"config", "user.name", "T"}} {
 		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
@@ -45,9 +56,6 @@ func tickProjectIn(t *testing.T, ctx context.Context, db *store.Store, id string
 	}
 	if err := db.CreateProject(ctx, model.Project{ID: id, Name: id, RepositoryPath: repo,
 		DefaultBranch: "main", Provider: "codex", WIPLimit: 1}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.SetGoal(ctx, id, "G", "o", "", []model.Criterion{{Type: "build_passed", ExpectedValue: "true"}}); err != nil {
 		t.Fatal(err)
 	}
 	return repo
@@ -259,6 +267,34 @@ func TestAThrottledProjectIsNotAFailure(t *testing.T) {
 	}
 	if !strings.Contains(tick.Note, "budget") && !strings.Contains(tick.Note, "예산") {
 		t.Fatalf("note=%q", tick.Note)
+	}
+}
+
+// A project enrolled before its goal was set has nothing for the sweep to
+// supply work against — but it is not broken. Reporting it as a failure makes
+// the sweep print an error every quarter of an hour, forever, about a project
+// nobody needs to fix, and an operator who scrolls past the log stops reading
+// the line that matters.
+func TestAnEnrolledProjectWithNoGoalIsQuietNotBroken(t *testing.T) {
+	ctx, db := tickFixture(t)
+	tickRepoIn(t, ctx, db, "PRJ-1", true)
+	enrol(t, ctx, db, "PRJ-1")
+	result, err := Tick(ctx, db, "test", Default(), DefaultSchedulePolicy(), DefaultSupplyPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Projects) != 1 {
+		t.Fatalf("result=%+v", result.Projects)
+	}
+	tick := result.Projects[0]
+	if tick.Err != nil {
+		t.Fatalf("a project waiting for its goal is not a failure: %v", tick.Err)
+	}
+	if !strings.Contains(tick.Note, "목표") {
+		t.Fatalf("a quiet tick must still say why: note=%q", tick.Note)
+	}
+	if result.Acted() {
+		t.Fatal("a sweep that did nothing must stay quiet, or every tick looks like activity")
 	}
 }
 
