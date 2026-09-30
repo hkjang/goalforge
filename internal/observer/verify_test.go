@@ -15,7 +15,7 @@ func verifyFixture(t *testing.T) (context.Context, *store.Store, standards.Pack,
 	ctx, db, _ := supplyFixture(t)
 	pack := standards.GoReactOfflineService()
 	profile := standards.Profile{ProjectID: "PRJ-1", PackRef: pack.Ref(),
-		Attributes: map[string]string{"frontend": "react", "network": "offline"}}
+		Attributes: map[string]string{"frontend": "react", "network": "offline", "deployment": "service"}}
 	if err := db.SaveStandardProfile(ctx, profile, pack); err != nil {
 		t.Fatal(err)
 	}
