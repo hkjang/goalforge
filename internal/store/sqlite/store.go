@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS autonomy_policies (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), enabled INTEGER NOT NULL DEFAULT 0,
+ all_standards INTEGER NOT NULL DEFAULT 0, allowed_standards TEXT NOT NULL DEFAULT '[]',
+ all_scopes INTEGER NOT NULL DEFAULT 0, allowed_scopes TEXT NOT NULL DEFAULT '[]',
+ max_tokens INTEGER NOT NULL DEFAULT 0, daily_limit INTEGER NOT NULL DEFAULT 0,
+ auto_merge INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS patterns (
  id TEXT PRIMARY KEY, standard_id TEXT NOT NULL, problem TEXT NOT NULL, approach TEXT NOT NULL,
  applies_when TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,

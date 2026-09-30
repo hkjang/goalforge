@@ -143,8 +143,13 @@ goalforge standards settle [--commit SHA]   # re-judge the criteria the project'
                    # The only path by which a criterion reaches MET — a static read proves
                    # absences and cannot prove that anything works.
 goalforge standards autonomy --enable [--standards ID|--all-standards] [--scopes S|--all-scopes]
-                             [--merge] [--max-tokens N] [--daily-limit N]
-goalforge standards autonomy --full         # every criterion, every scope, merge included
+                             [--merge] [--max-tokens N] [--daily-limit N] [--save]
+goalforge standards autonomy --full --save  # every criterion, every scope, merge included, saved
+goalforge standards autonomy --show         # what is saved and therefore running unattended
+                   # The envelope has to be saved, not passed as flags: one that only exists
+                   # as arguments to a command somebody types applies exactly when somebody is
+                   # already there, which is the one time it was not needed. The worker reads
+                   # the saved envelope; a project without one gets nothing approved.
                    # The strongest rule survives every flag: work no gate can judge is never
                    # approved. The machine would write code and nothing could say whether it
                    # worked, so the change would land as done on the strength of having been
@@ -177,6 +182,10 @@ goalforge plan [--json]                # what the next run would do, without doi
 goalforge continue [--enqueue]         # CONTINUE_GOAL: one work item (or schedule for the worker)
 goalforge develop                      # IMPLEMENT_SELECTED: highest-priority approved idea
 goalforge run --until-quota --max-runs 100
+goalforge worker [--standards-every 15m]
+                   # also sweeps the standards loop for every enrolled project. The cadence is
+                   # only how often the question is asked; whether a project is assessed is its
+                   # own interval, discovery budget and backlog floor.
 goalforge worker [--once]              # processes RESUME and CONTINUE jobs, prunes sessions hourly
 ```
 
