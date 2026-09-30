@@ -58,6 +58,7 @@ amd64·arm64 여섯 조합을 `-trimpath` 로 빌드하고, 각 압축 파일에
 ## 사용 가이드
 
 - [docs/GUIDE.md](docs/GUIDE.md) — 설치부터 운영까지
+- [docs/SELECTION.md](docs/SELECTION.md) — 구성 변경이 개선인지 판정하는 규칙 (노이즈 대역·비용 규칙)
 - [docs/STANDARDS.md](docs/STANDARDS.md) — 여러 프로젝트에 같은 요구를 적용하는 공통 개발 기준
 
 처음부터 끝까지 한 번 돌려 보는 순서는 [docs/GUIDE.md](docs/GUIDE.md) 에 있습니다.
@@ -156,6 +157,14 @@ goalforge standards autonomy --show         # what is saved and therefore runnin
                    # attempted. With --merge, a release additionally needs its gates to have
                    # passed on the very commit being released, no gate left unrun on that
                    # change, and a default branch that is not known broken.
+goalforge config calibrate --label L        # measure how much this project's evaluation moves
+goalforge config judge [--incumbent L]      # is a configuration change an improvement?
+                   # Sorting configurations by pass rate presents whichever one drew the best
+                   # sample as the best configuration. A gain smaller than the measured noise
+                   # band is the measurement moving, not the configuration; added cost has to
+                   # be paid for by measured gain; and a small sample cannot win by having had
+                   # the fewest chances to fail. Nothing is judged before the band is measured.
+goalforge config selection [--free-cost F] [--cost-per-gain G] [--min-trials N]
 goalforge standards compare                 # one pack across every project pinned to it
                    # Also raises the cases where the catalogue, not the projects, looks wrong:
                    # a criterion most of a fleet has excused is not one most of a fleet is

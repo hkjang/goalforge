@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS selection_policies (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), noise_band REAL NOT NULL DEFAULT 0,
+ calibrated_from TEXT NOT NULL DEFAULT '', beta0 REAL NOT NULL DEFAULT 0, beta1 REAL NOT NULL DEFAULT 0,
+ weight_score REAL NOT NULL DEFAULT 0, weight_cost REAL NOT NULL DEFAULT 0,
+ weight_novelty REAL NOT NULL DEFAULT 0, min_trials INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS autonomy_policies (
  project_id TEXT PRIMARY KEY REFERENCES projects(id), enabled INTEGER NOT NULL DEFAULT 0,
  all_standards INTEGER NOT NULL DEFAULT 0, allowed_standards TEXT NOT NULL DEFAULT '[]',
