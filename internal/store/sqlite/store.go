@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS patterns (
+ id TEXT PRIMARY KEY, standard_id TEXT NOT NULL, problem TEXT NOT NULL, approach TEXT NOT NULL,
+ applies_when TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+ decider TEXT NOT NULL DEFAULT '', decided_at TEXT NOT NULL DEFAULT '', retired_reason TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS pattern_applications (
+ pattern_id TEXT NOT NULL REFERENCES patterns(id), project_id TEXT NOT NULL,
+ work_item_id TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '',
+ outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', applied_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pattern_applications ON pattern_applications(pattern_id,applied_at);
 CREATE TABLE IF NOT EXISTS page_captures (
  project_id TEXT NOT NULL REFERENCES projects(id), page_key TEXT NOT NULL,
  route TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '',

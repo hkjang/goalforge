@@ -99,6 +99,8 @@ var privilegedCommands = map[string]string{
 	"goal set":                 "목표 변경",
 	"verify gate add":          "검증 게이트 변경",
 	"browser gate":             "검증 게이트 변경",
+	"pattern approve":          "공통 패턴 권고",
+	"pattern retire":           "공통 패턴 철회",
 	"verify template":          "검증 게이트 일괄 설정",
 	"project budget":           "예산 변경",
 	"project profile":          "운영 정책 변경",
@@ -220,6 +222,22 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "show" {
 			return goalShow(ctx, s)
 		}
+	case "pattern":
+		if len(args) > 1 && args[1] == "list" {
+			return patternList(ctx, s)
+		}
+		if len(args) > 1 && args[1] == "add" {
+			return patternAdd(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "apply" {
+			return patternApply(ctx, s, args[2:])
+		}
+		if len(args) > 2 && args[1] == "approve" {
+			return patternDecide(ctx, s, args[2], args[3:], false)
+		}
+		if len(args) > 2 && args[1] == "retire" {
+			return patternDecide(ctx, s, args[2], args[3:], true)
+		}
 	case "capture":
 		if len(args) > 1 && args[1] == "status" {
 			return captureStatus(ctx, s, args[2:])
@@ -258,6 +276,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "settle" {
 			return standardsSettle(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "compare" {
+			return standardsCompare(ctx, s, args[2:])
 		}
 		if len(args) > 1 && args[1] == "autonomy" {
 			return standardsAutonomy(ctx, s, args[2:])

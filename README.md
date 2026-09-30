@@ -151,6 +151,15 @@ goalforge standards autonomy --full         # every criterion, every scope, merg
                    # attempted. With --merge, a release additionally needs its gates to have
                    # passed on the very commit being released, no gate left unrun on that
                    # change, and a default branch that is not known broken.
+goalforge standards compare                 # one pack across every project pinned to it
+                   # Also raises the cases where the catalogue, not the projects, looks wrong:
+                   # a criterion most of a fleet has excused is not one most of a fleet is
+                   # failing — it is one that does not fit the work these projects do.
+goalforge pattern add|apply|list|approve|retire
+                   # A fix that worked in one project is a fix. Calling it a pattern and
+                   # recommending it everywhere is how one team's local quirk becomes a
+                   # standard nobody chose, so promotion needs two distinct projects — and a
+                   # pattern that has failed three times since its last success is retired.
 goalforge standards status            # every criterion in force, including the unexamined ones
 goalforge standards except --standard ID --reason R --decider D [--review-when W | --review-by DATE]
 goalforge verify template go-api|node-frontend|python-library|docs [--overwrite]
