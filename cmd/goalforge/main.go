@@ -233,6 +233,12 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "judge" {
 			return configJudge(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "direction" {
+			return configDirection(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "propose" {
+			return configPropose(ctx, s, args[2:])
+		}
 	case "pattern":
 		if len(args) > 1 && args[1] == "list" {
 			return patternList(ctx, s)

@@ -165,6 +165,14 @@ goalforge config judge [--incumbent L]      # is a configuration change an impro
                    # be paid for by measured gain; and a small sample cannot win by having had
                    # the fewest chances to fail. Nothing is judged before the band is measured.
 goalforge config selection [--free-cost F] [--cost-per-gain G] [--min-trials N]
+goalforge config direction                  # what the search should try next
+goalforge config propose --edit "component:hypothesis[:detail]"
+                   # screens a candidate before any evaluation is spent. A hypothesis already
+                   # falsified is refused — a search that does not remember what it tested
+                   # keeps drawing the most plausible idea, which is the one that failed first.
+                   # A change naming an evaluation case is refused too: the harness is evolved
+                   # against the cases it is measured on, so such a change raises the score
+                   # without the product improving, and the score cannot tell the difference.
 goalforge standards compare                 # one pack across every project pinned to it
                    # Also raises the cases where the catalogue, not the projects, looks wrong:
                    # a criterion most of a fleet has excused is not one most of a fleet is
