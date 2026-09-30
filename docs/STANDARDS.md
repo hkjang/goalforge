@@ -370,6 +370,59 @@ browser: 화면 screenshots/route-restore.png
 
 0바이트 PNG 도 스크린샷으로 치지 않습니다. 아무도 찍지 않은 사진을 근거라고 하는 것입니다.
 
+#### 문서의 화면 캡처
+
+스크린샷은 **지금 제품이 이렇게 생겼다**는 주장입니다. 한 번 찍어 두고 놔두면 화면이 바뀐 뒤에도 계속 그 주장을 하고, 낡은 그림으로 가득한 가이드는 그림이 없는 가이드보다 나쁩니다 — 읽는 사람이 믿고 틀립니다.
+
+```sh
+goalforge capture status
+goalforge capture run [--gate]
+```
+
+매니페스트(`goalforge.pages.json`)가 어떤 화면을 문서가 담고 있는지 선언합니다.
+
+```json
+{
+  "base_url": "http://internal.example",
+  "seed_ref": "seed/demo",
+  "pages": [
+    {"route": "/projects", "role": "admin", "state": "populated",
+     "script": "docs/projects-admin", "sources": ["web/src/routes/**"], "required": true}
+  ]
+}
+```
+
+| 필드 | 없으면 |
+| --- | --- |
+| `role`·`state` | 같은 경로가 보는 사람과 상황에 따라 다르게 보입니다. 관리자 화면만 찍은 가이드는 독자 대부분이 갖고 있지 않은 제품을 설명합니다 |
+| `script` | 아무도 도달할 수 없는 화면은 매니페스트의 항목이 아니라 바람입니다 |
+| `sources` | 캡처가 낡았는지 물을 수 없습니다 |
+| `seed_ref` | 화면 속 이름이 지어낸 것인지 실제인지 말할 수 없습니다. 그 질문은 가이드가 배포된 뒤에 나옵니다 |
+
+#### 낡음 판정은 늑대를 부르지 않습니다
+
+**오래된 커밋에서 찍었다는 것만으로 낡은 것이 아닙니다.** 그렇게 하면 커밋 하나하나가 모든 스크린샷을 무효로 만들고, 보고서는 영구히 빨갛고, 사람들은 그것을 읽지 않게 됩니다 — 잡으려던 낡은 그림보다 더 비쌉니다.
+
+낡게 만드는 것은 **그 화면 자신의 `sources` 아래에서 일어난 변경**입니다.
+
+```
+$ git commit -m "무관한 변경" && goalforge capture status
+화면 3개 — 최신 3 · 낡음 0 · 없음 0
+[v]  /projects [admin/populated]
+     4c16b852659c 에서 찍었고 이 화면을 바꾸는 변경은 없었습니다
+
+$ (web/src/routes/projects.tsx 수정) && goalforge capture status
+화면 3개 — 최신 1 · 낡음 2 · 없음 0
+[~]  /projects [admin/populated]
+     4c16b852659c 이후 web/src/routes/projects.tsx 이(가) 바뀌었습니다
+```
+
+최신인 화면은 다시 찍지 않습니다. 매번 전부 다시 찍는 실행은 아무것도 안 바뀌었음을 증명하는 데 브라우저 세션을 쓰고, 그림이 이유 없이 버전 관리에서 요동칩니다.
+
+**스크립트가 통과했는데 화면을 안 찍었으면 실패입니다.** 그것을 캡처로 기록하면 아무것도 없는 채로 완료 칸에 들어가고, 가이드는 아무도 못 보는 구멍을 안고 나갑니다.
+
+`--gate` 를 붙이면 필수 화면이 최신이 아닐 때 0이 아닌 코드로 끝나므로 DOC-004 를 정산하는 게이트로 쓸 수 있습니다.
+
 #### 서비스가 죽었을 때
 
 ```
