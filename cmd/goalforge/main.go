@@ -220,6 +220,13 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 1 && args[1] == "show" {
 			return goalShow(ctx, s)
 		}
+	case "capture":
+		if len(args) > 1 && args[1] == "status" {
+			return captureStatus(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "run" {
+			return captureRun(ctx, s, args[2:])
+		}
 	case "browser":
 		if len(args) > 1 && args[1] == "run" {
 			return browserRun(ctx, args[2:])

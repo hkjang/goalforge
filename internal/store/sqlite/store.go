@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS page_captures (
+ project_id TEXT NOT NULL REFERENCES projects(id), page_key TEXT NOT NULL,
+ route TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '',
+ commit_sha TEXT NOT NULL, artifact_path TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
+ tool_version TEXT NOT NULL DEFAULT '', service_at TEXT NOT NULL DEFAULT '', captured_at TEXT NOT NULL,
+ PRIMARY KEY(project_id,page_key)
+);
 CREATE TABLE IF NOT EXISTS auto_approvals (
  work_item_id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
  standard_id TEXT NOT NULL DEFAULT '', basis TEXT NOT NULL DEFAULT '', approved_at TEXT NOT NULL,

@@ -125,6 +125,13 @@ goalforge browser run --script KEY [--base-url URL] [--variables k=v]
                    # pass. Three failures look like success and each is refused: an unreachable
                    # service, a run that executed nothing (exit 0 because there was nothing to
                    # fail), and a run still going when the clock ran out.
+goalforge capture status                    # which documented screens still depict the code
+goalforge capture run [--gate]              # take the screenshots that need taking
+                   # A screenshot claims the product looks like this now. Staleness is not
+                   # "taken at an older commit" — that would mark every picture stale after
+                   # any commit, the report would be permanently red, and people would stop
+                   # reading it. What makes a capture stale is a change under that screen's
+                   # own declared sources.
 goalforge browser gate --type T --script KEY --settles ID
                    # registers the gate and its criterion claim together, and declares the
                    # route and screenshot evidence a journey run produces.
