@@ -123,8 +123,18 @@ type AssessmentView struct {
 	Category string `json:"category"`
 	// Stale is true when the assessment was made against an older revision of
 	// the criterion. The result still stands for what it measured; it just no
-	// longer answers the question currently being asked.
+	// longer answers the question currently being asked — so Result goes back
+	// to UNKNOWN and what it used to say moves to PriorResult.
+	//
+	// It is reset here rather than left to each reader. Six places consume
+	// these views and exactly one of them remembered to check this flag, which
+	// is how a fleet report stayed green through a catalogue upgrade that
+	// moved the bar.
 	Stale bool `json:"stale"`
+	// PriorResult is what the superseded assessment said, kept so a board can
+	// show the criterion was once met. A view that forgets reads as never
+	// assessed, and then nobody can tell an upgrade from a regression.
+	PriorResult string `json:"prior_result,omitempty"`
 }
 
 // AssessmentsFor returns every criterion in force for a project together with
@@ -170,9 +180,16 @@ func (s *Store) AssessmentsFor(ctx context.Context, projectID string, pack stand
 			view.Assessment = standards.Assessment{ProjectID: projectID, StandardID: standard.ID,
 				Revision: standard.Revision, Result: standards.ResultNotApplicable,
 				Detail: applicable.Exception.Reason + " (" + applicable.Exception.Decider + ")"}
+		case measured && entry.Revision != standard.Revision:
+			// The criterion was revised after this was judged. The stored
+			// result was about different text, so it settles nothing here.
+			view.Assessment = entry
+			view.Stale, view.PriorResult = true, entry.Result
+			view.Result = standards.ResultUnknown
+			view.Detail = fmt.Sprintf("기준이 rev %d 로 개정되었습니다 — 이전 판정(%s, rev %d)은 다른 기준에 대한 것입니다",
+				standard.Revision, entry.Result, entry.Revision)
 		case measured:
 			view.Assessment = entry
-			view.Stale = entry.Revision != standard.Revision
 		default:
 			view.Assessment = standards.Assessment{ProjectID: projectID, StandardID: standard.ID,
 				Revision: standard.Revision, Result: standards.ResultUnknown,
