@@ -191,9 +191,21 @@ func (s *Store) AssessmentsFor(ctx context.Context, projectID string, pack stand
 		case measured:
 			view.Assessment = entry
 		default:
+			// A criterion whose waiver aged out is not one nobody looked at.
+			// Both are UNKNOWN, and the remedies differ: one needs a check
+			// run, the other needs somebody to decide whether the waiver
+			// still holds.
+			detail := "아직 확인하지 않았습니다"
+			if lapsed, had := applicable.LapsedException(); had {
+				detail = fmt.Sprintf("예외가 더 이상 유효하지 않습니다 — 조건 %q (결정 %s, %s). 조건이 아직 성립하는지 확인하고 다시 기록하세요",
+					lapsed.ReviewWhen, lapsed.Decider, lapsed.DecidedAt.Format("2006-01-02"))
+				if lapsed.ReviewWhen == "" {
+					detail = fmt.Sprintf("예외의 재검토 날짜 %s 가 지났습니다 (결정 %s). 다시 판단해 기록하세요",
+						lapsed.ReviewBy.Format("2006-01-02"), lapsed.Decider)
+				}
+			}
 			view.Assessment = standards.Assessment{ProjectID: projectID, StandardID: standard.ID,
-				Revision: standard.Revision, Result: standards.ResultUnknown,
-				Detail: "아직 확인하지 않았습니다"}
+				Revision: standard.Revision, Result: standards.ResultUnknown, Detail: detail}
 		}
 		views = append(views, view)
 	}
