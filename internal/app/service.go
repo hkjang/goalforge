@@ -27,7 +27,11 @@ type Service struct {
 	loopGuard     *planner.LoopGuard
 	newRunID      func() string
 	leaseDuration time.Duration
-	repairPolicy  store.RepairPolicy
+	// heartbeatInterval is how often a held lease is renewed. Zero means a
+	// fraction of the lease duration, which is what production uses; tests
+	// set it so a lease period fits inside a test.
+	heartbeatInterval time.Duration
+	repairPolicy      store.RepairPolicy
 }
 type ContinueResult struct {
 	WorkItem     model.WorkItem
@@ -76,10 +80,11 @@ func (s *Service) Audit(ctx context.Context, project model.Project) (IdeasResult
 
 func (s *Service) discover(ctx context.Context, project model.Project, render func(model.Goal, []model.WorkItem) string, template, taskType string) (result IdeasResult, err error) {
 	runID := s.newRunID()
-	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+	release, err := s.store.HoldLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
+	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	goal, err := s.store.CurrentGoal(ctx, project.ID)
 	if err != nil {
 		return result, err
@@ -129,10 +134,11 @@ type ReplanResult struct {
 // flagged BLOCKED for review.
 func (s *Service) Replan(ctx context.Context, project model.Project) (result ReplanResult, err error) {
 	runID := s.newRunID()
-	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+	release, err := s.store.HoldLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
+	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	goal, err := s.store.CurrentGoal(ctx, project.ID)
 	if err != nil {
 		return result, err
@@ -190,10 +196,11 @@ func (s *Service) Replan(ctx context.Context, project model.Project) (result Rep
 
 func (s *Service) ResumePaused(ctx context.Context, project model.Project) (result ResumeResult, err error) {
 	runID := s.newRunID()
-	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+	release, err := s.store.HoldLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
+	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	project, err = s.store.ProjectByID(ctx, project.ID)
 	if err != nil {
 		return result, err
@@ -311,11 +318,11 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	runID := s.newRunID()
 	// The lease carries a generation, so a cancel or a takeover part-way
 	// through this run is detectable before anything is confirmed.
-	lease, err := s.store.AcquireGenerationLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration)
+	lease, release, err := s.store.HoldGenerationLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
 	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	project, err = s.store.ProjectByID(ctx, project.ID)
 	if err != nil {
 		return result, err
