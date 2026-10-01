@@ -20,8 +20,12 @@ import (
 type AppliedChange struct {
 	ID, ProjectID, Component, Field string
 	From, To                        string
-	Round                           int
-	AppliedAt                       time.Time
+	// ProposalID is the recorded proposal this change came from, when it came
+	// from one. A change a person made by hand has none, and requiring one
+	// would stop them making it.
+	ProposalID string
+	Round      int
+	AppliedAt  time.Time
 	// Settled is false while the change is still being measured. Reverted and
 	// Outcome say how it ended.
 	Settled   bool
@@ -39,6 +43,16 @@ var ErrChangeOutstanding = errors.New("아직 판정되지 않은 변경이 있�
 
 // ApplyChange alters a setting and records what it replaced.
 func (s *Store) ApplyChange(ctx context.Context, projectID string, round int, component string, change rrsi.Change) (AppliedChange, error) {
+	return s.ApplyChangeFor(ctx, projectID, "", round, component, change)
+}
+
+// ApplyChangeFor applies a change and remembers which proposal asked for it,
+// so settling the change can tell the proposal what the measurement found.
+//
+// The link is what closes the loop. Applying a change without it leaves the
+// proposal recorded as pending forever, and a history of pending proposals
+// answers no question the next round asks.
+func (s *Store) ApplyChangeFor(ctx context.Context, projectID, proposalID string, round int, component string, change rrsi.Change) (AppliedChange, error) {
 	var applied AppliedChange
 	if err := change.Validate(component); err != nil {
 		return applied, err
@@ -66,11 +80,12 @@ func (s *Store) ApplyChange(ctx context.Context, projectID string, round int, co
 		return applied, err
 	}
 	applied = AppliedChange{ID: NewID("CHG"), ProjectID: projectID, Component: component,
-		Field: change.Field, From: current, To: change.To, Round: round, AppliedAt: time.Now().UTC()}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO applied_changes(id,project_id,component,field,from_value,to_value,round,applied_at,settled,reverted,outcome,settled_at)
-VALUES(?,?,?,?,?,?,?,?,0,0,'','')`,
+		Field: change.Field, From: current, To: change.To, ProposalID: proposalID,
+		Round: round, AppliedAt: time.Now().UTC()}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO applied_changes(id,project_id,component,field,from_value,to_value,proposal_id,round,applied_at,settled,reverted,outcome,settled_at)
+VALUES(?,?,?,?,?,?,?,?,?,0,0,'','')`,
 		applied.ID, applied.ProjectID, applied.Component, applied.Field, applied.From, applied.To,
-		applied.Round, applied.AppliedAt.Format(time.RFC3339Nano))
+		applied.ProposalID, applied.Round, applied.AppliedAt.Format(time.RFC3339Nano))
 	return applied, err
 }
 
@@ -97,13 +112,13 @@ FROM applied_changes WHERE project_id=? AND settled=0 ORDER BY applied_at DESC L
 // Reverting is not optional on a verdict that did not support the change. A
 // change left in place after failing to show an improvement is the
 // configuration drifting on its failures, one experiment at a time.
-func (s *Store) SettleChange(ctx context.Context, changeID, verdict, detail string) (AppliedChange, error) {
+func (s *Store) SettleChange(ctx context.Context, changeID string, settlement Settlement) (AppliedChange, error) {
 	var change AppliedChange
 	var appliedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,component,field,from_value,to_value,round,applied_at
+	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,component,field,from_value,to_value,proposal_id,round,applied_at
 FROM applied_changes WHERE id=? AND settled=0`, changeID).
 		Scan(&change.ID, &change.ProjectID, &change.Component, &change.Field, &change.From, &change.To,
-			&change.Round, &appliedAt)
+			&change.ProposalID, &change.Round, &appliedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return change, ErrNotFound
 	}
@@ -111,14 +126,15 @@ FROM applied_changes WHERE id=? AND settled=0`, changeID).
 		return change, err
 	}
 	change.AppliedAt, _ = time.Parse(time.RFC3339Nano, appliedAt)
-	keep := verdict == rrsi.VerdictBetter || verdict == rrsi.VerdictNoWorse
+	keep := settlement.Verdict == rrsi.VerdictBetter || settlement.Verdict == rrsi.VerdictNoWorse
 	if !keep {
 		if err = s.setSetting(ctx, change.ProjectID, change.Field, change.From); err != nil {
 			return change, err
 		}
 		change.Reverted = true
 	}
-	change.Settled, change.Outcome, change.SettledAt = true, verdict+": "+detail, time.Now().UTC()
+	change.Settled, change.SettledAt = true, time.Now().UTC()
+	change.Outcome = settlement.Verdict + ": " + settlement.Detail
 	reverted := 0
 	if change.Reverted {
 		reverted = 1
@@ -126,9 +142,28 @@ FROM applied_changes WHERE id=? AND settled=0`, changeID).
 	// The row is kept rather than deleted. The history is what stops the same
 	// change being proposed again, and a reverted change that left no trace is
 	// one the next round will cheerfully repeat.
-	_, err = s.db.ExecContext(ctx, `UPDATE applied_changes SET settled=1,reverted=?,outcome=?,settled_at=? WHERE id=?`,
-		reverted, change.Outcome, change.SettledAt.Format(time.RFC3339Nano), change.ID)
+	if _, err = s.db.ExecContext(ctx, `UPDATE applied_changes SET settled=1,reverted=?,outcome=?,settled_at=? WHERE id=?`,
+		reverted, change.Outcome, change.SettledAt.Format(time.RFC3339Nano), change.ID); err != nil {
+		return change, err
+	}
+	// And the proposal that asked for it learns what happened. A change kept
+	// is the hypothesis holding; a change put back is the hypothesis tested
+	// and found wanting, which is the only thing that keeps the next round
+	// from proposing it again.
+	err = s.settleProposal(ctx, change.ProposalID, rrsi.Record{Verdict: settlement.Verdict,
+		ScoreDelta: settlement.ScoreDelta, CostDelta: settlement.CostDelta,
+		Score: settlement.Score, Accepted: keep})
 	return change, err
+}
+
+// Settlement is what the measurement established about an applied change.
+//
+// The numbers travel with the verdict because they are what the next round
+// reads. A verdict on its own says the change was judged; the numbers say
+// whether the run is still improving or has stalled.
+type Settlement struct {
+	Verdict, Detail              string
+	Score, ScoreDelta, CostDelta float64
 }
 
 // AppliedChanges lists what automation has altered, newest first.

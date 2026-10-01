@@ -44,7 +44,7 @@ func TestAChangeThatDidNotHelpIsPutBack(t *testing.T) {
 	if project.WIPLimit != 3 {
 		t.Fatalf("the change must actually take effect: %d", project.WIPLimit)
 	}
-	settled, err := s.SettleChange(ctx, applied.ID, rrsi.VerdictNotShown, "성공률이 오르지 않았습니다")
+	settled, err := s.SettleChange(ctx, applied.ID, Settlement{Verdict: rrsi.VerdictNotShown, Detail: "성공률이 오르지 않았습니다"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestAChangeThatHelpedStays(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.SettleChange(ctx, applied.ID, rrsi.VerdictBetter, "성공률 12%p"); err != nil {
+	if _, err = s.SettleChange(ctx, applied.ID, Settlement{Verdict: rrsi.VerdictBetter, Detail: "성공률 12%p"}); err != nil {
 		t.Fatal(err)
 	}
 	project, err := s.ProjectByID(ctx, projectID)
@@ -102,7 +102,7 @@ func TestOnlyOneChangeIsOutstandingAtATime(t *testing.T) {
 		t.Fatalf("a second change before the first is judged must be refused: %v", err)
 	}
 	// Once the first is settled the next may go.
-	if _, err = s.SettleChange(ctx, applied.ID, rrsi.VerdictBetter, "ok"); err != nil {
+	if _, err = s.SettleChange(ctx, applied.ID, Settlement{Verdict: rrsi.VerdictBetter, Detail: "ok"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.ApplyChange(ctx, projectID, 2, "budget", change("daily_run_limit", "0", "50")); err != nil {

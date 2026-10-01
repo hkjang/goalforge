@@ -337,6 +337,21 @@ func configPropose(ctx context.Context, s *store.Store, args []string) error {
 	if rrsi.Passed(refusals) {
 		fmt.Printf("심사 통과 — 편집 %d개 (한도 %d) · 새 구조 구성 %d개\n",
 			len(edits), limit, history.NovelComponents(edits))
+		if *record {
+			// Recorded before it is measured, with no verdict. Only the
+			// settlement fills that in — and a proposal that was never
+			// recorded can never be settled, which is how the falsified set
+			// stayed empty while ideas were tried and dropped.
+			proposalID, recordErr := s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current,
+				Label: *label, Edits: edits})
+			if recordErr != nil {
+				return recordErr
+			}
+			fmt.Printf("이력에 남겼습니다: %s\n", proposalID)
+			fmt.Printf("`goalforge config apply --proposal %s` 로 적용하면 판정 결과가 이 제안에 기록됩니다\n",
+				proposalID)
+			return nil
+		}
 		fmt.Println("측정하고 `goalforge config judge` 로 판정하세요")
 		return nil
 	}
@@ -345,7 +360,7 @@ func configPropose(ctx context.Context, s *store.Store, args []string) error {
 		// Recorded without a measurement. It counts as having reached for
 		// those components and does not count as having falsified anything —
 		// a wall of refusals is a feedback loop, not a set of failures.
-		if err = s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current, Label: *label,
+		if _, err = s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current, Label: *label,
 			Edits: edits, ScreenRefusal: refusals[0].Kind}); err != nil {
 			return err
 		}
@@ -418,6 +433,7 @@ func configDraft(ctx context.Context, s *store.Store, args []string) error {
 	window := set.Int("window", 3, "정체를 판단할 회차 수")
 	repairs := set.Int("repairs", 2, "거절된 제안을 다시 쓰게 할 최대 횟수")
 	record := set.Bool("record", false, "결과를 이력에 남긴다")
+	apply := set.Bool("apply", false, "자동 적용 가능한 변경이 있으면 바로 적용한다 (이력 기록 포함)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -458,7 +474,7 @@ func configDraft(ctx context.Context, s *store.Store, args []string) error {
 		fmt.Printf("제안 %d회 시도했으나 심사를 통과하지 못했습니다:\n%s\n",
 			result.Attempts, rrsi.Explain(result.Refusals))
 		if *record && len(result.Edits) > 0 {
-			if err = s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current,
+			if _, err = s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current,
 				Edits: result.Edits, ScreenRefusal: result.Refusals[0].Kind}); err != nil {
 				return err
 			}
@@ -468,8 +484,68 @@ func configDraft(ctx context.Context, s *store.Store, args []string) error {
 	fmt.Printf("제안 (%d회 시도 · 새 구조 구성 %d개):\n", result.Attempts, history.NovelComponents(result.Edits))
 	for _, edit := range result.Edits {
 		fmt.Printf("  [%s] %s\n       %s\n", edit.Component, edit.Hypothesis, edit.Detail)
+		if edit.Applicable() {
+			fmt.Printf("       자동 적용 가능: %s → %s\n", edit.Change.Field, edit.Change.To)
+		}
 	}
-	fmt.Println("\n적용해 측정한 뒤 `goalforge config judge` 로 판정하고, 결과를 이력에 남기세요")
+	if !*record && !*apply {
+		fmt.Println("\n적용해 측정한 뒤 `goalforge config judge` 로 판정하고, 결과를 이력에 남기세요")
+		return nil
+	}
+	proposalID, err := s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current, Edits: result.Edits})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("\n이력에 남겼습니다: %s\n", proposalID)
+	if !*apply {
+		fmt.Printf("`goalforge config apply --proposal %s` 로 적용하면 판정 결과가 이 제안에 기록됩니다\n",
+			proposalID)
+		return nil
+	}
+	return applyProposedChange(ctx, s, project.ID, proposalID, current, result.Edits)
+}
+
+// applyProposedChange puts the one machine-applicable edit in a proposal into
+// effect, linked to the record it came from.
+//
+// One edit, not all of them. Two settings changed before either is measured
+// make the measurement unattributable — the store refuses the second anyway,
+// and refusing it here says why instead of failing halfway through.
+func applyProposedChange(ctx context.Context, s *store.Store, projectID, proposalID string, round int, edits []rrsi.Edit) error {
+	var applicable []rrsi.Edit
+	for _, edit := range edits {
+		if edit.Applicable() {
+			applicable = append(applicable, edit)
+		}
+	}
+	switch len(applicable) {
+	case 0:
+		fmt.Println("자동으로 적용할 수 있는 변경이 제안에 없습니다 — 직접 적용한 뒤 `config apply --proposal` 로 연결하세요")
+		return nil
+	case 1:
+	default:
+		return fmt.Errorf("자동 적용 가능한 변경이 %d개입니다 — 한 번에 하나만 측정할 수 있으니 `config apply --proposal %s` 로 하나를 고르세요",
+			len(applicable), proposalID)
+	}
+	edit := applicable[0]
+	// The component comes from the field, not from what the proposer filed it
+	// under. A change attributed to the wrong component is remembered against
+	// the wrong component, and the history is built from that attribution.
+	component, ok := rrsi.ComponentFor(edit.Change.Field)
+	if !ok {
+		return fmt.Errorf("%q 는 자동으로 바꿀 수 있는 설정이 아닙니다", edit.Change.Field)
+	}
+	current, err := s.CurrentSettingValue(ctx, projectID, edit.Change.Field)
+	if err != nil {
+		return err
+	}
+	applied, err := s.ApplyChangeFor(ctx, projectID, proposalID, round, component,
+		rrsi.Change{Field: edit.Change.Field, From: current, To: edit.Change.To})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("적용: %s %s → %s (%s)\n", applied.Field, applied.From, applied.To, applied.ID)
+	fmt.Println("측정한 뒤 `goalforge config settle` 로 판정하세요 — 판정이 이 제안의 가설을 확정하거나 반증합니다")
 	return nil
 }
 
@@ -498,6 +574,7 @@ func configApply(ctx context.Context, s *store.Store, args []string) error {
 	set := flag.NewFlagSet("config apply", flag.ContinueOnError)
 	field := set.String("field", "", "바꿀 설정: "+strings.Join(rrsi.ApplicableFields(), ", "))
 	to := set.String("to", "", "새 값")
+	proposal := set.String("proposal", "", "이 변경을 제안한 이력 ID — 판정 결과가 그 제안에 기록된다")
 	round := set.Int("round", -1, "이번 회차")
 	if err := set.Parse(args); err != nil {
 		return err
@@ -519,7 +596,7 @@ func configApply(ctx context.Context, s *store.Store, args []string) error {
 	if current0 < 0 {
 		current0 = nextRound(history)
 	}
-	applied, err := s.ApplyChange(ctx, project.ID, current0, component,
+	applied, err := s.ApplyChangeFor(ctx, project.ID, *proposal, current0, component,
 		rrsi.Change{Field: *field, From: current, To: *to})
 	if err != nil {
 		return err
@@ -565,13 +642,18 @@ func configSettle(ctx context.Context, s *store.Store, args []string) error {
 		}
 	}
 	decision := rrsi.Judge(incumbent, candidate, best, policy)
-	settled, err := s.SettleChange(ctx, outstanding.ID, decision.Verdict, decision.Reason)
+	settled, err := s.SettleChange(ctx, outstanding.ID, store.Settlement{Verdict: decision.Verdict,
+		Detail: decision.Reason, Score: candidate.Score, ScoreDelta: decision.ScoreDelta,
+		CostDelta: decision.CostDelta})
 	if err != nil {
 		return err
 	}
 	fmt.Printf("%s %s: %s → %s\n", verdictMark(decision.Verdict), decision.Verdict,
 		settled.From, settled.To)
 	fmt.Printf("   %s\n", decision.Reason)
+	if settled.ProposalID != "" {
+		fmt.Printf("   제안 %s 에 기록했습니다\n", settled.ProposalID)
+	}
 	if settled.Reverted {
 		fmt.Printf("되돌렸습니다: %s 를 %s 로\n", settled.Field, settled.From)
 		return nil
