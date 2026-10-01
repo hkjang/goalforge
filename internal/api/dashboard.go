@@ -35,6 +35,10 @@ section.panel h2{font-size:15px;margin:0 0 10px;color:var(--muted);font-weight:5
 .bmeta{font-size:11px;opacity:.75;margin-top:3px;display:flex;flex-wrap:wrap;gap:6px}
 .bblock{font-size:11px;color:var(--warn);margin-top:3px}
 .bdel{margin-top:4px}
+.std td:first-child{white-space:nowrap;font-family:ui-monospace,monospace}
+.std tr.gap td{background:rgba(220,38,38,.07)}
+.std tr.unknown td{opacity:.72}
+.prop{border-left:3px solid var(--warn);padding:8px 10px;margin:8px 0;background:var(--card)}
 .col{background:var(--card);border-radius:10px;padding:10px}.col h3{font-size:12px;color:var(--muted);margin:0 0 8px;font-weight:500}
 .item{background:#182242;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12px;margin-bottom:6px}.item small{color:var(--muted)}
 table{width:100%;font-size:12.5px;border-collapse:collapse}th{color:var(--muted);font-weight:400;text-align:left;padding:4px 8px 4px 0}td{padding:6px 8px 6px 0;border-top:1px solid #1e2946;vertical-align:top}
@@ -166,7 +170,7 @@ list.forEach(function(r){html+='<tr><td><span class="badge unmet">'+esc(relaxati
 return html+'</table></section>'}
 function shortSHA(v){return esc(String(v||'').slice(0,12))}
 function fmtUSD(v){return '$'+(v||0).toFixed(v&&v<1?4:2)}
-function tabsHTML(projectID,active){var tabs=[['overview','개요'],['board','보드'],['plan','계획'],['runs','실행'],['verify','검증'],['cost','비용']];var html='<div class="tabs">';tabs.forEach(function(t){var href='#/project/'+encodeURIComponent(projectID)+(t[0]==='overview'?'':'/tab/'+t[0]);html+='<a class="'+(active===t[0]?'on':'')+'" href="'+href+'">'+t[1]+'</a>'});return html+'</div>'}
+function tabsHTML(projectID,active){var tabs=[['overview','개요'],['board','보드'],['standards','기준'],['plan','계획'],['runs','실행'],['verify','검증'],['cost','비용']];var html='<div class="tabs">';tabs.forEach(function(t){var href='#/project/'+encodeURIComponent(projectID)+(t[0]==='overview'?'':'/tab/'+t[0]);html+='<a class="'+(active===t[0]?'on':'')+'" href="'+href+'">'+t[1]+'</a>'});return html+'</div>'}
 // diffHTML colours a patch by line kind. The patch is escaped first: it is
 // untrusted repository content being rendered into the page.
 function diffHTML(text){var out='';String(text).split('\n').forEach(function(line){var cls='';if(line.indexOf('+++')===0||line.indexOf('---')===0||line.indexOf('diff --git')===0||line.indexOf('index ')===0)cls='meta';else if(line.indexOf('@@')===0)cls='hunk';else if(line.charAt(0)==='+')cls='add';else if(line.charAt(0)==='-')cls='del';out+='<i class="'+cls+'">'+esc(line||' ')+'</i>'});return'<pre class="diff">'+out+'</pre>'}
@@ -354,6 +358,103 @@ deliveryRow(c)+
 function deliveryRow(c){var d=c.delivery||{};if(!d.state)return'';
 var cls=d.blocking?'unmet':(d.state==='RELEASABLE'?'met':'');
 return'<div class="bdel"><span class="badge '+cls+'" title="'+esc(d.detail||'')+'">'+esc(d.label)+'</span></div>'}
+// The standards screen. Everything about the criteria programme lived in the
+// terminal until now, which is the wrong place for it: the worker runs the
+// loop unattended, and the one thing an unattended loop needs is somewhere to
+// look at what it did.
+function standardsTab(){return'<section class="panel" id="stdwrap"><h2>기준 현황</h2>'+
+'<div class="sub">불러오는 중…</div></section>'+
+'<section class="panel" id="fleetwrap"><h2>프로젝트 비교</h2><div class="sub">불러오는 중…</div></section>'+
+'<section class="panel" id="patwrap"><h2>패턴 보관함</h2><div class="sub">불러오는 중…</div></section>'}
+
+async function loadStandards(projectID){
+var d=await api('/api/v1/projects/'+encodeURIComponent(projectID)+'/standards');
+document.querySelector('#stdwrap').innerHTML=renderStandards(d);
+var f=await api('/api/v1/fleet');
+document.querySelector('#fleetwrap').innerHTML=renderFleet(f);
+var p=await api('/api/v1/patterns');
+document.querySelector('#patwrap').innerHTML=renderPatterns(p.patterns||[])}
+
+function renderStandards(d){
+if(!d.enrolled)return'<h2>기준 현황</h2><div class="attn">이 프로젝트는 공통 개발팩을 고정하지 않았습니다.'+
+'<div class="sub" style="margin-top:2px">goalforge standards profile 로 적용할 팩을 정하세요. 표가 비어 있는 것과 문제가 없는 것은 다릅니다.</div></div>';
+var c=d.counts||{};
+var html='<h2>기준 현황 <span class="pill">'+esc(d.pack_ref)+'</span></h2>';
+if(d.drifted)html+='<div class="attn">고정한 팩의 내용이 바뀌었습니다 — 동의한 적 없는 기준으로 판정되고 있을 수 있습니다</div>';
+html+='<div class="sub" style="margin:6px 0">적용 '+(d.criteria||[]).length+'건 · 충족 '+(c.MET||0)+
+' · 미충족 '+(c.UNMET||0)+' · 일부 '+(c.PARTIAL||0)+' · 미확인 '+(c.UNKNOWN||0)+' · 적용 제외 '+(c.NOT_APPLICABLE||0)+
+(d.out_of_profile&&d.out_of_profile.length?' · 이 프로젝트에 해당 없음 '+d.out_of_profile.length:'')+'</div>';
+// Unmet first, then partial, then unknown: what needs doing is why the reader
+// opened this. A list in catalogue order makes them scan for it.
+var order={UNMET:0,PARTIAL:1,UNKNOWN:2,MET:3,NOT_APPLICABLE:4};
+var rows=(d.criteria||[]).slice().sort(function(a,b){return (order[a.result]??9)-(order[b.result]??9)});
+html+='<table class="std"><tr><th>기준</th><th>등급</th><th>상태</th><th>제목</th><th>사유</th></tr>';
+rows.forEach(function(r){
+var cls=r.result==='UNMET'?'gap':(r.result==='UNKNOWN'?'unknown':'');
+html+='<tr class="'+cls+'"><td>'+esc(r.standard_id)+'</td><td class="sub">'+esc(r.severity)+'</td>'+
+'<td>'+stdBadge(r.result)+(r.stale?' <span class="pill">재평가 필요</span>':'')+'</td>'+
+'<td>'+esc(r.title)+'</td><td class="sub">'+esc(r.detail||'')+'</td></tr>'});
+html+='</table>';
+if(d.exceptions&&d.exceptions.length){
+// An excused criterion and a met one look the same in a count and mean
+// completely different things, so who decided is shown beside it.
+html+='<h2 style="margin-top:14px">적용 제외 '+d.exceptions.length+'건</h2><table class="std">'+
+'<tr><th>기준</th><th>사유</th><th>결정자</th><th>재검토</th></tr>';
+d.exceptions.forEach(function(e){
+html+='<tr><td>'+esc(e.standard_id)+'</td><td>'+esc(e.reason)+'</td><td class="sub">'+esc(e.decider)+'</td>'+
+'<td class="sub">'+esc(e.review_when||(e.review_by&&e.review_by.slice(0,10))||'조건 없음')+'</td></tr>'});
+html+='</table>'}
+return html}
+
+function stdBadge(result){
+if(result==='MET')return'<span class="badge met">충족</span>';
+if(result==='UNMET')return'<span class="badge unmet">미충족</span>';
+if(result==='PARTIAL')return'<span class="badge">일부</span>';
+if(result==='NOT_APPLICABLE')return'<span class="pill">적용 제외</span>';
+return'<span class="pill">미확인</span>'}
+
+function renderFleet(f){
+if(!f.projects||!f.projects.length)return'<h2>프로젝트 비교</h2><div class="sub">이 팩을 적용한 프로젝트가 없습니다</div>';
+var html='<h2>프로젝트 비교 <span class="pill">'+esc(f.pack_ref)+'</span></h2>'+
+'<div class="sub" style="margin:4px 0 8px">프로젝트 '+f.projects.length+'개: '+esc(f.projects.join(', '))+'</div>';
+// Weakest first, and required weighted double: the reader came to find where
+// the fleet is thin.
+var rows=(f.criteria||[]).slice().sort(function(a,b){return fleetGap(b)-fleetGap(a)});
+html+='<table class="std"><tr><th>기준</th><th>등급</th><th>적용</th><th>충족</th><th>미충족</th><th>미확인</th><th>제외</th><th>제목</th></tr>';
+rows.forEach(function(c){
+html+='<tr class="'+(c.unmet?'gap':'')+'"><td>'+esc(c.standard_id)+'</td><td class="sub">'+esc(c.severity)+'</td>'+
+'<td>'+c.applicable+'</td><td>'+c.met+'</td><td>'+c.unmet+'</td><td>'+c.unknown+'</td><td>'+c.excepted+'</td>'+
+'<td>'+esc(c.title)+'</td></tr>'});
+html+='</table>';
+if(f.proposals&&f.proposals.length){
+html+='<h2 style="margin-top:14px">팩을 다시 볼 신호 '+f.proposals.length+'건</h2>'+
+'<div class="sub">이 항목들은 프로젝트가 아니라 기준 쪽이 문제일 수 있습니다</div>';
+f.proposals.forEach(function(p){
+html+='<div class="prop"><strong>'+esc(p.standard_id)+'</strong> '+esc(p.title)+
+'<div class="sub" style="margin-top:3px">'+esc(p.evidence)+'</div>'+
+'<div style="margin-top:3px">→ '+esc(p.change)+'</div></div>'})}
+return html}
+
+function fleetGap(c){var w=c.unmet*3+c.unknown;return c.severity==='required'?w*2:w}
+
+function renderPatterns(list){
+if(!list.length)return'<h2>패턴 보관함</h2><div class="sub">보관된 패턴이 없습니다</div>';
+var html='<h2>패턴 보관함 '+list.length+'건</h2><table class="std">'+
+'<tr><th>패턴</th><th>기준</th><th>상태</th><th>문제와 해법</th><th>근거</th></tr>';
+list.forEach(function(p){
+var e=p.evidence||{};
+// The mark says whether the archive is recommending this, whether it is only
+// eligible, or whether it stopped working. A list that showed them alike
+// would have people adopting a retired pattern.
+var mark=p.status==='RETIRED'?'<span class="badge unmet">철회</span>':
+ (p.status==='APPROVED'?'<span class="badge met">권고</span>':
+ (e.projects>=2&&e.recent_failures<3?'<span class="badge">승격 가능</span>':'<span class="pill">후보</span>'));
+html+='<tr><td>'+esc(p.id)+'</td><td>'+esc(p.standard_id)+'</td><td>'+mark+'</td>'+
+'<td>'+esc(p.problem)+'<div class="sub" style="margin-top:2px">'+esc(p.approach)+'</div></td>'+
+'<td class="sub">프로젝트 '+(e.projects||0)+'개 · 성공 '+(e.passed||0)+' · 실패 '+(e.failed||0)+
+(e.recent_failures>=3?' <span class="badge unmet">연속 실패 '+e.recent_failures+'</span>':'')+'</td></tr>'});
+return html+'</table>'}
+
 function findCard(id){var found=null;((boardState.board||{}).columns||[]).forEach(function(col){(col.cards||[]).forEach(function(c){if(c.item.ID===id)found=c})});return found}
 // Dragging highlights only the columns the server would accept, and marks the
 // rest with the reason it would give, so a drop never lands and then bounces.
@@ -482,6 +583,7 @@ status.className='sub';status.textContent='';
 document.querySelector('#crumb').innerHTML='<a class="sub" href="#">프로젝트</a> / '+esc(p.Name);
 tab=tab||'overview';var live=null;var body='';
 if(tab==='board')body=boardTab(d);
+else if(tab==='standards')body=standardsTab();
 else if(tab==='plan')body=planTab(d);
 else if(tab==='runs')body=runsTab(d);
 else if(tab==='verify')body=verifyTab(d);
@@ -490,6 +592,7 @@ else{var o=overviewTab(d);body=o.html;live=o.live}
 view.innerHTML=goalHead(d,tab)+body;countdown();
 if(tab==='plan'){loadPlan();loadDecisions()}
 if(tab==='board')loadBoard();
+if(tab==='standards')loadStandards(p.ID);
 if(live)startLive(p.ID,live)}
 // renderWork is the work item as an executable specification rather than a
 // title: why it exists, what "done" means, what blocks it, and every attempt.
