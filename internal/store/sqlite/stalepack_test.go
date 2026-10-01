@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,5 +170,41 @@ func TestAPackEditedInPlaceIsDrift(t *testing.T) {
 	}
 	if !drifted {
 		t.Fatal("the project agreed to different content")
+	}
+}
+
+// The board has to tell the two apart: a criterion nobody has assessed needs a
+// check run, and one whose waiver aged out needs somebody to decide whether the
+// waiver still holds. Both were reported as "아직 확인하지 않았습니다".
+func TestACriterionWhoseExceptionLapsedSaysSo(t *testing.T) {
+	s, _ := staleFixture(t)
+	ctx := t.Context()
+	pack := packWith(1)
+	decided := time.Now().AddDate(-2, 0, 0)
+	profile := standards.Profile{ProjectID: "PRJ-1", PackRef: pack.Ref(),
+		Exceptions: []standards.Exception{{StandardID: "T-001", Reason: "내부 레지스트리 반입 전",
+			Decider: "hkjang", ReviewWhen: "반입 완료 시", DecidedAt: decided}}}
+	if err := s.SaveStandardProfile(ctx, profile, pack); err != nil {
+		t.Fatal(err)
+	}
+	views, err := s.AssessmentsFor(ctx, "PRJ-1", pack, profile, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("views=%+v", views)
+	}
+	view := views[0]
+	if view.Result != standards.ResultUnknown {
+		t.Fatalf("the waiver lapsed, so nothing is settled: %q", view.Result)
+	}
+	// The condition somebody has to check, and who decided it, both travel.
+	for _, want := range []string{"반입 완료 시", "hkjang"} {
+		if !strings.Contains(view.Detail, want) {
+			t.Fatalf("detail must carry %q: %q", want, view.Detail)
+		}
+	}
+	if strings.Contains(view.Detail, "아직 확인하지 않았습니다") {
+		t.Fatalf("this is not an unassessed criterion: %q", view.Detail)
 	}
 }
