@@ -244,3 +244,106 @@ func main(){ os.Getenv("REDIS_URL") }`},
 		}
 	}
 }
+
+// A detector that only looks where it expects to find things reports an
+// absence it did not establish. The platform matrix of this very repository
+// lives in a script the workflow calls, and a detector reading only the
+// workflow reported a project building six platforms as building none.
+func TestTheReleaseDetectorLooksWhereTheMatrixActuallyLives(t *testing.T) {
+	// Workflow calls a script; the script holds the matrix.
+	split := MemoryTree{
+		".github/workflows/release.yml": "on:\n  push:\n    tags: ['v*']\njobs:\n  publish:\n    steps:\n      - run: ./scripts/build-release.sh\n",
+		"scripts/build-release.sh":      "for GOOS in linux darwin windows; do GOARCH=amd64 go build; done\nsha256sum * > SHA256SUMS\n",
+	}
+	finding, err := releaseMatrixDetector{}.Detect(split)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Result == standards.ResultUnmet {
+		t.Fatalf("the matrix is in the script the workflow calls: %+v", finding)
+	}
+	// A project that genuinely builds one platform is still found.
+	single := MemoryTree{
+		".github/workflows/release.yml": "jobs:\n  publish:\n    steps:\n      - run: go build -o out\n",
+	}
+	finding, err = releaseMatrixDetector{}.Detect(single)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Result != standards.ResultUnmet {
+		t.Fatalf("one platform and no checksums is a real gap: %+v", finding)
+	}
+	if !strings.Contains(finding.Detail, "GOOS") || !strings.Contains(finding.Detail, "체크섬") {
+		t.Fatalf("the finding must name both: %q", finding.Detail)
+	}
+	// No workflow at all is a different finding from an incomplete one.
+	none, err := releaseMatrixDetector{}.Detect(MemoryTree{"go.mod": "module x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none.DefectKind != "no_release_workflow" {
+		t.Fatalf("finding=%+v", none)
+	}
+}
+
+// A workflow that runs on a tag checks the release, which is after the
+// decision. Only one that runs on a pull request gates a change.
+func TestOnlyAWorkflowOnPullRequestsGatesAChange(t *testing.T) {
+	tagOnly := MemoryTree{".github/workflows/release.yml": "on:\n  push:\n    tags: ['v*']\njobs:\n  t:\n    steps:\n      - run: go test ./... && go vet ./... && gofmt -l .\n"}
+	finding, err := ciGateDetector{}.Detect(tagOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Result != standards.ResultUnmet {
+		t.Fatalf("a tag workflow does not gate a change: %+v", finding)
+	}
+	onPR := MemoryTree{".github/workflows/ci.yml": "on:\n  pull_request:\njobs:\n  t:\n    steps:\n      - run: go test ./...\n      - run: go vet ./...\n      - run: gofmt -l .\n"}
+	finding, err = ciGateDetector{}.Detect(onPR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Result == standards.ResultUnmet {
+		t.Fatalf("finding=%+v", finding)
+	}
+	// A pull-request workflow missing one of the three names which.
+	partial := MemoryTree{".github/workflows/ci.yml": "on:\n  pull_request:\njobs:\n  t:\n    steps:\n      - run: go test ./...\n"}
+	finding, err = ciGateDetector{}.Detect(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Result != standards.ResultUnmet || !strings.Contains(finding.Detail, "vet") {
+		t.Fatalf("finding=%+v", finding)
+	}
+}
+
+// A replace pointing outside the module makes the build depend on a path that
+// is not in the repository, so the same commit does not build the same way
+// somewhere else.
+func TestAReplaceOutsideTheModuleIsFound(t *testing.T) {
+	outside := MemoryTree{"go.mod": "module example.com/x\n\ngo 1.24\n\nreplace example.com/dep => ../dep\n"}
+	finding, err := modulePinDetector{}.Detect(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Result != standards.ResultUnmet || finding.DefectKind != "replace_outside_module" {
+		t.Fatalf("finding=%+v", finding)
+	}
+	// A replace within the module is how a multi-module repository works.
+	inside := MemoryTree{"go.mod": "module example.com/x\n\ngo 1.24\n\nreplace example.com/dep => ./dep\n"}
+	finding, err = modulePinDetector{}.Detect(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.Result == standards.ResultUnmet {
+		t.Fatalf("a replace inside the repository is fine: %+v", finding)
+	}
+	// No go directive leaves the toolchain unpinned.
+	loose := MemoryTree{"go.mod": "module example.com/x\n"}
+	finding, err = modulePinDetector{}.Detect(loose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finding.DefectKind != "no_go_directive" {
+		t.Fatalf("finding=%+v", finding)
+	}
+}

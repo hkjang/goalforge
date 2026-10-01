@@ -167,12 +167,6 @@ func tickProject(ctx context.Context, db *store.Store, projectID, name, reposito
 //
 // There is one shipped pack; a profile naming anything else is refused rather
 // than silently measured against whatever happens to be compiled in.
-func packFor(ref string) (standards.Pack, error) {
-	shipped := standards.GoReactOfflineService()
-	if ref == "" || ref == shipped.Ref() {
-		return shipped, nil
-	}
-	return standards.Pack{}, fmt.Errorf("%q 팩을 알지 못합니다 — 현재 제공되는 것은 %s 입니다", ref, shipped.Ref())
-}
+func packFor(ref string) (standards.Pack, error) { return standards.ByRef(ref) }
 
 var _ = time.Now

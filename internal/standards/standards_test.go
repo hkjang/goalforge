@@ -445,3 +445,96 @@ func TestRequiredCriteriaWithNoConditionApplyToAnyProject(t *testing.T) {
 		}
 	}
 }
+
+// A catalogue that describes the wrong shape of project does not merely say
+// nothing useful; it teaches the operator to read past the report. The
+// registry exists so a project's shape decides which catalogue describes it.
+func TestTheRegistryResolvesAndRefuses(t *testing.T) {
+	packs := Shipped()
+	if len(packs) < 2 {
+		t.Fatalf("this build carries %d packs", len(packs))
+	}
+	seen := map[string]bool{}
+	for _, pack := range packs {
+		if err := pack.Validate(); err != nil {
+			t.Fatalf("%s: %v", pack.Ref(), err)
+		}
+		if seen[pack.Ref()] {
+			t.Fatalf("%s appears twice", pack.Ref())
+		}
+		seen[pack.Ref()] = true
+	}
+	if _, err := ByRef("go-cli-tool@0.1"); err != nil {
+		t.Fatal(err)
+	}
+	// A reference this build does not carry is refused rather than silently
+	// answered with whatever is compiled in: a project pinned to a catalogue
+	// nobody has would be measured against a different one and told it was
+	// the one it chose.
+	// The version is part of the reference. Resolving go-cli-tool@9.9 to 0.1
+	// would measure a project against criteria it never agreed to while its
+	// profile still named a version this build does not carry.
+	err := ByRef2(t, "go-cli-tool@9.9")
+	if err == nil {
+		t.Fatal("an unknown version must be refused")
+	}
+	if err = ByRef2(t, "go-cli-tool"); err == nil {
+		t.Fatal("a reference with no version is not a pinned reference")
+	}
+	if !strings.Contains(err.Error(), "go-cli-tool@0.1") {
+		t.Fatalf("the refusal must list what is available: %v", err)
+	}
+}
+
+func ByRef2(t *testing.T, ref string) error {
+	t.Helper()
+	_, err := ByRef(ref)
+	return err
+}
+
+// A command-line tool gets the command-line catalogue, and a web service gets
+// the web service one.
+func TestTheSuggestedPackFitsTheProject(t *testing.T) {
+	cli, ok := Suggest(map[string]string{"deployment": "cli", "frontend": "none", "release": "binaries"})
+	if !ok || cli.ID != "go-cli-tool" {
+		t.Fatalf("a CLI gets the CLI pack: %s %v", cli.Ref(), ok)
+	}
+	service, ok := Suggest(map[string]string{"deployment": "service", "frontend": "react", "network": "offline"})
+	if !ok || service.ID != "go-react-offline-service" {
+		t.Fatalf("a web service gets the service pack: %s %v", service.Ref(), ok)
+	}
+	// A project that declared nothing has said nothing to suggest from, and a
+	// catalogue chosen on no evidence is one nobody can reconstruct the reason
+	// for. Only conditional criteria count, so the catalogue with more
+	// unconditional ones cannot win on size.
+	if _, ok = Suggest(nil); ok {
+		t.Fatal("nothing declared is nothing to suggest from")
+	}
+	if _, ok = Suggest(map[string]string{"language": "go"}); ok {
+		t.Fatal("an attribute no criterion asks about distinguishes nothing")
+	}
+}
+
+// The CLI pack is held to the same rules as any other catalogue, and its
+// required criteria ask for evidence that comes from running something.
+func TestTheCommandLinePackIsJudgeable(t *testing.T) {
+	pack := GoCommandLineTool()
+	if err := pack.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, standard := range pack.Standards {
+		if standard.Severity != SeverityRequired {
+			continue
+		}
+		executed := false
+		for _, kind := range standard.EvidenceRequired {
+			if ExecutedEvidence(kind) {
+				executed = true
+			}
+		}
+		if !executed {
+			t.Fatalf("%s is required but asks for no executed evidence: %v",
+				standard.ID, standard.EvidenceRequired)
+		}
+	}
+}

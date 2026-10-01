@@ -44,14 +44,13 @@ func (s *Server) handleStandards(w http.ResponseWriter, r *http.Request, project
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	pack := standards.GoReactOfflineService()
-	if profile.PackRef != pack.Ref() {
+	pack, err := standards.ByRef(profile.PackRef)
+	if err != nil {
 		// Pinned to a catalogue this build does not carry. Saying so is the
 		// difference between an empty screen and a screen that explains
 		// itself.
 		writeJSON(w, http.StatusOK, StandardsView{Enrolled: true, PackRef: profile.PackRef,
-			Criteria: []store.AssessmentView{}, Counts: map[string]int{},
-			Drifted: true})
+			Criteria: []store.AssessmentView{}, Counts: map[string]int{}, Drifted: true})
 		return
 	}
 	now := time.Now()
@@ -91,8 +90,16 @@ type FleetView struct {
 	Proposals []store.PackProposal `json:"proposals"`
 }
 
+// handleFleet reports one pack across its projects. The pack is a query
+// parameter because a fleet is per catalogue: projects on different packs are
+// not comparable, and folding them together would average two different
+// questions.
 func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
-	pack := standards.GoReactOfflineService()
+	pack, err := standards.ByRef(r.URL.Query().Get("pack"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	now := time.Now()
 	report, err := s.store.Fleet(r.Context(), pack, now)
 	if err != nil {
