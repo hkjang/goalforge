@@ -92,6 +92,26 @@ func tickProject(ctx context.Context, db *store.Store, projectID, name, reposito
 		tick.Err = err
 		return tick
 	}
+	// Drift is checked here and not only on the screens that display it. A
+	// pack edited in place keeps its id@version, so it resolves by ref and no
+	// revision bump marks anything stale — the project is simply judged by
+	// criteria it never agreed to, and an unattended sweep is the one place
+	// nobody would notice.
+	//
+	// Asked of the store rather than compared here. The rule about what counts
+	// as drift — including that a project enrolled before checksums were
+	// recorded has not drifted — lives in one place, and a second copy of it
+	// is two rules waiting to disagree.
+	drifted, err := db.PackDrift(ctx, projectID, pack)
+	if err != nil {
+		tick.Err = err
+		return tick
+	}
+	if drifted {
+		tick.Err = fmt.Errorf("고정한 팩 %s 의 체크섬이 다릅니다 — 이 빌드의 팩은 프로젝트가 동의한 것이 아닙니다. `goalforge standards profile --pack %s` 로 다시 고정하세요",
+			profile.PackRef, profile.PackRef)
+		return tick
+	}
 	head, err := gitops.HeadCommit(ctx, repository, branch)
 	if err != nil {
 		tick.Err = fmt.Errorf("저장소를 읽지 못했습니다: %w", err)
