@@ -80,6 +80,24 @@ func standardsProfile(ctx context.Context, s *store.Store, args []string) error 
 		}
 		pack = suggested
 	}
+	// What a repin changed, before it is saved. A pack swapped silently leaves
+	// the operator to find out from the board that the catalogue moved, and
+	// the revised criteria are exactly the ones whose assessments just went
+	// back to unknown.
+	if existing.PackRef != "" && existing.PackRef != pack.Ref() {
+		previous, prevErr := packByRef(existing.PackRef)
+		if prevErr != nil {
+			return fmt.Errorf("이전 팩 %s 를 읽지 못해 무엇이 달라졌는지 말할 수 없습니다: %w",
+				existing.PackRef, prevErr)
+		}
+		diff := standards.DiffPacks(previous, pack)
+		fmt.Printf("팩 교체: %s → %s\n", existing.PackRef, pack.Ref())
+		if diff.Empty() {
+			fmt.Println("  요구하는 것은 같습니다")
+		} else {
+			reportPackDiff(diff)
+		}
+	}
 	profile.PackRef = pack.Ref()
 	if err = s.SaveStandardProfile(ctx, profile, pack); err != nil {
 		return err
@@ -88,6 +106,24 @@ func standardsProfile(ctx context.Context, s *store.Store, args []string) error 
 	fmt.Printf("적용: %s — 기준 %d개 중 %d개가 이 프로젝트에 적용됩니다\n",
 		pack.Ref(), len(pack.Standards), len(inForce))
 	return nil
+}
+
+// reportPackDiff says what a pack swap changed, in the three terms a project
+// has to decide about.
+func reportPackDiff(diff standards.Diff) {
+	if len(diff.Added) > 0 {
+		fmt.Printf("  추가 %d건: %s\n", len(diff.Added), strings.Join(diff.Added, ", "))
+	}
+	if len(diff.Removed) > 0 {
+		fmt.Printf("  삭제 %d건: %s\n", len(diff.Removed), strings.Join(diff.Removed, ", "))
+	}
+	if len(diff.Revised) > 0 {
+		// Called out as work, not as news. An assessment made against the old
+		// text settles nothing against the new one, so these went back to
+		// unknown the moment the pack changed.
+		fmt.Printf("  개정 %d건 — 기존 판정이 무효가 되어 재평가가 필요합니다: %s\n",
+			len(diff.Revised), strings.Join(diff.Revised, ", "))
+	}
 }
 
 // standardsExcept records a decision not to apply a criterion.
@@ -176,7 +212,10 @@ func standardsStatus(ctx context.Context, s *store.Store) error {
 		mark := resultMark(view.Result)
 		stale := ""
 		if view.Stale {
-			stale = " (기준 개정 이후 재평가 필요)"
+			// The prior result is named. "needs re-assessment" alone cannot be
+			// told apart from a criterion nobody ever looked at, and the two
+			// call for different amounts of worry.
+			stale = fmt.Sprintf(" (기준 개정 — 이전 판정 %s, 재평가 필요)", view.PriorResult)
 		}
 		fmt.Printf("%s  %-10s %-8s %s%s\n", mark, view.StandardID, view.Severity, view.Title, stale)
 		if view.Detail != "" {
