@@ -172,16 +172,23 @@ goalforge config judge [--incumbent L]      # is a configuration change an impro
                    # the fewest chances to fail. Nothing is judged before the band is measured.
 goalforge config selection [--free-cost F] [--cost-per-gain G] [--min-trials N]
 goalforge config direction                  # what the search should try next
-goalforge config draft [--repairs 2]        # ask the provider for the next change
+goalforge config draft [--repairs 2] [--record] [--apply]  # ask the provider for the next change
                    # The proposer is a model, so what it writes is the product of what it is
                    # shown: the edits already tried with their measured outcomes, the
                    # explanations that did not hold, this round's budget. The hypothesis is
                    # required by the schema rather than asked for in prose, and a refused
                    # draft goes back with the objections — a proposer told only that it failed
-                   # writes a variation of the same thing.
-goalforge config apply --field wip_limit --to 3     # alter a setting, recording what it replaced
+                   # writes a variation of the same thing. A draft may carry the setting and
+                   # value to change, and --apply puts it into effect linked to its record,
+                   # so nobody retypes the field into another command.
+goalforge config apply --field wip_limit --to 3 [--proposal PRP-…]
+                   # alter a setting, recording what it replaced and which proposal asked
 goalforge config settle --incumbent L --candidate L # judge it, and put it back if it did not help
 goalforge config changes                            # what automation has altered
+                   # Settling writes the verdict back onto the proposal that asked for the
+                   # change, which is what fills the falsified set. Without that every record
+                   # stays unjudged and the search redraws ideas it has already tested. A
+                   # proposal applied and not yet judged counts as neither held nor refuted.
                    # Applying is only meaningful paired with reverting: a change applied and
                    # never judged is worse than no change, and one left in place after failing
                    # is the configuration drifting on its failures. Only enumerated settings

@@ -91,23 +91,48 @@ WHERE condition_hash=? AND status IN ('PASSED','FAILED') ORDER BY case_id,repeti
 // The record is written to be read: it is what stops the search re-drawing an
 // explanation it has already falsified. A history nobody consults is the same
 // as no history, and the run spends its rounds rediscovering what it knew.
-func (s *Store) RecordProposal(ctx context.Context, projectID string, record rrsi.Record) error {
+func (s *Store) RecordProposal(ctx context.Context, projectID string, record rrsi.Record) (string, error) {
 	if projectID == "" || len(record.Edits) == 0 {
-		return errors.New("project and at least one edit are required")
+		return "", errors.New("project and at least one edit are required")
 	}
 	edits, err := json.Marshal(record.Edits)
 	if err != nil {
-		return err
+		return "", err
 	}
 	accepted := 0
 	if record.Accepted {
 		accepted = 1
 	}
+	id := NewID("PRP")
 	_, err = s.db.ExecContext(ctx, `INSERT INTO config_proposals(id,project_id,round,label,edits,verdict,score_delta,cost_delta,score,accepted,screen_refusal,created_at)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		NewID("PRP"), projectID, record.Round, record.Label, string(edits), record.Verdict,
+		id, projectID, record.Round, record.Label, string(edits), record.Verdict,
 		record.ScoreDelta, record.CostDelta, record.Score, accepted, record.ScreenRefusal,
 		time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// settleProposal writes what the measurement established back onto a recorded
+// proposal.
+//
+// This is the step that was missing. A proposal was recorded when it was
+// drafted and never again, so every record sat verdict-less forever: the
+// falsified set was empty, the score trajectory was empty, and the proposer
+// was free to draw the same explanation every round until the budget ran out.
+func (s *Store) settleProposal(ctx context.Context, proposalID string, record rrsi.Record) error {
+	if proposalID == "" {
+		return nil
+	}
+	accepted := 0
+	if record.Accepted {
+		accepted = 1
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE config_proposals
+SET verdict=?,score_delta=?,cost_delta=?,score=?,accepted=? WHERE id=?`,
+		record.Verdict, record.ScoreDelta, record.CostDelta, record.Score, accepted, proposalID)
 	return err
 }
 

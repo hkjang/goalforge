@@ -65,7 +65,17 @@ type Record struct {
 // screen refused has a verdict and no numbers, and counting it as evidence
 // about its component would let a wall of refusals look like a wall of
 // failures.
-func (r Record) Measured() bool { return r.ScreenRefusal == "" && r.Verdict != VerdictUnjudgeable }
+//
+// An empty verdict is the same hazard from the other end: a proposal recorded
+// when it was drafted has not been judged yet, and reading it as measured and
+// not accepted would file it as falsified before anything was run.
+func (r Record) Measured() bool {
+	return r.ScreenRefusal == "" && r.Verdict != "" && r.Verdict != VerdictUnjudgeable
+}
+
+// Pending reports whether a proposal is recorded and still waiting on its
+// measurement. Those are the records a round must not draw conclusions from.
+func (r Record) Pending() bool { return r.ScreenRefusal == "" && r.Verdict == "" }
 
 // History is every proposal a project has made, oldest first.
 type History []Record

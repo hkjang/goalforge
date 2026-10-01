@@ -38,14 +38,12 @@ type Report struct {
 }
 
 // Complete reports whether every required page has a current screenshot.
-func (r Report) Complete() bool {
-	for _, status := range r.Statuses {
-		if status.Page.Required && status.Status != StatusCurrent {
-			return false
-		}
-	}
-	return true
-}
+//
+// Delegated rather than re-derived. The gate fails on Shortfall and the tests
+// assert on Complete, and when the same rule is written out in both places
+// they are two rules waiting to disagree — with the tested one green and the
+// enforced one letting a stale guide through.
+func (r Report) Complete() bool { return len(r.Shortfall()) == 0 }
 
 // Shortfall lists the required pages that are not current, which is what a
 // documentation gate fails on.
