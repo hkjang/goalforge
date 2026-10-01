@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/observer"
+	"github.com/goalforge/goalforge/internal/provider"
 	"github.com/goalforge/goalforge/internal/rrsi"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
@@ -402,4 +404,87 @@ func (m *multiFlag) String() string { return strings.Join(*m, ", ") }
 func (m *multiFlag) Set(value string) error {
 	*m = append(*m, value)
 	return nil
+}
+
+// configDraft asks a provider for the next configuration change.
+//
+// The proposal is screened before it is shown, so what comes back on screen is
+// something that may be measured. A draft that reached the operator with its
+// objections still attached would be read as a suggestion.
+func configDraft(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("config draft", flag.ContinueOnError)
+	round := set.Int("round", -1, "이번 회차")
+	total := set.Int("rounds", 10, "계획한 전체 회차")
+	window := set.Int("window", 3, "정체를 판단할 회차 수")
+	repairs := set.Int("repairs", 2, "거절된 제안을 다시 쓰게 할 최대 횟수")
+	record := set.Bool("record", false, "결과를 이력에 남긴다")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, policy, history, err := proposalContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	trajectory, err := s.ScoreTrajectory(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	current := *round
+	if current < 0 {
+		current = nextRound(history)
+	}
+	names, err := s.EvaluationCaseNames(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	providers, cleanup, err := workerProviders(ctx)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	chosen, err := pickProvider(providers, project.Provider)
+	if err != nil {
+		return err
+	}
+	author := observer.Author{Provider: chosen, Model: project.Model, Repairs: *repairs}
+	result, err := author.Write(ctx, observer.AuthorRequest{ProjectID: project.ID,
+		Direction: rrsi.Next(history, trajectory, current, *total, 1, 4, *window, policy.NoiseBand),
+		History:   history, Configuration: describeConfiguration(project),
+		CaseNames: names, CaseCount: len(names), WorkDir: project.RepositoryPath})
+	if err != nil {
+		return err
+	}
+	if !result.Accepted() {
+		fmt.Printf("제안 %d회 시도했으나 심사를 통과하지 못했습니다:\n%s\n",
+			result.Attempts, rrsi.Explain(result.Refusals))
+		if *record && len(result.Edits) > 0 {
+			if err = s.RecordProposal(ctx, project.ID, rrsi.Record{Round: current,
+				Edits: result.Edits, ScreenRefusal: result.Refusals[0].Kind}); err != nil {
+				return err
+			}
+		}
+		return errors.New("심사를 통과한 제안이 없습니다")
+	}
+	fmt.Printf("제안 (%d회 시도 · 새 구조 구성 %d개):\n", result.Attempts, history.NovelComponents(result.Edits))
+	for _, edit := range result.Edits {
+		fmt.Printf("  [%s] %s\n       %s\n", edit.Component, edit.Hypothesis, edit.Detail)
+	}
+	fmt.Println("\n적용해 측정한 뒤 `goalforge config judge` 로 판정하고, 결과를 이력에 남기세요")
+	return nil
+}
+
+// pickProvider finds the provider a project is configured for.
+func pickProvider(providers []provider.Provider, name string) (provider.Provider, error) {
+	for _, candidate := range providers {
+		if candidate.Name() == name {
+			return candidate, nil
+		}
+	}
+	return nil, fmt.Errorf("%q 제공자를 찾지 못했습니다", name)
+}
+
+// describeConfiguration is what the proposer is shown as the current state.
+func describeConfiguration(project model.Project) string {
+	return fmt.Sprintf("제공자 %s · 모델 %s · 동시 실행 한도 %d · worktree %v · 자동 커밋 %v",
+		project.Provider, project.Model, project.WIPLimit, project.WorktreeEnabled, project.AutoCommitEnabled)
 }
