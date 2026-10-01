@@ -129,6 +129,11 @@ func New(s *store.Store, bearerToken string, queue scheduler.Queue) (*Server, er
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/approvals/{approvalID}/reject", server.decideApproval)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/status/{status}", server.setWorkStatus)
 	server.mux.HandleFunc("GET /api/v1/projects/{id}/board", server.board)
+	server.mux.HandleFunc("GET /api/v1/projects/{id}/standards", func(w http.ResponseWriter, r *http.Request) {
+		server.handleStandards(w, r, r.PathValue("id"))
+	})
+	server.mux.HandleFunc("GET /api/v1/fleet", server.handleFleet)
+	server.mux.HandleFunc("GET /api/v1/patterns", server.handlePatterns)
 	server.mux.HandleFunc("POST /api/v1/projects/{id}/work/{workID}/transition", server.transitionWork)
 	server.mux.HandleFunc("GET /", server.dashboard)
 	return server, nil

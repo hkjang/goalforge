@@ -12,15 +12,25 @@ import (
 
 // CriterionAcross is one criterion's standing across every project that is
 // held to it.
+// Every field carries its own tag. A struct that reaches a browser without
+// them is served under its Go names, and a screen reading snake_case gets
+// undefined for every column — which renders as an empty table rather than an
+// error, so nothing says anything is wrong.
 type CriterionAcross struct {
-	StandardID, Title, Severity string
+	StandardID string `json:"standard_id"`
+	Title      string `json:"title"`
+	Severity   string `json:"severity"`
 	// Counted only across projects the criterion actually applies to. A
 	// criterion out of profile somewhere is not a gap there, and folding those
 	// in would make every conditional criterion look half-met forever.
-	Applicable                   int
-	Met, Unmet, Partial, Unknown int
-	Excepted                     int
-	ExceptedIn, UnmetIn          []string
+	Applicable int      `json:"applicable"`
+	Met        int      `json:"met"`
+	Unmet      int      `json:"unmet"`
+	Partial    int      `json:"partial"`
+	Unknown    int      `json:"unknown"`
+	Excepted   int      `json:"excepted"`
+	ExceptedIn []string `json:"excepted_in"`
+	UnmetIn    []string `json:"unmet_in"`
 }
 
 // ExceptionRate is the share of applicable projects that have excused this
@@ -34,9 +44,9 @@ func (c CriterionAcross) ExceptionRate() float64 {
 
 // FleetReport is the pack measured across every project pinned to it.
 type FleetReport struct {
-	PackRef  string
-	Projects []string
-	Criteria []CriterionAcross
+	PackRef  string            `json:"pack_ref"`
+	Projects []string          `json:"projects"`
+	Criteria []CriterionAcross `json:"criteria"`
 }
 
 // Fleet measures one pack across every project that pinned it.
@@ -107,7 +117,10 @@ func (s *Store) Fleet(ctx context.Context, pack standards.Pack, now time.Time) (
 // PackProposal is a suggested change to the catalogue, with the evidence for
 // it.
 type PackProposal struct {
-	StandardID, Title, Change, Evidence string
+	StandardID string `json:"standard_id"`
+	Title      string `json:"title"`
+	Change     string `json:"change"`
+	Evidence   string `json:"evidence"`
 }
 
 // exceptionMajority is the share of projects excusing a criterion at which the

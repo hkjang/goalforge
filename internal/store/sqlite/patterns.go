@@ -83,7 +83,7 @@ FROM pattern_applications WHERE pattern_id=? ORDER BY applied_at,rowid`, pattern
 // PatternView is a pattern with what its uses say about it.
 type PatternView struct {
 	patterns.Pattern
-	Evidence patterns.Evidence
+	Evidence patterns.Evidence `json:"evidence"`
 }
 
 // Patterns returns every pattern with its evidence.

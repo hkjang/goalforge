@@ -109,14 +109,14 @@ type Evidence struct {
 	// Projects is how many distinct projects it has worked in. It is projects
 	// rather than applications because five successes in one project are five
 	// pieces of evidence about that project.
-	Projects int
-	Passed   int
-	Failed   int
+	Projects int `json:"projects"`
+	Passed   int `json:"passed"`
+	Failed   int `json:"failed"`
 	// RecentFailures counts failures since the last success, which is what
 	// says a pattern has stopped working rather than that it once had a bad
 	// day.
-	RecentFailures int
-	FailedIn       []string
+	RecentFailures int      `json:"recent_failures"`
+	FailedIn       []string `json:"failed_in"`
 }
 
 // Promotable reports whether the evidence supports putting a pattern forward.
