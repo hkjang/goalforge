@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -42,19 +43,38 @@ ON CONFLICT(work_item_id) DO UPDATE SET basis=excluded.basis,approved_at=exclude
 	return err
 }
 
-// RecordAutoApprovalOutcome closes out an automatic attempt.
+// SettleAutoApproval closes out an automatic attempt.
+//
+// This is the step that was missing. The autonomy loop refuses to approve an
+// item whose previous automatic attempt was settled and failed — "whatever
+// stopped it is still there, and a second identical attempt spends budget to
+// reach the same place" — and nothing ever settled one. Every record stayed
+// outstanding, that guard never fired, and the loop was free to re-approve a
+// failing item every sweep.
 //
 // The detail is kept whether it passed or failed. A failure with no reason
 // leaves the next reader — human or automated — to work out from scratch what
 // already went wrong once.
-func (s *Store) RecordAutoApprovalOutcome(ctx context.Context, workItemID string, passed bool, detail string) error {
+func (s *Store) SettleAutoApproval(ctx context.Context, workItemID string, passed bool, detail string) error {
+	if workItemID == "" {
+		return errors.New("work item is required")
+	}
 	value := 0
 	if passed {
 		value = 1
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE auto_approvals SET settled=1,passed=?,outcome=? WHERE work_item_id=?`,
+	result, err := s.db.ExecContext(ctx, `UPDATE auto_approvals SET settled=1,passed=?,outcome=? WHERE work_item_id=?`,
 		value, detail, workItemID)
-	return err
+	if err != nil {
+		return err
+	}
+	// Refused rather than silently updating nothing. A settle that matched no
+	// row would look like it worked, and the guard it feeds would stay blind
+	// for exactly the item it was told about.
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: %s 에 대한 자동 시도 기록이 없습니다", ErrNotFound, workItemID)
+	}
+	return nil
 }
 
 // AutoApprovals lists what automation approved for a project, newest first.

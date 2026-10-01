@@ -153,6 +153,7 @@ goalforge standards autonomy --enable [--standards ID|--all-standards] [--scopes
                              [--merge] [--max-tokens N] [--daily-limit N] [--save]
 goalforge standards autonomy --full --save  # every criterion, every scope, merge included, saved
 goalforge standards autonomy --show         # what is saved and therefore running unattended
+goalforge standards autonomy --history      # what automation approved and how each attempt ended
                    # The envelope has to be saved, not passed as flags: one that only exists
                    # as arguments to a command somebody types applies exactly when somebody is
                    # already there, which is the one time it was not needed. The worker reads
@@ -163,6 +164,10 @@ goalforge standards autonomy --show         # what is saved and therefore runnin
                    # attempted. With --merge, a release additionally needs its gates to have
                    # passed on the very commit being released, no gate left unrun on that
                    # change, and a default branch that is not known broken.
+                   # Each attempt is settled when its verification ends, which is what stops
+                   # the loop re-approving a failing item every sweep to reach the same place.
+                   # A failure the repair policy will retry is still outstanding — settling it
+                   # would refuse the retry the policy just granted.
 goalforge config calibrate --label L        # measure how much this project's evaluation moves
 goalforge config judge [--incumbent L]      # is a configuration change an improvement?
                    # Sorting configurations by pass rate presents whichever one drew the best

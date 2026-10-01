@@ -297,6 +297,12 @@ func TestAutonomyDoesNotReachTheMergeBoundary(t *testing.T) {
 
 // A failed attempt is not retried automatically. Whatever stopped it is still
 // there, and a second identical attempt spends budget to reach the same place.
+//
+// This test settled the attempt itself, which is why it stayed green while
+// nothing in production ever settled one: the guard was exercised with a
+// hand-written record and never reached by the real flow. The settle now
+// happens where the outcome becomes known — see
+// Service.settleAutomaticAttempt.
 func TestAFailedAttemptIsNotAutomaticallyRetried(t *testing.T) {
 	ctx, db, _, goal := autonomyFixture(t)
 	if err := db.SetGateSettles(ctx, "PRJ-1", "asset_scan", []string{"NET-002"}); err != nil {
@@ -306,7 +312,7 @@ func TestAFailedAttemptIsNotAutomaticallyRetried(t *testing.T) {
 	if _, err := AutoApprove(ctx, db, "PRJ-1", goal.ID, openPolicy()); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RecordAutoApprovalOutcome(ctx, item.ID, false, "게이트 asset_scan 실패: 여전히 외부 폰트를 부릅니다"); err != nil {
+	if err := db.SettleAutoApproval(ctx, item.ID, false, "게이트 asset_scan 실패: 여전히 외부 폰트를 부릅니다"); err != nil {
 		t.Fatal(err)
 	}
 	// Back on the board for a person to look at.
