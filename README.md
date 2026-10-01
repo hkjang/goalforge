@@ -108,7 +108,13 @@ goalforge work list | work status ID --set APPROVED
                    # IN_PROGRESS, VERIFYING and DONE belong to the engine. A person moving a
                    # card there would be claiming a verification that never ran, so the store
                    # refuses it identically from the CLI, the API and MCP.
-goalforge standards profile --attributes "frontend=react,network=offline"   # pin a common criteria pack
+goalforge standards profile --list-packs    # the catalogues this build carries
+goalforge standards profile --attributes "deployment=cli,release=binaries"
+                   # the project's shape decides which catalogue describes it. Holding a
+                   # command-line tool to a web service's criteria reports a dozen gaps it
+                   # does not have, and the operator learns to read past the report. With
+                   # nothing declared there is no suggestion: a catalogue chosen on no
+                   # evidence is one nobody can reconstruct the reason for.
 goalforge standards assess [--commit SHA] [--supply] [--supply-limit 3]
                    # reads the repository at a pinned commit. A static read can prove an
                    # absence — a CDN URL in a bundled asset, a fifth required environment

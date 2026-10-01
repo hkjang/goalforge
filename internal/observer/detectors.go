@@ -21,6 +21,9 @@ func Default() []Detector {
 		runtimeEnvDetector{},
 		externalAssetDetector{},
 		runtimeBuildDetector{},
+		releaseMatrixDetector{},
+		ciGateDetector{},
+		modulePinDetector{},
 	}
 }
 
@@ -269,4 +272,190 @@ func finalStage(body string) string {
 		}
 	}
 	return strings.Join(lines[start:], "\n")
+}
+
+// CLI-007: a release that carries something a person can run.
+//
+// A tool whose release holds only a source tarball is a tool every user has to
+// build, and "we ship binaries" is the kind of claim a README makes without
+// anything checking it. The workflow either names several platforms or it does
+// not.
+type releaseMatrixDetector struct{}
+
+func (releaseMatrixDetector) StandardID() string { return "CLI-007" }
+
+func (releaseMatrixDetector) Detect(tree Tree) (Finding, error) {
+	workflows := matches(tree, ".github/workflows/**")
+	if len(workflows) == 0 {
+		return Finding{Result: standards.ResultUnmet, DefectKind: "no_release_workflow",
+			TargetScope: ".github/**", Detail: "릴리즈 워크플로가 없습니다"}, nil
+	}
+	// The workflow is where the release is triggered; the platform matrix is
+	// often in a script it calls. Looking only at the workflow file reported
+	// this project — which builds six platforms from scripts/build-release.sh
+	// — as building none. A detector that refuses on an absence it did not
+	// establish is worse than no detector: the finding is wrong and the
+	// operator learns to dismiss the whole report.
+	sources := append([]string{}, workflows...)
+	sources = append(sources, buildScripts(tree)...)
+	var platforms, checksums bool
+	var evidence []standards.Evidence
+	for _, name := range sources {
+		body, err := tree.File(name)
+		if err != nil {
+			continue
+		}
+		lower := strings.ToLower(body)
+		if strings.Contains(lower, "goos") && strings.Contains(lower, "goarch") {
+			platforms = true
+			item, evErr := StaticEvidence("source_file", name+" 가 GOOS/GOARCH 를 지정합니다")
+			if evErr != nil {
+				return Finding{}, evErr
+			}
+			evidence = append(evidence, item)
+		}
+		if strings.Contains(lower, "sha256sum") || strings.Contains(lower, "shasum") ||
+			strings.Contains(lower, "checksum") {
+			checksums = true
+		}
+	}
+	var missing []string
+	if !platforms {
+		missing = append(missing, "플랫폼별 빌드(GOOS/GOARCH)")
+	}
+	if !checksums {
+		missing = append(missing, "체크섬")
+	}
+	if len(missing) > 0 {
+		return Finding{Result: standards.ResultUnmet, DefectKind: "release_missing_platforms",
+			TargetScope: ".github/**",
+			Detail:      "릴리즈 워크플로에 " + strings.Join(missing, ", ") + " 가 없습니다",
+			Evidence:    evidence}, nil
+	}
+	// The workflow says it builds them. Whether the published release actually
+	// carries runnable binaries is answered by looking at a release.
+	finding := unknown("게시된 릴리즈의 자산을 실제로 받아 실행해야 확인됩니다")
+	finding.Evidence = evidence
+	return finding, nil
+}
+
+// buildScripts is the files a release workflow is likely to call.
+func buildScripts(tree Tree) []string {
+	var found []string
+	for _, name := range tree.Paths() {
+		base := path.Base(name)
+		if base == "Makefile" || base == "makefile" || base == "Taskfile.yml" ||
+			strings.HasPrefix(name, "scripts/") || strings.HasPrefix(name, "build/") {
+			found = append(found, name)
+		}
+	}
+	sort.Strings(found)
+	return found
+}
+
+// CLI-010: the gates that judge a change run on every change.
+//
+// A repository with the tests and no workflow running them has tests nobody
+// has to pass, which is a different thing from having tests.
+type ciGateDetector struct{}
+
+func (ciGateDetector) StandardID() string { return "CLI-010" }
+
+func (ciGateDetector) Detect(tree Tree) (Finding, error) {
+	workflows := matches(tree, ".github/workflows/**")
+	if len(workflows) == 0 {
+		return Finding{Result: standards.ResultUnmet, DefectKind: "no_ci",
+			TargetScope: ".github/**", Detail: "변경마다 도는 워크플로가 없습니다"}, nil
+	}
+	want := map[string]string{"go test": "시험", "go vet": "vet", "gofmt": "서식"}
+	found := map[string]bool{}
+	var evidence []standards.Evidence
+	for _, name := range workflows {
+		body, err := tree.File(name)
+		if err != nil {
+			continue
+		}
+		// Only a workflow that runs on pull requests gates a change. One that
+		// runs on a tag checks the release, which is after the decision.
+		if !strings.Contains(body, "pull_request") {
+			continue
+		}
+		for marker := range want {
+			if strings.Contains(body, marker) {
+				if !found[marker] {
+					item, evErr := StaticEvidence("source_file", name+" 가 "+marker+" 를 돌립니다")
+					if evErr != nil {
+						return Finding{}, evErr
+					}
+					evidence = append(evidence, item)
+				}
+				found[marker] = true
+			}
+		}
+	}
+	var missing []string
+	for marker, label := range want {
+		if !found[marker] {
+			missing = append(missing, label+"("+marker+")")
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return Finding{Result: standards.ResultUnmet, DefectKind: "ci_missing_gate",
+			TargetScope: ".github/**",
+			Detail:      "모든 변경에서 도는 검사에 " + strings.Join(missing, ", ") + " 가 없습니다",
+			Evidence:    evidence}, nil
+	}
+	finding := unknown("워크플로가 실제로 통과하는지는 돌려 봐야 확인됩니다")
+	finding.Evidence = evidence
+	return finding, nil
+}
+
+// CLI-001: the module and toolchain are pinned in the repository.
+type modulePinDetector struct{}
+
+func (modulePinDetector) StandardID() string { return "CLI-001" }
+
+func (modulePinDetector) Detect(tree Tree) (Finding, error) {
+	body, err := tree.File("go.mod")
+	if err != nil {
+		return Finding{Result: standards.ResultUnmet, DefectKind: "no_go_module",
+			TargetScope: ".", Detail: "go.mod 이 없습니다"}, nil
+	}
+	if !strings.Contains(body, "\ngo ") && !strings.HasPrefix(body, "go ") {
+		return Finding{Result: standards.ResultUnmet, DefectKind: "no_go_directive",
+			TargetScope: "go.mod", Detail: "go.mod 에 go 지시자가 없어 툴체인이 고정되지 않습니다"}, nil
+	}
+	// A replace pointing outside the module makes the build depend on a path
+	// that is not in the repository, so the same commit does not build the
+	// same way somewhere else.
+	var outside []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "replace ") && !strings.Contains(trimmed, "=> ") {
+			continue
+		}
+		target := trimmed[strings.Index(trimmed, "=>")+2:]
+		target = strings.TrimSpace(target)
+		if strings.HasPrefix(target, "/") || strings.HasPrefix(target, "..") {
+			outside = append(outside, trimmed)
+		}
+	}
+	if len(outside) > 0 {
+		item, evErr := StaticEvidence("source_file", "go.mod: "+outside[0])
+		if evErr != nil {
+			return Finding{}, evErr
+		}
+		return Finding{Result: standards.ResultUnmet, DefectKind: "replace_outside_module",
+			TargetScope: "go.mod",
+			Detail:      "go.mod 의 replace 가 저장소 밖을 가리켜 같은 커밋이 다른 곳에서 다르게 빌드됩니다",
+			Evidence:    []standards.Evidence{item}}, nil
+	}
+	item, err := StaticEvidence("source_file", "go.mod")
+	if err != nil {
+		return Finding{}, err
+	}
+	finding := unknown("깨끗한 환경에서 실제로 빌드해 봐야 확인됩니다")
+	finding.Evidence = []standards.Evidence{item}
+	return finding, nil
 }

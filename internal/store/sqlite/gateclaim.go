@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -84,8 +85,26 @@ ON CONFLICT(project_id,check_type) DO UPDATE SET settles=excluded.settles,produc
 // SetGateSettles is SetGateClaim for the common case of a gate that settles
 // some criteria and produces only what its kind implies.
 func (s *Store) SetGateSettles(ctx context.Context, projectID, checkType string, standardIDs []string, produces ...string) error {
-	return s.SetGateClaim(ctx, projectID, GateClaim{CheckType: checkType, Settles: standardIDs, Produces: produces},
-		standards.GoReactOfflineService())
+	// Validated against the catalogue this project actually pinned. Checking
+	// against whichever pack is first would accept a criterion ID from a
+	// catalogue the project is not held to, and the gate would settle nothing.
+	pack, err := s.packForProject(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	return s.SetGateClaim(ctx, projectID, GateClaim{CheckType: checkType, Settles: standardIDs, Produces: produces}, pack)
+}
+
+// packForProject resolves the catalogue a project pinned.
+func (s *Store) packForProject(ctx context.Context, projectID string) (standards.Pack, error) {
+	profile, _, err := s.StandardProfile(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return standards.Pack{}, fmt.Errorf("%s: 적용할 팩을 먼저 정해야 합니다", projectID)
+		}
+		return standards.Pack{}, err
+	}
+	return standards.ByRef(profile.PackRef)
 }
 
 // evidenceKindInPack reports whether any criterion asks for this kind.

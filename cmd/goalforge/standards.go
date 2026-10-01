@@ -19,28 +19,25 @@ import (
 // packByRef resolves the pack a profile pins. There is one shipped pack; a
 // profile naming anything else is refused rather than silently judged against
 // the one that happens to be compiled in.
-func packByRef(ref string) (standards.Pack, error) {
-	shipped := standards.GoReactOfflineService()
-	if ref == "" || ref == shipped.Ref() {
-		return shipped, nil
-	}
-	return standards.Pack{}, fmt.Errorf("%q 팩을 알지 못합니다 — 현재 제공되는 것은 %s 입니다", ref, shipped.Ref())
-}
+func packByRef(ref string) (standards.Pack, error) { return standards.ByRef(ref) }
 
 // standardsProfile sets which pack a project is held to and what it has
 // declared about itself.
 func standardsProfile(ctx context.Context, s *store.Store, args []string) error {
 	set := flag.NewFlagSet("standards profile", flag.ContinueOnError)
-	packRef := set.String("pack", "", "적용할 개발팩 (기본: 제공되는 팩)")
+	packRef := set.String("pack", "", "적용할 개발팩 (기본: 속성에 가장 맞는 팩)")
+	list := set.Bool("list-packs", false, "이 빌드가 가진 팩 목록")
 	attributes := set.String("attributes", "", "frontend=react,network=offline 형식의 프로젝트 속성")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
-	project, err := currentProject(ctx, s)
-	if err != nil {
-		return err
+	if *list {
+		for _, pack := range standards.Shipped() {
+			fmt.Printf("%-34s %s (기준 %d개)\n", pack.Ref(), pack.Title, len(pack.Standards))
+		}
+		return nil
 	}
-	pack, err := packByRef(*packRef)
+	project, err := currentProject(ctx, s)
 	if err != nil {
 		return err
 	}
@@ -48,7 +45,7 @@ func standardsProfile(ctx context.Context, s *store.Store, args []string) error 
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
-	profile := standards.Profile{ProjectID: project.ID, PackRef: pack.Ref(),
+	profile := standards.Profile{ProjectID: project.ID,
 		Attributes: existing.Attributes, Exceptions: existing.Exceptions}
 	if profile.Attributes == nil {
 		profile.Attributes = map[string]string{}
@@ -63,6 +60,27 @@ func standardsProfile(ctx context.Context, s *store.Store, args []string) error 
 		}
 		profile.Attributes[strings.TrimSpace(key)] = strings.TrimSpace(value)
 	}
+	// The pack is resolved after the attributes are known, so a project that
+	// declares what it is gets the catalogue that describes it rather than
+	// whichever one happens to be first.
+	var pack standards.Pack
+	switch {
+	case *packRef != "":
+		if pack, err = packByRef(*packRef); err != nil {
+			return err
+		}
+	case existing.PackRef != "":
+		if pack, err = packByRef(existing.PackRef); err != nil {
+			return err
+		}
+	default:
+		suggested, ok := standards.Suggest(profile.Attributes)
+		if !ok {
+			return fmt.Errorf("선언한 속성으로는 어떤 팩이 맞는지 알 수 없습니다 — `--pack` 으로 고르거나 `--list-packs` 로 목록을 보세요\n속성 예: deployment=cli,release=binaries 또는 deployment=service,frontend=react")
+		}
+		pack = suggested
+	}
+	profile.PackRef = pack.Ref()
 	if err = s.SaveStandardProfile(ctx, profile, pack); err != nil {
 		return err
 	}
