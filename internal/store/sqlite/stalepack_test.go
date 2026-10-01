@@ -130,3 +130,44 @@ func TestAnAssessmentOfTheCurrentCriterionStillCounts(t *testing.T) {
 		t.Fatalf("nothing was superseded: %q", views[0].PriorResult)
 	}
 }
+
+// A project enrolled before checksums were recorded has an empty one. Reading
+// that as drift would stop maintaining every project that predates the column
+// — the additive migration's whole point is that old rows keep working — and
+// the sweep now refuses to touch a drifted project, so this is the difference
+// between an upgrade and an outage.
+func TestAProfileWithNoRecordedChecksumHasNotDrifted(t *testing.T) {
+	s, _ := staleFixture(t)
+	ctx := t.Context()
+	if _, err := s.db.ExecContext(ctx, `UPDATE standard_profiles SET pack_checksum='' WHERE project_id=?`,
+		"PRJ-1"); err != nil {
+		t.Fatal(err)
+	}
+	drifted, err := s.PackDrift(ctx, "PRJ-1", packWith(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drifted {
+		t.Fatal("nothing was recorded, so nothing disagrees")
+	}
+}
+
+// And a checksum that does disagree is drift, whatever the ref says.
+func TestAPackEditedInPlaceIsDrift(t *testing.T) {
+	s, _ := staleFixture(t)
+	ctx := t.Context()
+	edited := packWith(1)
+	// Same id, same version, different content: the ref still resolves and the
+	// checksum is the only thing that notices.
+	edited.Standards[0].Title = "제자리에서 바뀐 제목"
+	if edited.Ref() != packWith(1).Ref() {
+		t.Fatalf("the test needs the ref to be unchanged: %s", edited.Ref())
+	}
+	drifted, err := s.PackDrift(ctx, "PRJ-1", edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !drifted {
+		t.Fatal("the project agreed to different content")
+	}
+}
