@@ -248,3 +248,53 @@ func TestCasesWithoutRepetitionsAreLeftOut(t *testing.T) {
 		t.Fatalf("calibration=%+v", calibration)
 	}
 }
+
+// Change.Validate is the layer that answers without a database — a proposal
+// can be screened before anything is read or written. The store's own check
+// that the current value matches would catch some of these too, but only after
+// a round trip and only where a store exists.
+func TestAChangeIsValidatedBeforeAnythingIsRead(t *testing.T) {
+	valid := Change{Field: "wip_limit", From: "1", To: "2"}
+	if err := valid.Validate("concurrency"); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]Change{
+		"되돌릴 값 없음": {Field: "wip_limit", To: "2"},
+		"바뀌는 것 없음": {Field: "wip_limit", From: "2", To: "2"},
+		"바꿀 값 없음":  {Field: "wip_limit", From: "1"},
+		"수치가 아님":   {Field: "wip_limit", From: "1", To: "둘"},
+		"모르는 설정":   {Field: "prompt_template", From: "a", To: "b"},
+	} {
+		if err := change.Validate("concurrency"); err == nil {
+			t.Fatalf("%s: %+v 는 거절되어야 합니다", name, change)
+		}
+	}
+	// The component has to match, because an applied change is attributed to
+	// it and the history that decides what to try next is built from exactly
+	// that attribution.
+	if err := valid.Validate("prompt"); err == nil {
+		t.Fatal("wip_limit is a concurrency setting")
+	}
+	// With no component claimed there is nothing to contradict.
+	if err := valid.Validate(""); err != nil {
+		t.Fatal(err)
+	}
+	// An unknown field with no component claimed must still be refused. The
+	// component check cannot catch it — there is no component to disagree
+	// with — so the field list has to answer on its own.
+	if err := (Change{Field: "prompt_template", From: "a", To: "b"}).Validate(""); err == nil {
+		t.Fatal("an unenumerated setting is not changeable whatever component is claimed")
+	}
+	// An empty new value on a field that is not numeric has only the emptiness
+	// check standing between it and being applied.
+	if err := (Change{Field: "model", From: "sonnet", To: "  "}).Validate("model"); err == nil {
+		t.Fatal("a blank new value is not a value")
+	}
+	// Every applicable field is one some component owns, or the attribution
+	// above cannot be checked for it.
+	for _, field := range ApplicableFields() {
+		if _, ok := ComponentFor(field); !ok {
+			t.Fatalf("%s belongs to no component", field)
+		}
+	}
+}

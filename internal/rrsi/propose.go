@@ -39,6 +39,10 @@ type Edit struct {
 	// idea until the budget runs out.
 	Hypothesis string
 	Detail     string
+	// Change is the machine-applicable part, when there is one. Most edits are
+	// prose a person applies; a few are settings with a value, and only those
+	// can be applied while nobody is watching.
+	Change *Change `json:"change,omitempty"`
 }
 
 // Record is one candidate's proposal and what measuring it established.

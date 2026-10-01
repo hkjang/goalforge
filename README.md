@@ -179,6 +179,15 @@ goalforge config draft [--repairs 2]        # ask the provider for the next chan
                    # required by the schema rather than asked for in prose, and a refused
                    # draft goes back with the objections — a proposer told only that it failed
                    # writes a variation of the same thing.
+goalforge config apply --field wip_limit --to 3     # alter a setting, recording what it replaced
+goalforge config settle --incumbent L --candidate L # judge it, and put it back if it did not help
+goalforge config changes                            # what automation has altered
+                   # Applying is only meaningful paired with reverting: a change applied and
+                   # never judged is worse than no change, and one left in place after failing
+                   # is the configuration drifting on its failures. Only enumerated settings
+                   # can be changed, because only those have code that knows how to put them
+                   # back, and only one change may be outstanding — two before either is
+                   # measured make the measurement unattributable.
 goalforge config propose --edit "component:hypothesis[:detail]"
                    # screens a candidate before any evaluation is spent. A hypothesis already
                    # falsified is refused — a search that does not remember what it tested

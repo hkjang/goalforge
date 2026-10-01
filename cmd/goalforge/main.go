@@ -100,6 +100,7 @@ var privilegedCommands = map[string]string{
 	"goal set":                 "목표 변경",
 	"verify gate add":          "검증 게이트 변경",
 	"browser gate":             "검증 게이트 변경",
+	"config apply":             "실행 구성 변경",
 	"pattern approve":          "공통 패턴 권고",
 	"pattern retire":           "공통 패턴 철회",
 	"verify template":          "검증 게이트 일괄 설정",
@@ -241,6 +242,15 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "draft" {
 			return configDraft(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "apply" {
+			return configApply(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "settle" {
+			return configSettle(ctx, s, args[2:])
+		}
+		if len(args) > 1 && args[1] == "changes" {
+			return configChanges(ctx, s)
 		}
 	case "pattern":
 		if len(args) > 1 && args[1] == "list" {
