@@ -166,6 +166,13 @@ goalforge config judge [--incumbent L]      # is a configuration change an impro
                    # the fewest chances to fail. Nothing is judged before the band is measured.
 goalforge config selection [--free-cost F] [--cost-per-gain G] [--min-trials N]
 goalforge config direction                  # what the search should try next
+goalforge config draft [--repairs 2]        # ask the provider for the next change
+                   # The proposer is a model, so what it writes is the product of what it is
+                   # shown: the edits already tried with their measured outcomes, the
+                   # explanations that did not hold, this round's budget. The hypothesis is
+                   # required by the schema rather than asked for in prose, and a refused
+                   # draft goes back with the objections — a proposer told only that it failed
+                   # writes a variation of the same thing.
 goalforge config propose --edit "component:hypothesis[:detail]"
                    # screens a candidate before any evaluation is spent. A hypothesis already
                    # falsified is refused — a search that does not remember what it tested
