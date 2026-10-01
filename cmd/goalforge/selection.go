@@ -488,3 +488,151 @@ func describeConfiguration(project model.Project) string {
 	return fmt.Sprintf("제공자 %s · 모델 %s · 동시 실행 한도 %d · worktree %v · 자동 커밋 %v",
 		project.Provider, project.Model, project.WIPLimit, project.WorktreeEnabled, project.AutoCommitEnabled)
 }
+
+// configApply puts a proposed setting change into effect.
+//
+// It is the only automatic path that alters how a project runs, so it records
+// what it replaced before it changes anything. A change nobody can put back is
+// one that stays after it fails.
+func configApply(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("config apply", flag.ContinueOnError)
+	field := set.String("field", "", "바꿀 설정: "+strings.Join(rrsi.ApplicableFields(), ", "))
+	to := set.String("to", "", "새 값")
+	round := set.Int("round", -1, "이번 회차")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, _, history, err := proposalContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	component, ok := rrsi.ComponentFor(*field)
+	if !ok {
+		return fmt.Errorf("%q 는 자동으로 바꿀 수 있는 설정이 아닙니다 — 가능한 것: %s",
+			*field, strings.Join(rrsi.ApplicableFields(), ", "))
+	}
+	current, err := s.CurrentSettingValue(ctx, project.ID, *field)
+	if err != nil {
+		return err
+	}
+	current0 := *round
+	if current0 < 0 {
+		current0 = nextRound(history)
+	}
+	applied, err := s.ApplyChange(ctx, project.ID, current0, component,
+		rrsi.Change{Field: *field, From: current, To: *to})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s: %s → %s (%s)\n", applied.Field, applied.From, applied.To, applied.ID)
+	fmt.Println("측정한 뒤 `goalforge config settle` 로 판정하세요 — 판정하지 않은 변경은 안 바꾼 것보다 나쁩니다")
+	return nil
+}
+
+// configSettle judges the outstanding change and puts it back if the
+// measurement did not support it.
+func configSettle(ctx context.Context, s *store.Store, args []string) error {
+	set := flag.NewFlagSet("config settle", flag.ContinueOnError)
+	incumbentLabel := set.String("incumbent", "", "비교 기준이 될 구성 라벨")
+	candidateLabel := set.String("candidate", "", "이 변경으로 측정한 구성 라벨")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	project, policy, _, err := proposalContext(ctx, s)
+	if err != nil {
+		return err
+	}
+	outstanding, err := s.OutstandingChange(ctx, project.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			fmt.Println("판정을 기다리는 변경이 없습니다")
+			return nil
+		}
+		return err
+	}
+	summaries, err := s.CompareTrials(ctx, project.ID, "")
+	if err != nil {
+		return err
+	}
+	incumbent, candidate, err := namedMeasurements(summaries, *incumbentLabel, *candidateLabel)
+	if err != nil {
+		return err
+	}
+	best := incumbent.Score
+	for _, summary := range summaries {
+		if rate := summary.PassRate / 100; rate > best {
+			best = rate
+		}
+	}
+	decision := rrsi.Judge(incumbent, candidate, best, policy)
+	settled, err := s.SettleChange(ctx, outstanding.ID, decision.Verdict, decision.Reason)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s %s: %s → %s\n", verdictMark(decision.Verdict), decision.Verdict,
+		settled.From, settled.To)
+	fmt.Printf("   %s\n", decision.Reason)
+	if settled.Reverted {
+		fmt.Printf("되돌렸습니다: %s 를 %s 로\n", settled.Field, settled.From)
+		return nil
+	}
+	fmt.Printf("유지합니다: %s 는 %s 입니다\n", settled.Field, settled.To)
+	return nil
+}
+
+// namedMeasurements picks the two configurations being compared.
+func namedMeasurements(summaries []store.TrialSummary, incumbentLabel, candidateLabel string) (rrsi.Measurement, rrsi.Measurement, error) {
+	var incumbent, candidate rrsi.Measurement
+	var foundIncumbent, foundCandidate bool
+	for _, summary := range summaries {
+		if summary.Label == "(모든 라벨)" || summary.Trials == 0 {
+			continue
+		}
+		measurement := rrsi.Measurement{Label: summary.Label, Score: summary.PassRate / 100,
+			Cost: summary.AverageCostUSD, Trials: summary.Trials}
+		switch summary.Label {
+		case incumbentLabel:
+			incumbent, foundIncumbent = measurement, true
+		case candidateLabel:
+			candidate, foundCandidate = measurement, true
+		}
+	}
+	if !foundIncumbent || !foundCandidate {
+		// Judging against whichever two happen to be present would decide what
+		// the verdict is measured from, and the verdict then reverts or keeps
+		// a change on that basis.
+		return incumbent, candidate, errors.New("--incumbent 와 --candidate 로 비교할 두 구성을 지정하세요")
+	}
+	return incumbent, candidate, nil
+}
+
+// configChanges lists what automation has altered.
+func configChanges(ctx context.Context, s *store.Store) error {
+	project, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	changes, err := s.AppliedChanges(ctx, project.ID)
+	if err != nil {
+		return err
+	}
+	if len(changes) == 0 {
+		fmt.Println("자동으로 바꾼 설정이 없습니다")
+		return nil
+	}
+	for _, change := range changes {
+		state := "판정 대기"
+		switch {
+		case change.Reverted:
+			state = "되돌림"
+		case change.Settled:
+			state = "유지"
+		}
+		fmt.Printf("%-10s %s: %s → %s  [%s]\n", change.Component, change.Field,
+			change.From, change.To, state)
+		if change.Outcome != "" {
+			fmt.Printf("           %s\n", change.Outcome)
+		}
+	}
+	return nil
+}

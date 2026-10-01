@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS design_decisions (
  base_commit TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON design_decisions(project_id, status);
+CREATE TABLE IF NOT EXISTS applied_changes (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+ component TEXT NOT NULL DEFAULT '', field TEXT NOT NULL, from_value TEXT NOT NULL,
+ to_value TEXT NOT NULL, round INTEGER NOT NULL DEFAULT 0, applied_at TEXT NOT NULL,
+ settled INTEGER NOT NULL DEFAULT 0, reverted INTEGER NOT NULL DEFAULT 0,
+ outcome TEXT NOT NULL DEFAULT '', settled_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_applied_changes ON applied_changes(project_id,settled);
 CREATE TABLE IF NOT EXISTS config_proposals (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), round INTEGER NOT NULL DEFAULT 0,
  label TEXT NOT NULL DEFAULT '', edits TEXT NOT NULL DEFAULT '[]', verdict TEXT NOT NULL DEFAULT '',
