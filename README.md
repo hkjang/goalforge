@@ -95,6 +95,13 @@ goalforge project provider set --provider claude --model sonnet --reason "..."
 goalforge goal contract --title T --outcome "key|method|judge" --measure "p95=latency_ms<=200"
                         [--users ...] [--exclude ...] [--reason ...] [--decider ...]
 goalforge goal contract show           # required outcomes, what is unconfirmed, what conflicts
+goalforge goal draft --topic "..." [--apply]   # a topic becomes criteria and the gates for them
+                   # Criteria and gates are drafted together: asked separately a model produces
+                   # a list of aspirations and a list of scripts that do not meet. Each gate is
+                   # run against the current tree and must FAIL — one that passes before the
+                   # work is done will pass after, so it is measuring nothing. Nothing is
+                   # written until a person confirms: a machine that sets its own bar has not
+                   # been measured against anything, it has agreed with itself.
 goalforge goal set --title T --objective O --criterion build_passed=true [--criterion NAME@journey=true] [--reason ...]
                    # numeric criteria carry a direction and a unit: "<=200ms", ">=99.9%", "=0".
                    # A bare number still means "at least". Units convert within a family

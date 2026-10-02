@@ -98,6 +98,7 @@ var privilegedCommands = map[string]string{
 	"approval reject":          "승인 반려",
 	"approval request":         "승인 요청",
 	"goal set":                 "목표 변경",
+	"goal draft":               "목표 초안 작성",
 	"verify gate add":          "검증 게이트 변경",
 	"browser gate":             "검증 게이트 변경",
 	"config apply":             "실행 구성 변경",
@@ -223,6 +224,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		if len(args) > 1 && args[1] == "show" {
 			return goalShow(ctx, s)
+		}
+		if len(args) > 1 && args[1] == "draft" {
+			return goalDraft(ctx, s, args[2:])
 		}
 	case "config":
 		if len(args) > 1 && args[1] == "calibrate" {
