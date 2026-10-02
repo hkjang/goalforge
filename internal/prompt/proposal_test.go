@@ -125,3 +125,77 @@ func TestTheProposerIsWarnedOffTheEvaluationSet(t *testing.T) {
 		t.Fatalf("and say what happens:\n%s", text)
 	}
 }
+
+// The schema is what makes the field appear. A proposer asked for it in prose
+// fills it sometimes; one asked for it in the schema fills it or says nothing,
+// and "sometimes" is the case that reaches an operator as a half-automatic
+// draft.
+func TestTheSchemaAsksForTheApplicableChange(t *testing.T) {
+	raw := ProposalSchema()
+	var decoded struct {
+		Properties struct {
+			Edits struct {
+				Items struct {
+					Required   []string                   `json:"required"`
+					Properties map[string]json.RawMessage `json:"properties"`
+				} `json:"items"`
+			} `json:"edits"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	change, ok := decoded.Properties.Edits.Items.Properties["change"]
+	if !ok {
+		t.Fatalf("no change field, so no draft can be applied: %s", raw)
+	}
+	var shape struct {
+		Required   []string `json:"required"`
+		Properties struct {
+			Field struct {
+				Enum []string `json:"enum"`
+			} `json:"field"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(change, &shape); err != nil {
+		t.Fatal(err)
+	}
+	// Required on the change, optional on the edit: most edits are prose a
+	// person applies, and demanding a setting for every one of them would make
+	// the proposer invent settings to change.
+	for _, field := range decoded.Properties.Edits.Items.Required {
+		if field == "change" {
+			t.Fatal("most edits have no applicable setting")
+		}
+	}
+	if len(shape.Required) != 2 {
+		t.Fatalf("a change needs both the field and the value: %v", shape.Required)
+	}
+	for _, field := range shape.Required {
+		if field == "from" {
+			t.Fatal("the current value is read from the store, not claimed by the proposer")
+		}
+	}
+	// The enum is the list automation knows how to put back. Anything else is
+	// a change nobody can undo.
+	if len(shape.Properties.Field.Enum) == 0 ||
+		len(shape.Properties.Field.Enum) != len(rrsi.ApplicableFields()) {
+		t.Fatalf("field enum=%v", shape.Properties.Field.Enum)
+	}
+}
+
+// A proposal applied and not yet judged is shown as waiting, not as one the
+// run found unjudgeable. Telling the proposer its idea could not be judged is
+// reporting a measurement nobody made, and it is the kind of line that makes a
+// proposer abandon a component that was never tested.
+func TestAProposalAwaitingItsMeasurementIsShownAsWaiting(t *testing.T) {
+	text := Proposal(rrsi.Direction{Summary: "x", Budget: 1},
+		historyWith(rrsi.Record{Round: 0, Edits: []rrsi.Edit{{Component: "concurrency",
+			Hypothesis: "동시 실행을 늘리면 처리량이 오른다"}}}), "현재 구성", 3)
+	if strings.Contains(text, "판정 불가") {
+		t.Fatalf("nothing judged it yet:\n%s", text)
+	}
+	if !strings.Contains(text, "아직 판정되지 않은") {
+		t.Fatalf("the proposer must be told it is outstanding:\n%s", text)
+	}
+}

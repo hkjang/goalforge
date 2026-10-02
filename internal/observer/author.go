@@ -145,6 +145,10 @@ func parseProposal(raw string) ([]rrsi.Edit, error) {
 			Component  string `json:"component"`
 			Hypothesis string `json:"hypothesis"`
 			Detail     string `json:"detail"`
+			Change     *struct {
+				Field string `json:"field"`
+				To    string `json:"to"`
+			} `json:"change"`
 		} `json:"edits"`
 	}
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
@@ -155,8 +159,18 @@ func parseProposal(raw string) ([]rrsi.Edit, error) {
 	}
 	edits := make([]rrsi.Edit, 0, len(decoded.Edits))
 	for _, entry := range decoded.Edits {
-		edits = append(edits, rrsi.Edit{Component: strings.TrimSpace(entry.Component),
-			Hypothesis: strings.TrimSpace(entry.Hypothesis), Detail: strings.TrimSpace(entry.Detail)})
+		edit := rrsi.Edit{Component: strings.TrimSpace(entry.Component),
+			Hypothesis: strings.TrimSpace(entry.Hypothesis), Detail: strings.TrimSpace(entry.Detail)}
+		if entry.Change != nil {
+			field, to := strings.TrimSpace(entry.Change.Field), strings.TrimSpace(entry.Change.To)
+			// A change naming no field, or no value, is prose claiming to be
+			// applicable. Dropping it keeps the edit as the suggestion it
+			// actually is rather than failing the whole proposal.
+			if field != "" && to != "" {
+				edit.Change = &rrsi.Change{Field: field, To: to}
+			}
+		}
+		edits = append(edits, edit)
 	}
 	return edits, nil
 }
@@ -176,10 +190,4 @@ func extractJSON(raw string) string {
 		return trimmed[start : end+1]
 	}
 	return trimmed
-}
-
-// RecordProposalOutcome stores what an authored proposal did, so the next
-// round is conditioned on it.
-func RecordProposalOutcome(ctx context.Context, db *store.Store, projectID string, record rrsi.Record) error {
-	return db.RecordProposal(ctx, projectID, record)
 }

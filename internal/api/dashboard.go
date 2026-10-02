@@ -392,7 +392,7 @@ html+='<table class="std"><tr><th>기준</th><th>등급</th><th>상태</th><th>�
 rows.forEach(function(r){
 var cls=r.result==='UNMET'?'gap':(r.result==='UNKNOWN'?'unknown':'');
 html+='<tr class="'+cls+'"><td>'+esc(r.standard_id)+'</td><td class="sub">'+esc(r.severity)+'</td>'+
-'<td>'+stdBadge(r.result)+(r.stale?' <span class="pill">재평가 필요</span>':'')+'</td>'+
+'<td>'+stdBadge(r.result)+(r.stale?' <span class="pill">개정 전 '+esc(r.prior_result||'')+' · 재평가 필요</span>':'')+'</td>'+
 '<td>'+esc(r.title)+'</td><td class="sub">'+esc(r.detail||'')+'</td></tr>'});
 html+='</table>';
 if(d.exceptions&&d.exceptions.length){

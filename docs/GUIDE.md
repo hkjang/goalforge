@@ -1,6 +1,6 @@
 # GoalForge 사용 가이드
 
-기준 버전: v0.10.0
+기준 버전: v0.39.0
 
 이 문서는 GoalForge 를 **처음부터 끝까지 한 번 돌려 보는 순서**로 쓰여 있습니다. 명령어의 전체 목록은 `goalforge` 를 인자 없이 실행하거나 [README](../README.md) 를 보세요.
 
@@ -209,16 +209,23 @@ goalforge goal contract --title "상담 시스템" \
 
 여러 프로젝트에 같은 요구를 적용할 때는 목표마다 조건을 다시 쓰는 대신 **공통 개발팩**을 고정합니다.
 
-```go
-profile := standards.Profile{ProjectID: "PRJ-1",
-    PackRef:    "go-react-offline-service@0.1",
-    Attributes: map[string]string{"frontend": "react", "network": "offline"}}
-db.SaveStandardProfile(ctx, profile, standards.GoReactOfflineService())
+```sh
+goalforge standards profile --list-packs                     # 이 빌드가 가진 팩
+goalforge standards profile --attributes deployment=cli,release=binaries
+goalforge standards status                                   # 이 프로젝트가 어디에 서 있는지
+goalforge standards compare                                  # 같은 팩을 고정한 프로젝트들을 나란히
+```
+
+```
+$ goalforge standards profile --attributes deployment=cli,release=binaries
+적용: go-cli-tool@0.1 — 기준 12개 중 12개가 이 프로젝트에 적용됩니다
 ```
 
 기준 하나가 무엇으로 정산되는지와 그러려면 어떤 근거가 필요한지를 함께 싣습니다. 프로필의 속성에 맞지 않는 기준은 이 프로젝트의 결함이 아니므로 현황에 나오지 않습니다 — AI 가 없는 프로젝트는 스트리밍 기준을 어기고 있는 게 아닙니다.
 
 **판정은 위로 올라가는 실패만 막습니다.** 근거가 없거나, 있어도 내용이 비었거나, 실행이 아니라 추정이면 `MET` 이 아니라 `UNKNOWN` 입니다. `UNMET` 은 불필요할 수도 있는 작업을 만들고 `MET` 은 아무도 확인하지 않은 것을 내보냅니다.
+
+**팩은 버전으로 고정되고 체크섬까지 함께 고정됩니다.** 새 팩 버전은 차이를 제안할 뿐 과거 판정을 다시 쓰지 않고, 팩을 갈아 끼우면 무엇이 추가·삭제·개정됐는지 말합니다. 기준이 개정되면 그 기준의 옛 판정은 `UNKNOWN` 으로 돌아갑니다 — 다른 문장에 대한 답은 지금 묻는 질문에 답하지 않습니다. 고정한 팩의 체크섬이 어긋나면 무인 순회는 그 프로젝트를 건드리지 않고 다시 고정하라고 말합니다.
 
 자세한 내용은 [docs/STANDARDS.md](STANDARDS.md) 를 보세요.
 
@@ -567,6 +574,34 @@ GoalForge vs 기준선 (같은 모델·도구·예산으로 GoalForge 없이)
 ```
 
 조건 해시는 **같이 놓고 볼 수 있는지**를 증명하는 장치입니다. 그래서 라벨과 팔(독립 변수)은 해시에서 빠지고, 고정물·커밋·완료 조건·게이트·검증 종류·예산·제한시간(같아야 하는 것)만 들어갑니다. 조건이 다른 두 팔은 비교하지 않고, 한 묶음 안에 조건이 섞여 있으면 그 평균은 해석할 수 없다고 표시합니다.
+
+### 구성을 한 번에 하나씩 바꾸고, 통하지 않으면 되돌리기
+
+측정 장치가 서면 구성 변경을 **추측이 아니라 탐색**으로 돌릴 수 있습니다. 전체 규칙은 [SELECTION.md](SELECTION.md) 에 있고, 한 회차는 이렇게 돕니다.
+
+```sh
+goalforge config calibrate --label base      # 측정이 저절로 얼마나 움직이는지 먼저 잰다
+goalforge config draft --apply               # 모델이 다음 변경을 제안하고, 적용 가능하면 적용한다
+# ... 바뀐 구성으로 평가를 돌린다 ...
+goalforge config settle --incumbent base --candidate after
+```
+
+```
+$ goalforge config settle --incumbent base --candidate wip4
+[ ] NOT_SHOWN: 3 → 4
+   지금까지 최고 100.0% 에서 노이즈 13.0%p 를 빼도 52.4% 에 못 미칩니다
+   제안 PRP-… 에 기록했습니다
+되돌렸습니다: wip_limit 를 3 로
+```
+
+- **노이즈를 재기 전에는 아무것도 판정하지 않습니다.** 측정이 저절로 얼마나 움직이는지 모르면 어떤 차이도 개선이라고 부를 수 없습니다.
+- **한 번에 하나만 적용됩니다.** 판정 전에 둘을 적용하면 점수가 움직였을 때 무엇이 움직였는지 말할 수 없습니다.
+- **측정이 뒷받침하지 못한 변경은 반드시 되돌아갑니다.** 실패한 채 남겨 두는 변경은 설정이 실패할 때마다 한 걸음씩 흘러가는 것입니다.
+- **판정은 그 변경을 제안한 이력에 기록됩니다.** 그래서 성립하지 않은 설명은 다음 회차에 다시 뽑히지 않습니다 — 같은 말을 다르게 적은 것도 같은 설명으로 봅니다.
+- 적용했으나 **아직 판정되지 않은** 제안은 성립한 것도 반증된 것도 아닙니다. 판정 불가(UNJUDGEABLE)도 마찬가지입니다 — 시행이 모자라 판정하지 못한 것은 가설에 대해 아무것도 말하지 않습니다.
+- 되돌린 기록도 지우지 않습니다. 흔적 없이 되돌린 변경은 다음 회차가 기꺼이 다시 제안합니다.
+
+`goalforge config changes` 로 자동화가 무엇을 바꿨고 무엇이 되돌아갔는지 봅니다.
 
 ---
 

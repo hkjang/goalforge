@@ -123,8 +123,18 @@ type AssessmentView struct {
 	Category string `json:"category"`
 	// Stale is true when the assessment was made against an older revision of
 	// the criterion. The result still stands for what it measured; it just no
-	// longer answers the question currently being asked.
+	// longer answers the question currently being asked — so Result goes back
+	// to UNKNOWN and what it used to say moves to PriorResult.
+	//
+	// It is reset here rather than left to each reader. Six places consume
+	// these views and exactly one of them remembered to check this flag, which
+	// is how a fleet report stayed green through a catalogue upgrade that
+	// moved the bar.
 	Stale bool `json:"stale"`
+	// PriorResult is what the superseded assessment said, kept so a board can
+	// show the criterion was once met. A view that forgets reads as never
+	// assessed, and then nobody can tell an upgrade from a regression.
+	PriorResult string `json:"prior_result,omitempty"`
 }
 
 // AssessmentsFor returns every criterion in force for a project together with
@@ -170,13 +180,32 @@ func (s *Store) AssessmentsFor(ctx context.Context, projectID string, pack stand
 			view.Assessment = standards.Assessment{ProjectID: projectID, StandardID: standard.ID,
 				Revision: standard.Revision, Result: standards.ResultNotApplicable,
 				Detail: applicable.Exception.Reason + " (" + applicable.Exception.Decider + ")"}
+		case measured && entry.Revision != standard.Revision:
+			// The criterion was revised after this was judged. The stored
+			// result was about different text, so it settles nothing here.
+			view.Assessment = entry
+			view.Stale, view.PriorResult = true, entry.Result
+			view.Result = standards.ResultUnknown
+			view.Detail = fmt.Sprintf("기준이 rev %d 로 개정되었습니다 — 이전 판정(%s, rev %d)은 다른 기준에 대한 것입니다",
+				standard.Revision, entry.Result, entry.Revision)
 		case measured:
 			view.Assessment = entry
-			view.Stale = entry.Revision != standard.Revision
 		default:
+			// A criterion whose waiver aged out is not one nobody looked at.
+			// Both are UNKNOWN, and the remedies differ: one needs a check
+			// run, the other needs somebody to decide whether the waiver
+			// still holds.
+			detail := "아직 확인하지 않았습니다"
+			if lapsed, had := applicable.LapsedException(); had {
+				detail = fmt.Sprintf("예외가 더 이상 유효하지 않습니다 — 조건 %q (결정 %s, %s). 조건이 아직 성립하는지 확인하고 다시 기록하세요",
+					lapsed.ReviewWhen, lapsed.Decider, lapsed.DecidedAt.Format("2006-01-02"))
+				if lapsed.ReviewWhen == "" {
+					detail = fmt.Sprintf("예외의 재검토 날짜 %s 가 지났습니다 (결정 %s). 다시 판단해 기록하세요",
+						lapsed.ReviewBy.Format("2006-01-02"), lapsed.Decider)
+				}
+			}
 			view.Assessment = standards.Assessment{ProjectID: projectID, StandardID: standard.ID,
-				Revision: standard.Revision, Result: standards.ResultUnknown,
-				Detail: "아직 확인하지 않았습니다"}
+				Revision: standard.Revision, Result: standards.ResultUnknown, Detail: detail}
 		}
 		views = append(views, view)
 	}

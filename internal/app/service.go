@@ -27,7 +27,11 @@ type Service struct {
 	loopGuard     *planner.LoopGuard
 	newRunID      func() string
 	leaseDuration time.Duration
-	repairPolicy  store.RepairPolicy
+	// heartbeatInterval is how often a held lease is renewed. Zero means a
+	// fraction of the lease duration, which is what production uses; tests
+	// set it so a lease period fits inside a test.
+	heartbeatInterval time.Duration
+	repairPolicy      store.RepairPolicy
 }
 type ContinueResult struct {
 	WorkItem     model.WorkItem
@@ -76,10 +80,11 @@ func (s *Service) Audit(ctx context.Context, project model.Project) (IdeasResult
 
 func (s *Service) discover(ctx context.Context, project model.Project, render func(model.Goal, []model.WorkItem) string, template, taskType string) (result IdeasResult, err error) {
 	runID := s.newRunID()
-	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+	release, err := s.store.HoldLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
+	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	goal, err := s.store.CurrentGoal(ctx, project.ID)
 	if err != nil {
 		return result, err
@@ -129,10 +134,11 @@ type ReplanResult struct {
 // flagged BLOCKED for review.
 func (s *Service) Replan(ctx context.Context, project model.Project) (result ReplanResult, err error) {
 	runID := s.newRunID()
-	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+	release, err := s.store.HoldLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
+	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	goal, err := s.store.CurrentGoal(ctx, project.ID)
 	if err != nil {
 		return result, err
@@ -190,10 +196,11 @@ func (s *Service) Replan(ctx context.Context, project model.Project) (result Rep
 
 func (s *Service) ResumePaused(ctx context.Context, project model.Project) (result ResumeResult, err error) {
 	runID := s.newRunID()
-	if err = s.store.AcquireLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration); err != nil {
+	release, err := s.store.HoldLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
+	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	project, err = s.store.ProjectByID(ctx, project.ID)
 	if err != nil {
 		return result, err
@@ -311,11 +318,11 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	runID := s.newRunID()
 	// The lease carries a generation, so a cancel or a takeover part-way
 	// through this run is detectable before anything is confirmed.
-	lease, err := s.store.AcquireGenerationLease(ctx, project.ID, runID, time.Now().UTC(), s.leaseDuration)
+	lease, release, err := s.store.HoldGenerationLease(ctx, project.ID, runID, s.leaseDuration, s.heartbeatInterval)
 	if err != nil {
 		return result, err
 	}
-	defer func() { err = errors.Join(err, s.store.ReleaseLease(context.WithoutCancel(ctx), project.ID, runID)) }()
+	defer func() { err = errors.Join(err, release()) }()
 	project, err = s.store.ProjectByID(ctx, project.ID)
 	if err != nil {
 		return result, err
@@ -450,10 +457,67 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	if err == nil {
 		result.Repair, err = s.recordVerificationLoop(ctx, project, result.WorkItem.ID, result.Run.RunID, changes, result.Verification)
 	}
+	if err == nil {
+		err = s.settleAutomaticAttempt(ctx, result)
+	}
 	if err == nil && result.Verification.Passed && project.AutoCommitEnabled {
 		err = s.commitVerifiedRun(ctx, project, executionProject.RepositoryPath, goal.ID, result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID)
 	}
 	return result, err
+}
+
+// settleAutomaticAttempt closes out the automatic approval this run came from.
+//
+// The autonomy loop refuses to approve again an item whose previous automatic
+// attempt was settled and failed; without this, no attempt was ever settled
+// and that guard never fired. The loop would re-approve a failing item every
+// sweep and spend the day's allowance reaching the same place.
+//
+// Settled only when the attempt has actually ended. A failure the repair
+// policy will retry on its own is still outstanding, and calling it finished
+// would refuse the retry the policy just granted.
+func (s *Service) settleAutomaticAttempt(ctx context.Context, result ContinueResult) error {
+	if result.WorkItem.ID == "" {
+		return nil
+	}
+	if !result.Verification.Passed && result.Repair.Automatic() {
+		return nil
+	}
+	detail := automaticAttemptDetail(result)
+	err := s.store.SettleAutoApproval(ctx, result.WorkItem.ID, result.Verification.Passed, detail)
+	if errors.Is(err, store.ErrNotFound) {
+		// A person approved this one. There is no automatic attempt to close,
+		// and refusing the run over it would make manual approval fail.
+		return nil
+	}
+	return err
+}
+
+// automaticAttemptDetail says in one line why the attempt ended, naming the
+// gates that failed.
+//
+// The gate names rather than "verification failed": the next reader decides
+// whether to try again from this sentence, and a sentence that does not say
+// what stopped it sends them back to the logs to find out.
+func automaticAttemptDetail(result ContinueResult) string {
+	if result.Verification.Passed {
+		return fmt.Sprintf("게이트 %d건 통과", len(result.Verification.Results))
+	}
+	var failed []string
+	for _, gate := range result.Verification.Results {
+		if gate.Status != "PASSED" {
+			failed = append(failed, gate.Type+" ("+gate.Status+")")
+		}
+	}
+	if len(failed) == 0 {
+		// Nothing individually failed and the report did not pass, so the
+		// reason is in the plan rather than in a gate.
+		if result.Repair.Reason != "" {
+			return result.Repair.Reason
+		}
+		return "검증이 통과하지 못했습니다"
+	}
+	return "실패한 게이트: " + strings.Join(failed, ", ")
 }
 
 // contextSections converts an assembled context package into prompt sections.

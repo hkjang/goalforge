@@ -32,6 +32,39 @@ func (e Exception) Expired(now time.Time) bool {
 	return !e.ReviewBy.IsZero() && now.After(e.ReviewBy)
 }
 
+// ConditionReviewWindow is how long a conditional exception is taken on trust.
+//
+// A condition is prose: nothing can evaluate "when the import is finished".
+// So the condition alone cannot retire the exception, and an exception nothing
+// retires is permanent — which is the outcome the review requirement exists to
+// prevent. The window is the part that can be enforced: past it, nobody can
+// claim it is still the same situation, and the criterion comes back with the
+// condition named as the thing to check.
+//
+// A year rather than a month. The conditions people write here are waits on
+// other teams and other systems, and a window short enough to fire while the
+// wait is still genuine teaches everyone to re-record the exception without
+// looking at it.
+const ConditionReviewWindow = 365 * 24 * time.Hour
+
+// DueForReview reports whether a conditional exception has been taken on trust
+// for longer than anybody promised.
+//
+// Only conditional ones age. A dated exception has a date somebody chose and
+// this must not shorten it, and an exception with neither — which only a
+// non-required criterion may have — carries no promise to revisit at all.
+func (e Exception) DueForReview(now time.Time) bool {
+	if strings.TrimSpace(e.ReviewWhen) == "" || !e.ReviewBy.IsZero() {
+		return false
+	}
+	if e.DecidedAt.IsZero() {
+		// No date to measure age from. Treating that as infinitely old would
+		// retire every exception recorded before the field was.
+		return false
+	}
+	return now.After(e.DecidedAt.Add(ConditionReviewWindow))
+}
+
 // Profile is what a project has declared about itself and which pack version
 // it is pinned to.
 type Profile struct {
@@ -89,12 +122,29 @@ func (p Profile) ExceptionFor(standardID string, now time.Time) (Exception, bool
 		if exception.StandardID != standardID {
 			continue
 		}
-		if exception.Expired(now) {
+		if exception.Expired(now) || exception.DueForReview(now) {
 			// An expired exception is not an exception. Treating it as one is
-			// how a six-week waiver becomes permanent.
+			// how a six-week waiver becomes permanent — and a condition
+			// nothing ever revisits is the same waiver with a sentence
+			// attached.
 			return Exception{}, false
 		}
 		return exception, true
+	}
+	return Exception{}, false
+}
+
+// LapsedExceptionFor returns a recorded exception for this criterion that is
+// no longer live, which is why the criterion is back in force.
+func (p Profile) LapsedExceptionFor(standardID string, now time.Time) (Exception, bool) {
+	for _, exception := range p.Exceptions {
+		if exception.StandardID != standardID {
+			continue
+		}
+		if exception.Expired(now) || exception.DueForReview(now) {
+			return exception, true
+		}
+		return Exception{}, false
 	}
 	return Exception{}, false
 }
@@ -109,6 +159,13 @@ type Applicable struct {
 	// two mean different things: one is a fact about the project, the other is
 	// a decision somebody made.
 	OutOfProfile bool
+	// lapsed is the exception that stopped being taken on trust, when one did.
+	//
+	// It is carried so a criterion that reappeared can say why. Without it the
+	// criterion looks like one nobody ever assessed, and the two call for
+	// different things: one needs somebody to run a check, the other needs
+	// somebody to decide whether the waiver still holds.
+	lapsed *Exception
 }
 
 // Apply works out which criteria apply to a project and why the rest do not.
@@ -120,10 +177,21 @@ func Apply(pack Pack, profile Profile, now time.Time) []Applicable {
 			entry.OutOfProfile = true
 		} else if exception, ok := profile.ExceptionFor(standard.ID, now); ok {
 			entry.Excepted, entry.Exception = true, exception
+		} else if lapsed, had := profile.LapsedExceptionFor(standard.ID, now); had {
+			entry.lapsed = &lapsed
 		}
 		result = append(result, entry)
 	}
 	return result
+}
+
+// LapsedException returns the exception that stopped being taken on trust, so
+// a criterion that came back can explain itself.
+func (a Applicable) LapsedException() (Exception, bool) {
+	if a.lapsed == nil {
+		return Exception{}, false
+	}
+	return *a.lapsed, true
 }
 
 // InForce lists the criteria this project is actually held to.

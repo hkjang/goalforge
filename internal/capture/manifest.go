@@ -10,7 +10,6 @@ package capture
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -97,26 +96,4 @@ func (m Manifest) Validate() error {
 		seen[page.Key()] = true
 	}
 	return nil
-}
-
-// Required is the pages the documentation gate insists on.
-func (m Manifest) Required() []Page {
-	var required []Page
-	for _, page := range m.Pages {
-		if page.Required {
-			required = append(required, page)
-		}
-	}
-	sort.SliceStable(required, func(i, j int) bool { return required[i].Key() < required[j].Key() })
-	return required
-}
-
-// Page finds a declared page by key.
-func (m Manifest) Page(key string) (Page, bool) {
-	for _, page := range m.Pages {
-		if page.Key() == key {
-			return page, true
-		}
-	}
-	return Page{}, false
 }

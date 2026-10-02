@@ -28,6 +28,25 @@ var proposalSchema = map[string]any{
 					"description": "이 변경이 무엇을 개선할 것이며 왜 그런지. 측정으로 반증 가능해야 한다."},
 				"detail": map[string]any{"type": "string", "minLength": 5,
 					"description": "무엇을 어떻게 바꾸는지"},
+				// Optional, and only for the settings automation knows how to
+				// put back. Without it a draft is prose an operator retypes
+				// into `config apply`, and the retyping is where the value
+				// and the component stop matching what was proposed.
+				//
+				// "from" is deliberately not asked for. The proposer's idea of
+				// the current value is a claim; the store reads the fact and
+				// refuses a change whose starting point has moved.
+				"change": map[string]any{
+					"type": "object", "additionalProperties": false,
+					"required":    []string{"field", "to"},
+					"description": "자동으로 적용 가능한 설정 변경일 때만. 아니면 생략하라.",
+					"properties": map[string]any{
+						"field": map[string]any{"type": "string", "enum": rrsi.ApplicableFields(),
+							"description": "바꿀 설정"},
+						"to": map[string]any{"type": "string", "minLength": 1,
+							"description": "새 값. 현재 값은 적지 않는다 — 저장소가 직접 읽는다."},
+					},
+				},
 			},
 		},
 	}},
@@ -89,10 +108,17 @@ const proposalRules = `규칙:
 // the only part that says anything about the product.
 func renderHistory(history rrsi.History) string {
 	var lines []string
-	refused := 0
+	refused, pending := 0, 0
 	for _, record := range history {
 		if record.ScreenRefusal != "" {
 			refused++
+			continue
+		}
+		if record.Pending() {
+			// Applied and not yet judged. Rendering it with the default
+			// verdict word would tell the proposer the idea was found
+			// unjudgeable, which is a measurement it has not made.
+			pending++
 			continue
 		}
 		for _, edit := range record.Edits {
@@ -103,6 +129,9 @@ func renderHistory(history rrsi.History) string {
 	}
 	if refused > 0 {
 		lines = append(lines, fmt.Sprintf("- (심사에서 거절되어 측정되지 않은 제안 %d건)", refused))
+	}
+	if pending > 0 {
+		lines = append(lines, fmt.Sprintf("- (적용되었으나 아직 판정되지 않은 제안 %d건)", pending))
 	}
 	return strings.Join(lines, "\n")
 }

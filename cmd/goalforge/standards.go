@@ -80,6 +80,24 @@ func standardsProfile(ctx context.Context, s *store.Store, args []string) error 
 		}
 		pack = suggested
 	}
+	// What a repin changed, before it is saved. A pack swapped silently leaves
+	// the operator to find out from the board that the catalogue moved, and
+	// the revised criteria are exactly the ones whose assessments just went
+	// back to unknown.
+	if existing.PackRef != "" && existing.PackRef != pack.Ref() {
+		previous, prevErr := packByRef(existing.PackRef)
+		if prevErr != nil {
+			return fmt.Errorf("이전 팩 %s 를 읽지 못해 무엇이 달라졌는지 말할 수 없습니다: %w",
+				existing.PackRef, prevErr)
+		}
+		diff := standards.DiffPacks(previous, pack)
+		fmt.Printf("팩 교체: %s → %s\n", existing.PackRef, pack.Ref())
+		if diff.Empty() {
+			fmt.Println("  요구하는 것은 같습니다")
+		} else {
+			reportPackDiff(diff)
+		}
+	}
 	profile.PackRef = pack.Ref()
 	if err = s.SaveStandardProfile(ctx, profile, pack); err != nil {
 		return err
@@ -88,6 +106,24 @@ func standardsProfile(ctx context.Context, s *store.Store, args []string) error 
 	fmt.Printf("적용: %s — 기준 %d개 중 %d개가 이 프로젝트에 적용됩니다\n",
 		pack.Ref(), len(pack.Standards), len(inForce))
 	return nil
+}
+
+// reportPackDiff says what a pack swap changed, in the three terms a project
+// has to decide about.
+func reportPackDiff(diff standards.Diff) {
+	if len(diff.Added) > 0 {
+		fmt.Printf("  추가 %d건: %s\n", len(diff.Added), strings.Join(diff.Added, ", "))
+	}
+	if len(diff.Removed) > 0 {
+		fmt.Printf("  삭제 %d건: %s\n", len(diff.Removed), strings.Join(diff.Removed, ", "))
+	}
+	if len(diff.Revised) > 0 {
+		// Called out as work, not as news. An assessment made against the old
+		// text settles nothing against the new one, so these went back to
+		// unknown the moment the pack changed.
+		fmt.Printf("  개정 %d건 — 기존 판정이 무효가 되어 재평가가 필요합니다: %s\n",
+			len(diff.Revised), strings.Join(diff.Revised, ", "))
+	}
 }
 
 // standardsExcept records a decision not to apply a criterion.
@@ -176,7 +212,10 @@ func standardsStatus(ctx context.Context, s *store.Store) error {
 		mark := resultMark(view.Result)
 		stale := ""
 		if view.Stale {
-			stale = " (기준 개정 이후 재평가 필요)"
+			// The prior result is named. "needs re-assessment" alone cannot be
+			// told apart from a criterion nobody ever looked at, and the two
+			// call for different amounts of worry.
+			stale = fmt.Sprintf(" (기준 개정 — 이전 판정 %s, 재평가 필요)", view.PriorResult)
 		}
 		fmt.Printf("%s  %-10s %-8s %s%s\n", mark, view.StandardID, view.Severity, view.Title, stale)
 		if view.Detail != "" {
@@ -380,6 +419,7 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 	full := set.Bool("full", false, "모든 기준·범위를 열고 병합 승인까지 자동으로 한다")
 	save := set.Bool("save", false, "이 설정을 저장해 워커가 무인으로 적용하게 한다")
 	show := set.Bool("show", false, "저장된 설정을 보여 준다")
+	history := set.Bool("history", false, "자동화가 무엇을 승인했고 어떻게 끝났는지 보여 준다")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -392,6 +432,9 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 	project, _, _, err := standardsContext(ctx, s)
 	if err != nil {
 		return err
+	}
+	if *history {
+		return printAutoApprovalHistory(ctx, s, project.ID)
 	}
 	goal, err := s.CurrentGoal(ctx, project.ID)
 	if err != nil {
@@ -446,6 +489,48 @@ func standardsAutonomy(ctx context.Context, s *store.Store, args []string) error
 	printDecisions("병합", merges)
 	if len(merges.Approved) > 0 {
 		fmt.Println("`goalforge merge --work-item ID` 로 반영합니다 — 승인은 이미 되어 있습니다")
+	}
+	return nil
+}
+
+// printAutoApprovalHistory shows what automation approved for itself and how
+// each attempt ended.
+//
+// Written down because an approval nobody can trace back to a rule is
+// indistinguishable from one nobody made, and the records were being kept with
+// nothing to read them. The basis is shown beside the outcome: "the policy
+// permitted it" is only an answer when the policy that permitted it is beside
+// the decision.
+func printAutoApprovalHistory(ctx context.Context, s *store.Store, projectID string) error {
+	records, err := s.AutoApprovals(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		fmt.Println("자동화가 승인한 작업이 없습니다")
+		return nil
+	}
+	outstanding := 0
+	for _, record := range records {
+		mark, outcome := "[?]", "아직 끝나지 않았습니다"
+		switch {
+		case !record.Settled:
+			outstanding++
+		case record.Passed:
+			mark, outcome = "[v]", record.Outcome
+		default:
+			// A failed attempt is why the loop will not approve this item
+			// again. Saying so here is the difference between a refusal the
+			// operator understands and one that looks like a bug.
+			mark, outcome = "[x]", record.Outcome+" — 같은 항목을 자동으로 다시 시도하지 않습니다"
+		}
+		fmt.Printf("%s %-14s %-10s %s\n", mark, record.WorkItemID, record.StandardID,
+			record.ApprovedAt.Format("2006-01-02 15:04"))
+		fmt.Printf("    근거: %s\n", record.Basis)
+		fmt.Printf("    결과: %s\n", outcome)
+	}
+	if outstanding > 0 {
+		fmt.Printf("\n진행 중 %d건 — 검증이 끝나면 결과가 여기 기록됩니다\n", outstanding)
 	}
 	return nil
 }

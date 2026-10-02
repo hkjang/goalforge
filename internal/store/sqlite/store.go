@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS applied_changes (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
  component TEXT NOT NULL DEFAULT '', field TEXT NOT NULL, from_value TEXT NOT NULL,
  to_value TEXT NOT NULL, round INTEGER NOT NULL DEFAULT 0, applied_at TEXT NOT NULL,
+ proposal_id TEXT NOT NULL DEFAULT '',
  settled INTEGER NOT NULL DEFAULT 0, reverted INTEGER NOT NULL DEFAULT 0,
  outcome TEXT NOT NULL DEFAULT '', settled_at TEXT NOT NULL DEFAULT ''
 );
@@ -461,6 +462,13 @@ CREATE INDEX IF NOT EXISTS idx_verify_goal_type ON verification_results(goal_id,
 		return err
 	}
 	if err := s.ensureColumn(ctx, "verification_results", "evidence_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// The link back to the proposal. Without it a settled change cannot tell
+	// the history what the measurement established, and the falsified set —
+	// the one thing that stops the search redrawing an idea it has already
+	// tested — stays empty however many ideas have been tried.
+	if err := s.ensureColumn(ctx, "applied_changes", "proposal_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "process_leases", "generation", "INTEGER NOT NULL DEFAULT 1"); err != nil {

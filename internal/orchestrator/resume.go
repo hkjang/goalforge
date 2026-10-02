@@ -44,13 +44,14 @@ func (o *Orchestrator) ResumeHandler(config ResumeConfig) scheduler.Handler {
 			return out, errors.New("Git inspector is required")
 		}
 		now := config.Now().UTC()
-		if err = o.store.AcquireLease(ctx, job.ProjectID, config.Owner, now, config.LeaseDuration); err != nil {
-			return out, err
+		// Held rather than taken: a resumed run is a provider run, and a
+		// lease taken for a fixed period and never renewed is lost by any run
+		// that outlasts it — while the worker is still writing.
+		release, leaseErr := o.store.HoldLease(ctx, job.ProjectID, config.Owner, config.LeaseDuration, 0)
+		if leaseErr != nil {
+			return out, leaseErr
 		}
-		defer func() {
-			releaseErr := o.store.ReleaseLease(context.WithoutCancel(ctx), job.ProjectID, config.Owner)
-			err = errors.Join(err, releaseErr)
-		}()
+		defer func() { err = errors.Join(err, release()) }()
 		project, err := o.store.ProjectByID(ctx, job.ProjectID)
 		if err != nil {
 			return out, err

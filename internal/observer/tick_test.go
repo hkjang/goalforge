@@ -299,3 +299,87 @@ func TestAnEnrolledProjectWithNoGoalIsQuietNotBroken(t *testing.T) {
 }
 
 var _ = time.Now
+
+// driftedPack is the pinned catalogue edited in place: the same id@version,
+// different content. The profile records the checksum it agreed to, so saving
+// this and resolving the shipped one by ref is the same disagreement as the
+// pack having been edited under a project that stood still.
+func driftedPack() standards.Pack {
+	pack := standards.GoReactOfflineService()
+	edited := make([]standards.Standard, len(pack.Standards))
+	copy(edited, pack.Standards)
+	// The title moves and the revision does not, which is the case nothing
+	// else catches: a revision bump marks the old assessments stale, and a
+	// silent edit marks nothing.
+	edited[0].Title = edited[0].Title + " (제자리 수정)"
+	pack.Standards = edited
+	return pack
+}
+
+// packFor's comment says a profile naming an unknown pack is refused "rather
+// than silently measured against whatever happens to be compiled in". A pack
+// edited in place resolves by ref and is exactly that: the project is judged
+// by criteria it never agreed to, with no revision bump to mark anything stale.
+//
+// The checksum that detects it was already stored and already computed — and
+// the sweep read the profile, discarded the checksum, and carried on.
+func TestASweepRefusesAPackThatChangedUnderTheProject(t *testing.T) {
+	ctx, db := tickFixture(t)
+	tickProjectIn(t, ctx, db, "PRJ-1", true)
+	drifted := driftedPack()
+	if err := db.SaveStandardProfile(ctx, standards.Profile{ProjectID: "PRJ-1", PackRef: drifted.Ref(),
+		Attributes: map[string]string{"frontend": "react", "network": "offline", "deployment": "service"}},
+		drifted); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Tick(ctx, db, "test", Default(), DefaultSchedulePolicy(), DefaultSupplyPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Projects) != 1 {
+		t.Fatalf("result=%+v", result.Projects)
+	}
+	tick := result.Projects[0]
+	if tick.Err == nil {
+		t.Fatal("the catalogue this project agreed to is not the one compiled in")
+	}
+	if !strings.Contains(tick.Err.Error(), "체크섬") {
+		t.Fatalf("the reader has to be told what disagreed: %v", tick.Err)
+	}
+	if tick.Ran || len(tick.Filed) > 0 {
+		t.Fatalf("nothing may be filed against a catalogue nobody agreed to: %+v", tick)
+	}
+	// And the sweep does not abort. One project pinned to a drifted pack must
+	// not stop the others being maintained.
+	if _, err = db.AssessmentsFor(ctx, "PRJ-1", standards.GoReactOfflineService(),
+		standards.Profile{ProjectID: "PRJ-1", PackRef: drifted.Ref()}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A sweep over two projects where one drifted still maintains the other.
+func TestOneDriftedProjectDoesNotStopTheSweep(t *testing.T) {
+	ctx, db := tickFixture(t)
+	tickProjectIn(t, ctx, db, "PRJ-1", true)
+	tickProjectIn(t, ctx, db, "PRJ-2", true)
+	drifted := driftedPack()
+	if err := db.SaveStandardProfile(ctx, standards.Profile{ProjectID: "PRJ-1", PackRef: drifted.Ref(),
+		Attributes: map[string]string{"frontend": "react", "network": "offline", "deployment": "service"}},
+		drifted); err != nil {
+		t.Fatal(err)
+	}
+	enrol(t, ctx, db, "PRJ-2")
+	result, err := Tick(ctx, db, "test", Default(), DefaultSchedulePolicy(), DefaultSupplyPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Projects) != 2 {
+		t.Fatalf("result=%+v", result.Projects)
+	}
+	if result.Projects[0].Err == nil {
+		t.Fatal("PRJ-1 drifted")
+	}
+	if result.Projects[1].Err != nil || !result.Projects[1].Ran {
+		t.Fatalf("PRJ-2 agreed to the catalogue it is being judged by: %+v", result.Projects[1])
+	}
+}
