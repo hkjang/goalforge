@@ -37,9 +37,46 @@ type GoalDraft struct {
 	Title     string           `json:"title"`
 	Objective string           `json:"objective"`
 	Criteria  []DraftCriterion `json:"criteria"`
-	Refusals  []rrsi.Refusal   `json:"refusals,omitempty"`
-	Attempts  int              `json:"attempts"`
+	// Health is the one gate that must keep passing after every run.
+	//
+	// It is separate from the criteria because the two answer different
+	// questions, and the rest of the system already keeps them apart:
+	// verification gates run after every work item and decide whether that run
+	// broke anything, while the goal's criteria decide whether the goal is
+	// done. Installing completion criteria as required gates gave a goal with
+	// six features six gates no single work item could satisfy — the first
+	// item implements one piece and the end-to-end gate still fails because
+	// nothing else exists yet. Every run failed, the repair loop burned its
+	// attempts, and a multi-part goal could never make progress.
+	Health   *DraftCriterion `json:"health,omitempty"`
+	Refusals []rrsi.Refusal  `json:"refusals,omitempty"`
+	Attempts int             `json:"attempts"`
 }
+
+// Gates is the draft as verification gates.
+//
+// Only the health gate is required. A completion criterion is measured — its
+// result is what the goal's progress is read from — but it must not fail a run
+// that has not reached it yet.
+func (d GoalDraft) Gates() []store.GateConfig {
+	gates := make([]store.GateConfig, 0, len(d.Criteria)+1)
+	if d.Health != nil {
+		gates = append(gates, store.GateConfig{Type: d.Health.Type, Command: d.Health.GateCommand,
+			Timeout: goalGateTimeout, Required: true, SuccessValue: d.Health.ExpectedValue,
+			Kind: d.Health.Kind})
+	}
+	for _, criterion := range d.Criteria {
+		gates = append(gates, store.GateConfig{Type: criterion.Type, Command: criterion.GateCommand,
+			Timeout: goalGateTimeout, Required: false, SuccessValue: criterion.ExpectedValue,
+			Kind: criterion.Kind})
+	}
+	return gates
+}
+
+// goalGateTimeout bounds a gate once it is installed. Longer than the trial
+// timeout: the trial only asks whether the command runs and fails, while the
+// installed gate has to let a real suite finish.
+const goalGateTimeout = 15 * time.Minute
 
 // Accepted reports whether the draft may be shown as something to confirm.
 func (d GoalDraft) Accepted() bool { return len(d.Refusals) == 0 && len(d.Criteria) > 0 }
@@ -55,6 +92,18 @@ const (
 	// RefusalUnjudgeable means the expected value cannot be compared against a
 	// measurement.
 	RefusalUnjudgeable = "UNJUDGEABLE"
+	// RefusalNoHealthGate means nothing would fail a run.
+	//
+	// The runner refuses a project whose gates are all optional, so a draft
+	// without one would set the goal and leave nothing able to run — worse
+	// than refusing it, because the refusal says what is missing and the other
+	// leaves a project that looks ready.
+	RefusalNoHealthGate = "NO_HEALTH_GATE"
+	// RefusalHealthGateFails means the proposed health gate already fails. One
+	// that fails today is not a health gate; it is a completion criterion
+	// under the wrong heading, and making it required would fail every run
+	// until the whole goal was done.
+	RefusalHealthGateFails = "HEALTH_GATE_FAILS"
 )
 
 // trivialCommands are shells for "always succeed". A gate built from one of
@@ -92,6 +141,22 @@ func ScreenDraft(draft GoalDraft) []rrsi.Refusal {
 	if len(draft.Criteria) == 0 {
 		refusals = append(refusals, rrsi.Refusal{Kind: rrsi.RefusalNoHypothesis,
 			Detail: "완료 조건이 없습니다 — 아무것도 판정할 수 없는 목표는 목표가 아닙니다"})
+	}
+	// Structural only: whether a health gate was proposed at all. Whether it
+	// actually passes is VerifyDraftFailsNow's answer, because answering it
+	// means running the command — and the same rule written in both places
+	// would be two rules.
+	switch {
+	case draft.Health == nil:
+		refusals = append(refusals, rrsi.Refusal{Kind: RefusalNoHealthGate,
+			Detail: "매 실행 뒤 통과해야 할 게이트가 없습니다 — 완료 조건만으로는 부분 작업이 모두 실패합니다"})
+	case len(draft.Health.GateCommand) == 0 || trivialCommands[baseCommand(draft.Health.GateCommand[0])]:
+		// The same rule the criteria get, for the same reason. A health gate
+		// that cannot fail is the one required gate catching nothing, and then
+		// every run is "verified" by a command that was green before it ran.
+		refusals = append(refusals, rrsi.Refusal{Kind: RefusalNoHealthGate,
+			Detail: fmt.Sprintf("%s 는 항상 통과하는 명령입니다 — 아무것도 잡지 못하는 필수 게이트입니다",
+				draft.Health.Type)})
 	}
 	seen := map[string]bool{}
 	for _, criterion := range draft.Criteria {
@@ -200,6 +265,38 @@ func VerifyDraftFailsNow(ctx context.Context, engine *verification.Engine, repos
 			refusals = append(refusals, rrsi.Refusal{Kind: RefusalPassesAlready,
 				Detail: fmt.Sprintf("%s: 이 게이트가 지금 이미 통과합니다 — 아직 만들지 않은 것을 재고 있지 않습니다 (주장: %s)",
 					criterion.Type, criterion.WhyItFailsNow)})
+		}
+	}
+	// The health gate is run too, and the answer wanted is the opposite one.
+	// It is checked here rather than trusted from the draft: a proposer that
+	// says "go build ./... passes" about a repository that does not compile
+	// would install a gate failing every run.
+	if draft.Health != nil {
+		results, _, err := engine.Check(ctx, repository, []verification.Gate{{
+			Type: draft.Health.Type, Command: draft.Health.GateCommand, Required: true,
+			SuccessValue: draft.Health.ExpectedValue, Kind: draft.Health.Kind,
+			Timeout: draftGateTimeout}})
+		switch {
+		case err != nil || len(results) == 0 || results[0].ExitCode < 0:
+			detail := "명령을 실행할 수 없었습니다"
+			if err != nil {
+				detail = err.Error()
+			} else if len(results) > 0 && strings.TrimSpace(results[0].Output) != "" {
+				detail = firstLineOf(results[0].Output)
+			}
+			// Marked as failing so the screen refuses it. A health gate nobody
+			// could run is not one that passes.
+			draft.Health.FailsNow = true
+			refusals = append(refusals, rrsi.Refusal{Kind: RefusalHealthGateFails,
+				Detail: fmt.Sprintf("%s: 게이트를 돌릴 수 없었습니다: %s", draft.Health.Type, detail)})
+		default:
+			draft.Health.FailsNow = results[0].Status != "PASSED"
+			draft.Health.Output = results[0].Output
+			if draft.Health.FailsNow {
+				refusals = append(refusals, rrsi.Refusal{Kind: RefusalHealthGateFails,
+					Detail: fmt.Sprintf("%s: 지금 이미 실패합니다 — 매 실행을 막는 게이트가 되므로 목표가 끝날 때까지 아무것도 진행되지 않습니다: %s",
+						draft.Health.Type, firstLineOf(results[0].Output))})
+			}
 		}
 	}
 	return refusals

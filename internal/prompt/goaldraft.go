@@ -8,10 +8,40 @@ import (
 
 var goalDraftSchema = map[string]any{
 	"type": "object", "additionalProperties": false,
-	"required": []string{"title", "objective", "criteria"},
+	"required": []string{"title", "objective", "criteria", "health"},
 	"properties": map[string]any{
 		"title":     map[string]any{"type": "string", "minLength": 2},
 		"objective": map[string]any{"type": "string", "minLength": 10},
+		// Separate from the criteria because the two answer different
+		// questions. A completion criterion says whether the goal is done; the
+		// health gate says whether a run broke anything. Asked for together
+		// and installed together, the completion criteria became required
+		// gates that no single work item could satisfy — the first item
+		// implements one piece and the end-to-end criterion still fails
+		// because nothing else exists yet, so every run failed and a
+		// multi-part goal could never progress.
+		"health": map[string]any{
+			"type": "object", "additionalProperties": false,
+			"required":    []string{"type", "expected_value", "kind", "gate_command", "why_it_fails_now"},
+			"description": "매 실행 뒤 통과해야 할 게이트 하나. 지금 이미 통과해야 하고, 부분적으로 만들어진 코드도 통과할 수 있어야 한다 (예: go build ./... 또는 npm run typecheck). 완료 조건을 여기 넣으면 목표가 끝날 때까지 모든 실행이 실패한다.",
+			"properties": map[string]any{
+				"type": map[string]any{"type": "string", "minLength": 2,
+					"description": "게이트 이름. 소문자와 밑줄만."},
+				"expected_value": map[string]any{"type": "string", "minLength": 1},
+				"kind": map[string]any{"type": "string",
+					"enum": []string{"build", "test"},
+					// Build or test only. A journey or security gate run after
+					// every work item is a goal criterion wearing the wrong
+					// label, and it would fail every partial run.
+					"description": "build 또는 test. 이것은 건강 검사이지 완료 조건이 아니다."},
+				"gate_command": map[string]any{"type": "array", "minItems": 1,
+					"items": map[string]any{"type": "string"},
+					"description": "지금 이 저장소에서 통과하는 명령. 실행 파일과 인자를 각각 하나의 원소로. " +
+						`예: ["go","build","./..."]. 셸은 쓸 수 없다 — sh -c "..." 는 거절된다.`},
+				"why_it_fails_now": map[string]any{"type": "string", "minLength": 10,
+					"description": "이 게이트가 지금 통과하는 이유, 그리고 어떤 변경이 이것을 깨뜨리는가"},
+			},
+		},
 		"criteria": map[string]any{
 			"type": "array", "minItems": 1, "maxItems": 6,
 			"items": map[string]any{
@@ -31,8 +61,14 @@ var goalDraftSchema = map[string]any{
 						"enum":        []string{"build", "test", "integration", "journey", "security", "performance"},
 						"description": "어떤 종류의 검증이라야 이 기준을 충족시킬 수 있는가"},
 					"gate_command": map[string]any{"type": "array", "minItems": 1,
-						"items":       map[string]any{"type": "string"},
-						"description": "이 기준을 재는 명령. 인자 배열로."},
+						"items": map[string]any{"type": "string"},
+						// The shell is blocked by the command policy, and the
+						// policy was never told to the side that fills this in:
+						// a drafter needing two commands reached for
+						// sh -c "a && b" and every criterion was refused.
+						"description": "이 기준을 재는 명령. 실행 파일과 인자를 각각 하나의 원소로. " +
+							`예: ["go","test","-run","TestRedirect","./..."]. 셸은 쓸 수 없다 — ` +
+							`sh -c "..." 나 && 나 파이프는 거절된다. 두 명령이 필요하면 기준을 둘로 나눠라.`},
 					"why_it_fails_now": map[string]any{"type": "string", "minLength": 10,
 						"description": "아직 구현되지 않았으므로 이 명령이 지금 실패하는 이유"},
 				},
@@ -79,4 +115,12 @@ const goalDraftRules = `규칙:
 - 게이트 명령은 지금 실패해야 한다. 아직 만들지 않은 것을 재는 명령이 지금 통과한다면 그 명령은
   그것을 재고 있지 않다. why_it_fails_now 에 왜 지금 실패하는지 적어라. 그 설명이 틀리면 거절된다.
 - echo, true, exit 0 처럼 항상 통과하는 명령을 쓰지 마라. 통과만 하는 게이트는 게이트가 아니다.
-- 기준은 6개를 넘기지 마라. 판정할 수 없을 만큼 많은 조건은 아무도 판정하지 않는다.`
+- 게이트 명령에 **셸을 쓸 수 없다.** sh -c "..." 와 && 와 파이프는 거절된다. 실행 파일과 인자를
+  각각 하나의 원소로 적어라: ["go","test","-run","TestRedirect","./..."].
+  두 명령이 필요하면 그것은 기준이 둘이라는 뜻이다. 하나의 게이트는 하나를 재야 판정을 귀속할 수 있다.
+- 기준은 6개를 넘기지 마라. 판정할 수 없을 만큼 많은 조건은 아무도 판정하지 않는다.
+- health 게이트는 **지금 이미 통과해야** 하고, 부분적으로 만들어진 코드도 통과할 수 있어야 한다.
+  좋음: go build ./...        좋음: npm run typecheck        좋음: go vet ./...
+  나쁨: go test -run TestJourney  (완료 조건이다 — 목표가 끝날 때까지 모든 실행을 막는다)
+  이것은 매 작업 항목 뒤에 돌아가 "이번 변경이 무언가를 깨뜨렸는가" 를 묻는 게이트다.
+  완료 조건과 반대 방향이다: 완료 조건은 지금 실패해야 하고, health 는 지금 통과해야 한다.`

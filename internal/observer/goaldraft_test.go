@@ -17,8 +17,24 @@ func criterion(name, expected, kind string, command ...string) DraftCriterion {
 		GateCommand: command, WhyItFailsNow: "아직 구현하지 않았기 때문입니다"}
 }
 
+// goRepo is a repository the fixture's health gate passes in. A health gate
+// has to pass now, so the tests that run gates need somewhere it can.
+func goRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func draftOf(criteria ...DraftCriterion) GoalDraft {
-	return GoalDraft{Title: "메모 저장", Objective: "사용자가 메모를 저장할 수 있다", Criteria: criteria}
+	// A health gate, because a draft without one is refused on its own account
+	// and these tests are about the criteria. Partial code has to pass it, so
+	// it is a build check rather than a completion criterion.
+	health := criterion("module_present", "true", "build", "test", "-f", "go.mod")
+	return GoalDraft{Title: "메모 저장", Objective: "사용자가 메모를 저장할 수 있다",
+		Criteria: criteria, Health: &health}
 }
 
 // A gate built from a command that always succeeds is green from the moment it
@@ -60,7 +76,7 @@ func TestAGateThatAlreadyPassesIsRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repository := t.TempDir()
+	repository := goRepo(t)
 	// A gate that checks for a file nobody has written fails, as it should.
 	missing := draftOf(criterion("note_saves", "true", "journey", "test", "-f", "notes.go"))
 	refusals := VerifyDraftFailsNow(context.Background(), engine, repository, &missing)
@@ -103,7 +119,7 @@ func TestAGateThatCannotBeRunIsNotCountedAsFailing(t *testing.T) {
 		t.Fatal(err)
 	}
 	draft := draftOf(criterion("note_saves", "true", "journey", "./no-such-script-at-all"))
-	refusals := VerifyDraftFailsNow(context.Background(), engine, t.TempDir(), &draft)
+	refusals := VerifyDraftFailsNow(context.Background(), engine, goRepo(t), &draft)
 	if len(refusals) == 0 {
 		t.Fatal("a gate that cannot run has not shown the work is undone")
 	}
