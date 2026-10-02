@@ -197,6 +197,92 @@ func TestScopedApprovalBindsToWorkItemAndCommit(t *testing.T) {
 	}
 }
 
+// ScopedApprovalExists answers "has this release already been put to anyone"
+// on exactly the same scope the spending side matches on. The two have to agree
+// to the letter: a check that is narrower issues duplicates, and one that
+// matches a release the consume side cannot find skips the issue and deadlocks
+// the merge.
+func TestScopedApprovalExistsMatchesExactlyTheReleaseConsumeWouldSpend(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	p := model.Project{ID: "P1", Name: "demo", RepositoryPath: t.TempDir(), DefaultBranch: "main", Provider: "codex"}
+	if err = s.CreateProject(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := ApprovalScope{WorkItemID: "W1", SourceBranch: "goalforge/W1", TargetRef: "main", CommitSHA: "aaaaaaaaaaaabbbb", FilesChanged: 3}
+	exists := func(scope ApprovalScope) bool {
+		t.Helper()
+		found, checkErr := s.ScopedApprovalExists(ctx, p.ID, ApprovalMergeBranch, scope)
+		if checkErr != nil {
+			t.Fatal(checkErr)
+		}
+		return found
+	}
+	if exists(reviewed) {
+		t.Fatal("nothing has been requested yet")
+	}
+	approval, err := s.RequestScopedApproval(ctx, p.ID, ApprovalMergeBranch, "review W1", reviewed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pending counts. A request already waiting for a reviewer is not a reason
+	// to file a second one beside it.
+	if !exists(reviewed) {
+		t.Fatal("a pending request for this release already exists")
+	}
+	if err = s.Approve(ctx, p.ID, approval.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(reviewed) {
+		t.Fatal("the granted approval must be visible to the issuing side")
+	}
+	// The scope is the release, not the work item. Re-run work produces a new
+	// commit that nobody has approved, and a different destination is a
+	// different decision.
+	moved := reviewed
+	moved.CommitSHA = "eeeeeeeeeeeeffff"
+	if exists(moved) {
+		t.Fatal("a commit that moved after review has not been approved")
+	}
+	elsewhere := reviewed
+	elsewhere.TargetRef = "release"
+	if exists(elsewhere) {
+		t.Fatal("another destination has not been approved")
+	}
+	other := reviewed
+	other.WorkItemID = "W2"
+	if exists(other) {
+		t.Fatal("another work item has not been approved")
+	}
+	// Spent and refused both stay visible, because both are decisions about
+	// this release: re-issuing after either one releases the same commit twice,
+	// or overrides the person who said no.
+	if used, consumeErr := s.ConsumeScopedApproval(ctx, p.ID, ApprovalMergeBranch, "R1", reviewed); consumeErr != nil || !used {
+		t.Fatalf("reviewed change not approved: used=%t err=%v", used, consumeErr)
+	}
+	if !exists(reviewed) {
+		t.Fatal("a consumed approval means this release already happened")
+	}
+	refused := ApprovalScope{WorkItemID: "W3", SourceBranch: "goalforge/W3", TargetRef: "main", CommitSHA: "ccccccccccccdddd"}
+	rejected, err := s.RequestScopedApproval(ctx, p.ID, ApprovalMergeBranch, "review W3", refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RejectApproval(ctx, p.ID, rejected.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(refused) {
+		t.Fatal("a rejection is a decision about this release and must not be re-issued over")
+	}
+	if _, err = s.ScopedApprovalExists(ctx, p.ID, ApprovalMergeBranch, ApprovalScope{WorkItemID: "W1"}); err == nil {
+		t.Fatal("a scope without a commit names no release and must be refused")
+	}
+}
+
 // Scoped actions must not fall back to the unscoped path, which would restore
 // the hole the scope closes.
 func TestUnscopedConsumeRefusesScopedActions(t *testing.T) {

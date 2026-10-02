@@ -83,6 +83,11 @@ func AutoApproveMerges(ctx context.Context, db *store.Store, projectID, goalID s
 		byID[item.ID] = i
 	}
 	sort.Strings(ids)
+	// Releases already decided on. Collected rather than dropped, because
+	// "nothing to approve" and "an approval is standing ready to spend" look
+	// the same to an operator re-running the command and are not the same
+	// thing: the second one is waiting for `goalforge merge`.
+	var standing []string
 	for _, workID := range ids {
 		item := items[byID[workID]]
 		standardID := findings[workID]
@@ -107,6 +112,27 @@ func AutoApproveMerges(ctx context.Context, db *store.Store, projectID, goalID s
 		}
 		scope := store.ApprovalScope{WorkItemID: workID, SourceBranch: commit.Branch,
 			TargetRef: project.DefaultBranch, CommitSHA: commit.CommitSHA, FilesChanged: commit.FilesCommitted}
+		// Nothing about finished work changes between two passes of the
+		// unattended sweep, so without this the same release is approved again
+		// every quarter of an hour: a stack of identical approvals, each one of
+		// which `goalforge merge` will spend to release the same commit with no
+		// review behind it, and a sweep that reports activity forever and so can
+		// never be quiet again.
+		//
+		// This is not a second copy of the envelope — what the envelope permits
+		// is admits()/AutoApprove's decision and is not repeated here. It asks
+		// only whether this decision has already been taken, which is the same
+		// question item.Status answers for execution approvals and which the
+		// merge path has nothing to answer with, because merging does not move
+		// the item off DONE.
+		decided, err := db.ScopedApprovalExists(ctx, projectID, store.ApprovalMergeBranch, scope)
+		if err != nil {
+			return decisions, err
+		}
+		if decided {
+			standing = append(standing, workID)
+			continue
+		}
 		basis := fmt.Sprintf("자동 병합 승인 — 기준 %s · 게이트 %s · 커밋 %s",
 			standardID, strings.Join(gates, ", "), shortSHA(commit.CommitSHA))
 		approval, err := db.RequestScopedApproval(ctx, projectID, store.ApprovalMergeBranch, basis, scope)
@@ -117,6 +143,9 @@ func AutoApproveMerges(ctx context.Context, db *store.Store, projectID, goalID s
 			return decisions, err
 		}
 		decisions.Approved = append(decisions.Approved, workID)
+	}
+	if len(standing) > 0 {
+		decisions.Detail = fmt.Sprintf("이미 결정된 병합이라 다시 발급하지 않았습니다: %s", strings.Join(standing, ", "))
 	}
 	return decisions, nil
 }
