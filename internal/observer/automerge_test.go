@@ -274,6 +274,102 @@ func TestAnAutomaticMergeApprovalIsChained(t *testing.T) {
 	}
 }
 
+// The unattended sweep calls this every quarter of an hour. Nothing about
+// finished work changes between two passes, so the second pass has nothing to
+// grant — and reporting that it granted something keeps the whole sweep
+// permanently "not quiet", which is what the silent-sweep design is for.
+func TestASecondSweepDoesNotGrantTheMergeApprovalAgain(t *testing.T) {
+	ctx, db, _, goal := autonomyFixture(t)
+	if err := db.SetGateSettles(ctx, "PRJ-1", "asset_scan", []string{"NET-002"}); err != nil {
+		t.Fatal(err)
+	}
+	item := verifiedWork(t, ctx, db, goal.ID, "NET-002", "asset_scan", "444444444444", true)
+	first, err := AutoApproveMerges(ctx, db, "PRJ-1", goal.ID, mergePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Approved) != 1 {
+		t.Fatalf("approved=%+v refused=%+v", first.Approved, first.Refused)
+	}
+	second, err := AutoApproveMerges(ctx, db, "PRJ-1", goal.ID, mergePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Approved) != 0 {
+		t.Fatalf("the standing approval was granted a second time: %+v", second.Approved)
+	}
+	// Silent is not the same as missing. The approval is sitting there ready to
+	// spend, and an operator re-running the command has to be told that rather
+	// than read "nothing to approve" and go looking for why.
+	if !strings.Contains(second.Detail, item.ID) {
+		t.Fatalf("the standing approval must still be named: %q", second.Detail)
+	}
+}
+
+// Repeated passes must leave exactly one spendable approval. A stack of
+// identical approvals is a stack of merges nobody granted: the first is spent
+// by `goalforge merge`, and every leftover will release the same commit again
+// with no review behind it.
+func TestRepeatedSweepsLeaveOneSpendableMergeApproval(t *testing.T) {
+	ctx, db, _, goal := autonomyFixture(t)
+	if err := db.SetGateSettles(ctx, "PRJ-1", "asset_scan", []string{"NET-002"}); err != nil {
+		t.Fatal(err)
+	}
+	item := verifiedWork(t, ctx, db, goal.ID, "NET-002", "asset_scan", "555555555555", true)
+	for pass := 0; pass < 3; pass++ {
+		if _, err := AutoApproveMerges(ctx, db, "PRJ-1", goal.ID, mergePolicy()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scope := store.ApprovalScope{WorkItemID: item.ID, SourceBranch: "goalforge/" + item.ID,
+		TargetRef: "main", CommitSHA: "555555555555"}
+	used, err := db.ConsumeScopedApproval(ctx, "PRJ-1", store.ApprovalMergeBranch, "merge:first", scope)
+	if err != nil || !used {
+		t.Fatalf("the merge command must find the approval: used=%t err=%v", used, err)
+	}
+	used, err = db.ConsumeScopedApproval(ctx, "PRJ-1", store.ApprovalMergeBranch, "merge:second", scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used {
+		t.Fatal("a leftover approval would release the same commit a second time unreviewed")
+	}
+}
+
+// A reviewer's "no" on this commit stands. Re-granting it a quarter of an hour
+// later would mean the only way to refuse a release is to be faster than the
+// sweep.
+func TestARejectedMergeIsNotRegrantedBySweep(t *testing.T) {
+	ctx, db, _, goal := autonomyFixture(t)
+	if err := db.SetGateSettles(ctx, "PRJ-1", "asset_scan", []string{"NET-002"}); err != nil {
+		t.Fatal(err)
+	}
+	item := verifiedWork(t, ctx, db, goal.ID, "NET-002", "asset_scan", "777777777777", true)
+	scope := store.ApprovalScope{WorkItemID: item.ID, SourceBranch: "goalforge/" + item.ID,
+		TargetRef: "main", CommitSHA: "777777777777", FilesChanged: 2}
+	requested, err := db.RequestScopedApproval(ctx, "PRJ-1", store.ApprovalMergeBranch, "사람이 검토합니다", scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.RejectApprovalWithReason(ctx, "PRJ-1", requested.ID, "insufficient_evidence", "증거가 모자랍니다"); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := AutoApproveMerges(ctx, db, "PRJ-1", goal.ID, mergePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions.Approved) != 0 {
+		t.Fatalf("automation overrode a reviewer's rejection: %+v", decisions.Approved)
+	}
+	used, err := db.ConsumeScopedApproval(ctx, "PRJ-1", store.ApprovalMergeBranch, "merge:rejected", scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used {
+		t.Fatal("a rejected release must stay unspendable")
+	}
+}
+
 // "All criteria" and "all scopes" are expressible, because an operator who
 // wants the whole loop running should not have to enumerate forty IDs.
 func TestTheEnvelopeCanBeOpenedCompletely(t *testing.T) {

@@ -258,6 +258,51 @@ func (s *Store) ConsumeApproval(ctx context.Context, projectID, actionType, runI
 	return s.consume(ctx, runID, `SELECT id FROM approvals WHERE project_id=? AND action_type=? AND status='APPROVED' AND work_item_id='' ORDER BY approved_at,id LIMIT 1`, projectID, actionType)
 }
 
+// scopedApprovalRelease is the condition under which an approval row is about
+// the release a caller is holding: this project, this action, this work item,
+// this commit, and either this destination or none recorded.
+//
+// It is a single constant because both sides of an approval's life read it.
+// The spending side adds status='APPROVED'; the issuing side asks whether a row
+// exists at all. Written out twice they would drift, and either direction of
+// drift is a defect: narrower on the issuing side stacks duplicate approvals,
+// wider skips issuing a release the spending side then cannot find.
+const scopedApprovalRelease = `project_id=? AND action_type=? AND work_item_id=? AND commit_sha=? AND (target_ref='' OR target_ref=?)`
+
+// scopedApprovalArgs binds scopedApprovalRelease, in its order.
+func scopedApprovalArgs(projectID, actionType string, scope ApprovalScope) []any {
+	return []any{projectID, actionType, scope.WorkItemID, scope.CommitSHA, scope.TargetRef}
+}
+
+// ScopedApprovalExists reports whether this exact release has already been put
+// to anyone, in any state.
+//
+// Status is deliberately not filtered. Pending means a request is already
+// waiting for a reviewer, approved means one is standing ready to spend,
+// consumed means the release already happened, and rejected means a person
+// said no to this commit. In every one of those the answer to "should another
+// request be filed for it" is no — and for the last two, filing one would
+// release the same commit twice or overrule the reviewer.
+//
+// This is not a judgement about what the autonomy envelope permits; that
+// question has one home and this is not a second copy of it. It answers only
+// whether the decision has already been taken.
+func (s *Store) ScopedApprovalExists(ctx context.Context, projectID, actionType string, scope ApprovalScope) (bool, error) {
+	if !scope.Scoped() {
+		return false, errors.New("work item and commit SHA are required to look up a scoped approval")
+	}
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM approvals WHERE `+scopedApprovalRelease+` LIMIT 1`,
+		scopedApprovalArgs(projectID, actionType, scope)...).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // ConsumeScopedApproval spends an approval only if it was granted for exactly
 // this work item, commit, and target. When an approval exists for the work
 // item but names a different commit the change moved after review, and that is
@@ -268,8 +313,8 @@ func (s *Store) ConsumeScopedApproval(ctx context.Context, projectID, actionType
 		return false, errors.New("work item and commit SHA are required to consume a scoped approval")
 	}
 	matched, err := s.consume(ctx, runID,
-		`SELECT id FROM approvals WHERE project_id=? AND action_type=? AND status='APPROVED' AND work_item_id=? AND commit_sha=? AND (target_ref='' OR target_ref=?) ORDER BY approved_at,id LIMIT 1`,
-		projectID, actionType, scope.WorkItemID, scope.CommitSHA, scope.TargetRef)
+		`SELECT id FROM approvals WHERE status='APPROVED' AND `+scopedApprovalRelease+` ORDER BY approved_at,id LIMIT 1`,
+		scopedApprovalArgs(projectID, actionType, scope)...)
 	if err != nil || matched {
 		return matched, err
 	}
