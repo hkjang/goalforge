@@ -46,15 +46,27 @@ func (s *Store) SwitchProvider(ctx context.Context, projectID, toProvider, toMod
 	if project.State == "RUNNING" || project.State == "PREFLIGHT" || project.State == "DRAINING" || project.State == "VERIFYING" || project.State == "CHECKPOINTING" || project.State == "RESUMING" || project.State == "WAITING_QUOTA" {
 		return result, errors.New("provider cannot be switched while project execution is active or scheduled")
 	}
+	// A project with no goal has nothing to hand off. Registering a project
+	// and setting its goal are separate commands, so a project sits in this
+	// state for as long as it takes somebody to run the second one — and
+	// choosing the provider is a natural thing to do first. Refusing it
+	// told the operator only "not found", about a project that is simply new.
+	//
+	// Any other error is still an error: treating an unreadable goal as an
+	// absent one would hand a project over while its state could not be read.
+	var content HandoffContent
 	goal, err := s.CurrentGoal(ctx, projectID)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrNotFound):
+	case err != nil:
 		return result, err
+	default:
+		items, itemsErr := s.ListWorkItems(ctx, goal.ID)
+		if itemsErr != nil {
+			return result, itemsErr
+		}
+		content = HandoffContent{Goal: goal, WorkItems: items}
 	}
-	items, err := s.ListWorkItems(ctx, goal.ID)
-	if err != nil {
-		return result, err
-	}
-	content := HandoffContent{Goal: goal, WorkItems: items}
 	if checkpoint, checkpointErr := s.LatestCheckpoint(ctx, projectID); checkpointErr == nil {
 		content.Checkpoint = HandoffCheckpoint{GoalVersion: checkpoint.GoalVersion, WorkItemID: checkpoint.WorkItemID, CommitSHA: checkpoint.CommitSHA, Branch: checkpoint.Branch, DirtyFiles: checkpoint.DirtyFiles, CompletedSummary: checkpoint.CompletedSummary, VerificationSummary: checkpoint.VerificationSummary, RemainingSteps: checkpoint.RemainingSteps, NextAction: checkpoint.NextAction, RiskSummary: checkpoint.RiskSummary}
 	} else if !errors.Is(checkpointErr, ErrNotFound) {
