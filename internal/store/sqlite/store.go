@@ -313,6 +313,11 @@ CREATE TABLE IF NOT EXISTS approvals (
  target_ref TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '',
  files_changed INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS project_state_overrides (
+ id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+ from_state TEXT NOT NULL, to_state TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_state_overrides ON project_state_overrides(project_id,created_at);
 CREATE TABLE IF NOT EXISTS policy_violations (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), run_id TEXT NOT NULL REFERENCES runs(id),
  policy_type TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL

@@ -442,6 +442,25 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	if err = s.enforceVerificationIntegrity(ctx, project, executionProject, result.Run.RunID, surfaceBefore, changes); err != nil {
 		return result, err
 	}
+	// Checked before the files are compared, because the two failures need
+	// different remedies and the file list is the wrong thing to show for the
+	// first one. A scope that is a sentence matches nothing, so every file
+	// looks out of scope — and the reader goes to look at the files.
+	//
+	// Items filed before the scope form was checked are still on boards, so
+	// this is what they say now.
+	// An empty scope is not malformed, it is restrictive: OutOfScopeChanges
+	// reads it as "may change nothing", which is a deliberate decision and
+	// gets the file-list message. Only a non-empty scope that cannot match
+	// anything is the malformed case.
+	if result.WorkItem.ChangeScope != "" && !policy.UsableScope(result.WorkItem.ChangeScope) {
+		details := fmt.Sprintf("이 작업의 변경 범위가 경로 목록이 아닙니다 (%q) — 바꿀 파일 경로나 glob 을 쉼표로 구분해 적어야 합니다. `goalforge work scope --item %s --set <경로>` 로 고치세요",
+			truncateForMessage(result.WorkItem.ChangeScope), result.WorkItem.ID)
+		if recordErr := s.store.RecordPolicyViolation(ctx, project.ID, result.Run.RunID, "GOAL_DRIFT", details); recordErr != nil {
+			return result, errors.Join(errors.New(details), recordErr)
+		}
+		return result, errors.New(details)
+	}
 	if drift := policy.OutOfScopeChanges(result.WorkItem.ChangeScope, changes); len(drift) > 0 {
 		details := "work item changed files outside declared scope: " + strings.Join(drift, ", ")
 		if recordErr := s.store.RecordPolicyViolation(ctx, project.ID, result.Run.RunID, "GOAL_DRIFT", details); recordErr != nil {
@@ -518,6 +537,16 @@ func automaticAttemptDetail(result ContinueResult) string {
 		return "검증이 통과하지 못했습니다"
 	}
 	return "실패한 게이트: " + strings.Join(failed, ", ")
+}
+
+// truncateForMessage keeps an error readable when the value quoted is a
+// paragraph.
+func truncateForMessage(text string) string {
+	const limit = 60
+	if len(text) <= limit {
+		return text
+	}
+	return text[:limit] + "…"
 }
 
 // contextSections converts an assembled context package into prompt sections.
