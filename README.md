@@ -115,6 +115,19 @@ goalforge work list | work status ID --set APPROVED
                    # IN_PROGRESS, VERIFYING and DONE belong to the engine. A person moving a
                    # card there would be claiming a verification that never ran, so the store
                    # refuses it identically from the CLI, the API and MCP.
+goalforge work scope --list-unusable                 # items that can never run
+goalforge work scope --item ID --set "internal/server/handler.go"
+                   # The scope is compared against file paths, so a scope that is a sentence
+                   # matches nothing — and every file the session writes is reported as out of
+                   # scope. Such an item fails every run, and there was no way to correct one.
+                   # A generator that was not told the format produced whole batches of them.
+goalforge unblock --reason "fixed the change scope"
+                   # A project stopped by a policy violation never checkpointed, so the resume
+                   # had nothing to resume from and the project stayed BLOCKED after the cause
+                   # was fixed. The reason is required: clearing a block is a judgement that
+                   # what stopped the project was dealt with, and that judgement is the only
+                   # thing between a violation and ignoring it. Items left IN_PROGRESS by the
+                   # stopped run go back on the board, or they hold the WIP slot forever.
 goalforge standards profile --list-packs    # the catalogues this build carries
 goalforge standards profile --attributes "deployment=cli,release=binaries"
                    # the project's shape decides which catalogue describes it. Holding a

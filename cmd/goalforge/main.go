@@ -333,6 +333,9 @@ func run(ctx context.Context, args []string) error {
 		if len(args) > 2 && args[1] == "status" {
 			return workStatus(ctx, s, args[2:])
 		}
+		if len(args) > 1 && args[1] == "scope" {
+			return workScope(ctx, s, args[2:])
+		}
 	case "verify":
 		if len(args) > 1 && args[1] == "record" {
 			return verifyRecord(ctx, s, args[2:])
@@ -429,6 +432,8 @@ func run(ctx context.Context, args []string) error {
 		return pauseExecution(ctx, s)
 	case "resume":
 		return resumePaused(ctx, s)
+	case "unblock":
+		return unblockProject(ctx, s, args[1:])
 	case "worktree":
 		if len(args) > 1 && args[1] == "gc" {
 			return worktreeGC(ctx, s, args[2:])

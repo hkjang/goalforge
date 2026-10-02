@@ -174,3 +174,60 @@ func TestARunForAManuallyApprovedItemSettlesNothing(t *testing.T) {
 		t.Fatal("no automatic record should have been invented")
 	}
 }
+
+// A work item whose scope is a sentence fails every run, and the message has
+// to say the scope is the problem.
+//
+// "changed files outside declared scope: handler.go" sends the reader to look
+// at the files when the scope is a paragraph that could never match anything.
+// The two failures need different remedies: one is "say the scope as paths",
+// the other is "you changed the wrong files". Items filed before the scope
+// form was checked are still on boards, so this is what they will say.
+func TestAnUnusableScopeBlamesTheScopeNotTheFiles(t *testing.T) {
+	ctx, db, project, service := settleFixture(t, "P-SCOPE", "W-SCOPE", "exit 0")
+	goal, err := db.CurrentGoal(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-PROSE", GoalID: goal.ID,
+		Type: "IMPLEMENT", Title: "prose scope", Priority: 99,
+		ChangeScope: "handler.go 신설: JSON 본문 파싱, 잘못된 입력은 400"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Continue(ctx, project)
+	if err == nil {
+		t.Fatal("a scope that matches nothing cannot be satisfied")
+	}
+	if !strings.Contains(err.Error(), "경로") {
+		t.Fatalf("the message must point at the scope: %v", err)
+	}
+	if strings.Contains(err.Error(), "outside declared scope") {
+		t.Fatalf("that message is for files that missed a usable scope: %v", err)
+	}
+}
+
+// An empty scope is restrictive, not malformed. OutOfScopeChanges reads it as
+// "may change nothing" — a deliberate decision — so it gets the file-list
+// message, not the one about the form. Conflating them would tell an operator
+// who declared no scope on purpose to go and fix a typo.
+func TestAnEmptyScopeIsStillTheFileListFailure(t *testing.T) {
+	ctx, db, project, service := settleFixture(t, "P-EMPTY", "W-EMPTY", "exit 0")
+	goal, err := db.CurrentGoal(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.CreateWorkItem(ctx, model.WorkItem{ID: "W-NOSCOPE", GoalID: goal.ID,
+		Type: "IMPLEMENT", Title: "no scope", Priority: 99, ChangeScope: ""}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Continue(ctx, project)
+	if err == nil {
+		t.Fatal("an empty scope may change nothing, and the session wrote a file")
+	}
+	if !strings.Contains(err.Error(), "outside declared scope") {
+		t.Fatalf("this is the file-list failure: %v", err)
+	}
+	if strings.Contains(err.Error(), "경로 목록이 아닙니다") {
+		t.Fatalf("an empty scope is not malformed: %v", err)
+	}
+}

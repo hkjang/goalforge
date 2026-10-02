@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/policy"
 )
 
 var ErrImplementationPreferred = errors.New("unimplemented backlog limit reached; implementation is preferred")
@@ -112,6 +113,14 @@ func validateCandidate(c Candidate) error {
 	if strings.TrimSpace(c.Title) == "" || strings.TrimSpace(c.ExpectedChangeScope) == "" {
 		return errors.New("title and expected change scope are required")
 	}
+	// Refused here rather than filed and discovered later. The scope is
+	// compared against file paths, so a sentence matches nothing — and an item
+	// whose scope matches nothing fails its implementation run with "changed
+	// files outside declared scope", every time, however good the idea was.
+	if !policy.UsableScope(c.ExpectedChangeScope) {
+		return fmt.Errorf("예상 변경 범위가 경로 목록이 아닙니다 (%q) — 바꿀 파일 경로나 glob 을 쉼표로 구분해 적어야 합니다",
+			truncateScope(c.ExpectedChangeScope))
+	}
 	for name, value := range map[string]float64{"goal contribution": c.GoalContribution, "user value": c.UserValue, "operational need": c.OperationalNeed, "feasibility": c.Feasibility, "risk reduction": c.RiskReduction, "difficulty": c.Difficulty} {
 		if value < 0 || value > 100 {
 			return fmt.Errorf("%s must be between 0 and 100", name)
@@ -119,6 +128,16 @@ func validateCandidate(c Candidate) error {
 	}
 	return nil
 }
+
+// truncateScope keeps a refusal readable when the scope is a paragraph.
+func truncateScope(scope string) string {
+	const limit = 60
+	if len(scope) <= limit {
+		return scope
+	}
+	return scope[:limit] + "…"
+}
+
 func Fingerprint(text string) string { return strings.Join(ngrams(normalize(text)), "|") }
 func Similarity(a, b string) float64 {
 	left, right := ngrams(normalize(a)), ngrams(normalize(b))

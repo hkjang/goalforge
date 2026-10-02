@@ -23,7 +23,18 @@ func ideaItemSchema() map[string]any {
 		"type": "object", "additionalProperties": false,
 		"required": []string{"title", "expected_change_scope", "risk", "goal_contribution", "user_value", "operational_need", "feasibility", "risk_reduction", "difficulty", "scope_expansion"},
 		"properties": map[string]any{
-			"title": map[string]any{"type": "string"}, "expected_change_scope": map[string]any{"type": "string"},
+			"title": map[string]any{"type": "string"},
+			// The format is stated in the schema, not asked for in prose. This
+			// field is compared against file paths as a list of glob patterns,
+			// so a sentence matches nothing — and a work item whose scope
+			// matches nothing can never run: every file the session writes is
+			// reported as out of scope and the run is refused.
+			//
+			// Asked for as a sentence, it came back as one. The pattern is
+			// what makes that impossible rather than unlikely.
+			"expected_change_scope": map[string]any{"type": "string",
+				"pattern":     `^[^\s:;"'()]+(,[^\s:;"'()]+)*$`,
+				"description": "바꿀 파일 경로나 glob 의 쉼표 구분 목록. 예: internal/server/handler.go 또는 internal/store/**,cmd/app/main.go — 설명 문장이 아니다. 공백·콜론이 들어가면 거절된다."},
 			"risk":              map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}},
 			"goal_contribution": scoreSchema(), "user_value": scoreSchema(), "operational_need": scoreSchema(),
 			"feasibility": scoreSchema(), "risk_reduction": scoreSchema(), "difficulty": scoreSchema(),
@@ -78,14 +89,17 @@ func Audit(goal model.Goal, existing []model.WorkItem) string {
 - 운영성: 로그·지표 공백, 복구 절차 부재, 설정 경직성
 
 규칙:
-- 발견한 문제점마다 구체적인 근거 파일이나 동작을 예상 변경 범위에 명시한다.
+- 발견한 문제점마다 근거가 되는 파일을 예상 변경 범위에 적는다.
 %s`, goal.Title, goal.Objective, renderBacklog(existing), discoveryRules)
 }
 
 const discoveryRules = `- 파일을 수정하거나 명령으로 저장소 상태를 변경하지 않는다.
 - 기존 목록과 의미적으로 중복된 아이디어를 만들지 않는다.
 - 범위를 확대하는 제안은 scope_expansion=true로 표시한다.
-- 각 점수는 0~100이며 구체적인 예상 변경 범위를 작성한다.
+- expected_change_scope 는 **바꿀 파일 경로나 glob 의 쉼표 구분 목록**이다. 설명 문장이 아니다.
+  좋음: internal/server/handler.go        좋음: internal/store/**,cmd/app/main.go
+  나쁨: handler.go 신설: JSON 본문 파싱…   (문장은 어떤 파일과도 맞지 않아 그 작업은 실행될 수 없다)
+- 각 점수는 0~100이다.
 - 지정된 JSON 스키마만 반환한다.`
 
 func renderBacklog(existing []model.WorkItem) string {

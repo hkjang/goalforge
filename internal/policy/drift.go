@@ -153,3 +153,48 @@ func IsTestPath(path string) bool {
 	}
 	return false
 }
+
+// UsableScope reports whether a declared change scope is a list of path
+// patterns at all.
+//
+// The scope is compared against file paths, so anything that is not such a
+// list matches nothing — and a work item whose scope matches nothing can never
+// run: every file the session writes is reported as out of scope and the run
+// is refused. Nothing checked the form, so a generator asked for an "expected
+// change scope" with no format stated returned a prose paragraph, and every
+// item it filed failed its implementation run.
+//
+// This asks only about form. Whether a well-formed scope matches what actually
+// got written is OutOfScopeChanges' question, and the two failures need
+// different remedies: one is "say it as paths", the other is "you changed the
+// wrong files".
+func UsableScope(scope string) bool {
+	patterns := scopePatterns(scope)
+	if len(patterns) == 0 {
+		return false
+	}
+	for _, pattern := range patterns {
+		if !usablePattern(pattern) {
+			return false
+		}
+	}
+	return true
+}
+
+// usablePattern reports whether one comma-separated entry could be a path.
+//
+// Whitespace is the signal that separates a path from a sentence about one:
+// "handler.go" is a path and "handler.go 신설" is a description whose first
+// word happens to be a path. Accepting the second would let a sentence through
+// whenever it began with a filename, which is most of the time.
+func usablePattern(pattern string) bool {
+	if strings.ContainsAny(pattern, " \t\n\r") {
+		return false
+	}
+	// Punctuation that cannot appear in a path but is ordinary in prose. A
+	// colon in particular is how a description introduces itself.
+	if strings.ContainsAny(pattern, ":;\"'()") {
+		return false
+	}
+	return true
+}
