@@ -41,7 +41,7 @@ func TestATestGateMustAssertTheTestRan(t *testing.T) {
 // With the assertion it is accepted: -v so the runner names what it ran, and a
 // pattern that only matches when the named test passed.
 func TestATestGateThatAssertsTheTestRanIsAccepted(t *testing.T) {
-	criterion := DraftCriterion{Type: "redirect_behavior", ExpectedValue: "TestRedirect", Kind: "test",
+	criterion := DraftCriterion{Type: "redirect_behavior", ExpectedValue: "TestRedirect", Kind: "journey",
 		GateCommand:   []string{"go", "test", "-count=1", "-v", "-run", "^TestRedirect$", "./shortener"},
 		ValuePattern:  `--- PASS: (TestRedirect)`,
 		WhyItFailsNow: "shortener 패키지가 아직 없습니다"}
