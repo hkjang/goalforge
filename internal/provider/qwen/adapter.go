@@ -35,7 +35,8 @@ func (a *Adapter) Capabilities() provider.Capabilities {
 // writes code, reports done, and the gates find out afterwards.
 func baseArgs(r provider.RunRequest) []string {
 	args := []string{"--output-format", "stream-json"}
-	if r.WorkspaceWrite {
+	switch {
+	case r.WorkspaceWrite:
 		args = append(args, "--approval-mode", "auto-edit")
 		// Only on a writable run. The point of plan mode is that the session
 		// looks and does not act, and pre-approving shell commands there would
@@ -43,7 +44,12 @@ func baseArgs(r provider.RunRequest) []string {
 		if patterns := shellToolPatterns(r.AllowedCommands); len(patterns) > 0 {
 			args = append(args, "--allowed-tools", strings.Join(patterns, ","))
 		}
-	} else {
+	case r.OutputSchema != "":
+		// Plan mode makes the model answer with a markdown execution plan and
+		// try to call exit_plan_mode; a structured request needs the bare JSON.
+		// Headless default mode still refuses every edit and shell call.
+		args = append(args, "--approval-mode", "default")
+	default:
 		args = append(args, "--approval-mode", "plan")
 	}
 	if r.Model != "" {
@@ -75,7 +81,18 @@ func shellToolPatterns(commands []string) []string {
 	return patterns
 }
 
+// withSchema appends the output contract to the prompt: Qwen Code has no
+// --json-schema flag, so the schema can only travel as instructions.
+func withSchema(r provider.RunRequest) provider.RunRequest {
+	if r.OutputSchema != "" {
+		r.Prompt += "\n\nRespond with ONLY one JSON object that satisfies this JSON Schema. " +
+			"No prose, no markdown fences, no tool calls.\n" + r.OutputSchema
+	}
+	return r
+}
+
 func (a *Adapter) Start(ctx context.Context, r provider.RunRequest) (<-chan provider.Event, error) {
+	r = withSchema(r)
 	return a.runner.Run(ctx, r, baseArgs(r), DecodeLine)
 }
 
@@ -83,6 +100,7 @@ func (a *Adapter) Resume(ctx context.Context, sessionID string, r provider.RunRe
 	if sessionID == "" {
 		return nil, errors.New("session ID is required")
 	}
+	r = withSchema(r)
 	args := append([]string{"--resume", sessionID}, baseArgs(r)...)
 	return a.runner.Run(ctx, r, args, DecodeLine)
 }

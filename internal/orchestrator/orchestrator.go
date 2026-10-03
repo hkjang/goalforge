@@ -251,6 +251,12 @@ func (o *Orchestrator) Run(ctx context.Context, request Request) (Result, error)
 				}
 				if event.Err != nil {
 					runErr = errors.Join(runErr, event.Err)
+					// The CLI's own words (stderr) ride in Message; without them
+					// "exit status 1" hides why the provider stopped, including
+					// a session that no longer exists.
+					if event.Message != "" {
+						runErr = errors.Join(runErr, errors.New(event.Message))
+					}
 				} else {
 					runErr = errors.Join(runErr, errors.New(event.Message))
 				}

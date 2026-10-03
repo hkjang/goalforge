@@ -41,6 +41,8 @@ func PathInScope(scope, filePath string) bool {
 
 func matchesPattern(pattern, name string) bool {
 	switch {
+	case strings.Contains(pattern, "**"):
+		return globMatch(strings.Split(pattern, "/"), strings.Split(name, "/"))
 	case strings.HasSuffix(pattern, "/**"):
 		prefix := strings.TrimSuffix(pattern, "/**")
 		return name == prefix || strings.HasPrefix(name, prefix+"/")
@@ -50,6 +52,30 @@ func matchesPattern(pattern, name string) bool {
 	default:
 		return name == pattern || strings.HasPrefix(name, strings.TrimSuffix(pattern, "/")+"/")
 	}
+}
+
+// globMatch matches path segments, where a "**" segment stands for any number
+// of segments (including none). path.Match alone cannot: its "*" stops at "/",
+// so a bare "**" or "internal/**/x.go" would match nothing.
+func globMatch(pattern, name []string) bool {
+	if len(pattern) == 0 {
+		return len(name) == 0
+	}
+	if pattern[0] == "**" {
+		for skip := 0; skip <= len(name); skip++ {
+			if globMatch(pattern[1:], name[skip:]) {
+				return true
+			}
+		}
+		return false
+	}
+	if len(name) == 0 {
+		return false
+	}
+	if matched, _ := path.Match(pattern[0], name[0]); !matched {
+		return false
+	}
+	return globMatch(pattern[1:], name[1:])
 }
 
 func normalizePath(filePath string) string {

@@ -74,3 +74,17 @@ func TestDecodeLineHandlesStreamAndBufferedShapes(t *testing.T) {
 		t.Fatalf("events=%+v err=%v", events, err)
 	}
 }
+
+func TestStructuredRequestAvoidsPlanModeAndCarriesSchema(t *testing.T) {
+	r := provider.RunRequest{Prompt: "draft", OutputSchema: `{"type":"object"}`}
+	args := strings.Join(baseArgs(r), " ")
+	if strings.Contains(args, "plan") || !strings.Contains(args, "--approval-mode default") {
+		t.Fatalf("args=%q", args)
+	}
+	if got := withSchema(r).Prompt; !strings.Contains(got, `{"type":"object"}`) || !strings.HasPrefix(got, "draft") {
+		t.Fatalf("prompt=%q", got)
+	}
+	if got := withSchema(provider.RunRequest{Prompt: "x"}).Prompt; got != "x" {
+		t.Fatalf("plain prompt changed: %q", got)
+	}
+}
