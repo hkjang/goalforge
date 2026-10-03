@@ -149,7 +149,7 @@ func TestAnExpectedValueMustBeComparable(t *testing.T) {
 	}
 	// Directions and units are comparable, and so is a bare boolean.
 	for _, value := range []string{"true", "<=200ms", ">=99%", "=0", "false"} {
-		if refusals = ScreenDraft(draftOf(criterion("x_check", value, "performance", "./s.sh"))); len(refusals) != 0 {
+		if refusals = ScreenDraft(draftOf(criterion("x_check", value, "journey", "./s.sh"))); len(refusals) != 0 {
 			t.Fatalf("%q: %s", value, rrsi.Explain(refusals))
 		}
 	}

@@ -126,6 +126,16 @@ const (
 	// under the wrong heading, and making it required would fail every run
 	// until the whole goal was done.
 	RefusalHealthGateFails = "HEALTH_GATE_FAILS"
+	// RefusalNoJourney means no criterion runs the product on real input.
+	//
+	// A goal whose every gate is a unit test is settled by tests the same
+	// author wrote beside the code, so they agree with the code by
+	// construction. Built this way, six small tools passed every one of their
+	// own tests and still shipped with a --since that matched nothing, JSON
+	// that printed null, and 100 false secrets on real files: all of it found
+	// the first time the program was run on data it had not been written
+	// against. A journey gate is that first run, done by the verifier.
+	RefusalNoJourney = "NO_JOURNEY_GATE"
 )
 
 // testRunners are commands that exit zero when their filter matches nothing,
@@ -326,7 +336,23 @@ func ScreenDraft(draft GoalDraft) []rrsi.Refusal {
 				Detail: fmt.Sprintf("%s: 지금 왜 실패하는지 적지 않았습니다", name)})
 		}
 	}
+	if len(draft.Criteria) > 0 && !hasJourney(draft.Criteria) {
+		refusals = append(refusals, rrsi.Refusal{Kind: RefusalNoJourney,
+			Detail: "모든 기준이 빌드·단위 테스트입니다 — 같은 저자가 코드 옆에 쓴 테스트는 코드와 정의상 일치합니다. " +
+				"만든 제품을 실제 입력으로 실행해 출력을 확인하는 journey 기준이 하나는 필요합니다 " +
+				`(예: kind journey, gate_command ["go","run","./cmd/tool","testdata/sample.log"], value_pattern 으로 출력의 핵심 줄 확인)`})
+	}
 	return refusals
+}
+
+// hasJourney reports whether any criterion is settled by running the product.
+func hasJourney(criteria []DraftCriterion) bool {
+	for _, criterion := range criteria {
+		if strings.EqualFold(strings.TrimSpace(criterion.Kind), "journey") {
+			return true
+		}
+	}
+	return false
 }
 
 // standardsExpectation returns the normalized expectation, or "" when the

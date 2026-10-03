@@ -62,3 +62,9 @@ func TestTheDraftRulesExplainWhyOneGateMeasuresOneThing(t *testing.T) {
 		}
 	}
 }
+
+func TestDraftPromptRequiresAJourneyCriterion(t *testing.T) {
+	if got := GoalDraft("주제", "저장소", nil); !strings.Contains(got, "kind journey") {
+		t.Fatal("the drafting prompt must ask for a journey criterion")
+	}
+}

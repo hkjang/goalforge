@@ -26,7 +26,7 @@ import (
 func TestCompletionCriteriaAreNotRequiredGates(t *testing.T) {
 	draft := GoalDraft{Title: "t", Objective: "o",
 		Criteria: []DraftCriterion{
-			{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "test",
+			{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "journey",
 				GateCommand:  []string{"go", "test", "-v", "-run", "^TestRedirect$", "./..."},
 				ValuePattern: `--- PASS: (TestRedirect)`, FailsNow: true},
 			{Type: "binary_journey", ExpectedValue: "TestJourney", Kind: "journey",
@@ -82,7 +82,7 @@ func TestADraftWithNoHealthGateIsRefused(t *testing.T) {
 // filled in yet.
 func TestTheScreenDoesNotAnswerWhetherGatesPass(t *testing.T) {
 	draft := GoalDraft{Title: "t", Objective: "o",
-		Criteria: []DraftCriterion{{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "test",
+		Criteria: []DraftCriterion{{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "journey",
 			GateCommand:   []string{"go", "test", "-v", "-run", "^TestRedirect$", "./..."},
 			ValuePattern:  `--- PASS: (TestRedirect)`,
 			WhyItFailsNow: "리다이렉트 핸들러가 아직 없습니다"}},
@@ -174,5 +174,42 @@ func TestATrivialHealthGateIsRefused(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("a required gate that cannot fail catches nothing: %+v", refusals)
+	}
+}
+
+// Every criterion a unit test settles was written by the same hand as the code
+// it tests. A draft with nothing that runs the product has only that, so it is
+// refused rather than set as a goal that can complete without the program ever
+// having been run on input it was not written against.
+func TestADraftWithoutAJourneyGateIsRefused(t *testing.T) {
+	unit := func(name, test string) DraftCriterion {
+		return DraftCriterion{Type: name, ExpectedValue: test, Kind: "test",
+			GateCommand:   []string{"go", "test", "-count=1", "-v", "-run", "^" + test + "$", "./..."},
+			ValuePattern:  "--- PASS: (" + test + ")",
+			WhyItFailsNow: "아직 구현하지 않았습니다"}
+	}
+	health := &DraftCriterion{Type: "build_passed", ExpectedValue: "true", Kind: "build",
+		GateCommand: []string{"go", "build", "./..."}}
+	draft := GoalDraft{Title: "t", Objective: "o", Health: health,
+		Criteria: []DraftCriterion{unit("parse", "TestParse"), unit("render", "TestRender")}}
+
+	found := false
+	for _, refusal := range ScreenDraft(draft) {
+		if refusal.Kind == RefusalNoJourney {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a draft settled only by unit tests must be refused")
+	}
+
+	draft.Criteria = append(draft.Criteria, DraftCriterion{Type: "cli_on_sample", ExpectedValue: "true", Kind: "journey",
+		GateCommand:   []string{"go", "run", "./cmd/tool", "testdata/sample.log"},
+		ValuePattern:  "total requests",
+		WhyItFailsNow: "cmd/tool 이 아직 없습니다"})
+	for _, refusal := range ScreenDraft(draft) {
+		if refusal.Kind == RefusalNoJourney {
+			t.Fatalf("a journey gate is present: %+v", refusal)
+		}
 	}
 }
