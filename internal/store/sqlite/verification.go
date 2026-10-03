@@ -82,9 +82,20 @@ func (s *Store) ApplyVerificationOutcome(ctx context.Context, runID string, pass
 	if err != nil {
 		return goal, err
 	}
+	// The outcome is recorded from whatever non-terminal state the item is in.
+	//
+	// Guarding on VERIFYING made the record conditional on a transition that
+	// could silently not have happened — and when it had not, a run that
+	// verified left its item in BACKLOG, the goal's done weight never reached
+	// its total, and the goal could never complete. Nothing checked the row
+	// count, so it failed quietly.
+	//
+	// Terminal states stay: work somebody finished is not re-finished, and
+	// work somebody discarded is not resurrected by a late verification.
 	if passed {
 		if workID != "" {
-			if _, err = tx.ExecContext(ctx, `UPDATE work_items SET status='DONE' WHERE id=? AND status='VERIFYING'`, workID); err != nil {
+			if _, err = tx.ExecContext(ctx, `UPDATE work_items SET status='DONE'
+WHERE id=? AND status NOT IN ('DONE','DISCARDED')`, workID); err != nil {
 				return goal, err
 			}
 		}
@@ -96,7 +107,8 @@ func (s *Store) ApplyVerificationOutcome(ctx context.Context, runID string, pass
 		}
 	} else {
 		if workID != "" {
-			if _, err = tx.ExecContext(ctx, `UPDATE work_items SET status='BACKLOG' WHERE id=? AND status='VERIFYING'`, workID); err != nil {
+			if _, err = tx.ExecContext(ctx, `UPDATE work_items SET status='BACKLOG'
+WHERE id=? AND status NOT IN ('DONE','DISCARDED')`, workID); err != nil {
 				return goal, err
 			}
 		}
