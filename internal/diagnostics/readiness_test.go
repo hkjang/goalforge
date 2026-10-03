@@ -112,6 +112,28 @@ func TestReadinessRejectsProofOfTheWrongKind(t *testing.T) {
 	}
 }
 
+// The same misconfiguration one rung lower, and the one an AI session reaches
+// for on its own: a gate that reports its judgement of the change standing
+// behind a criterion that asked for the change to build. Readiness has to say
+// so before the run, because afterwards it looks like proof.
+func TestReadinessRejectsAJudgementBehindAnObjectiveCriterion(t *testing.T) {
+	input := ReadinessInput{
+		HasProject:       true,
+		GoalTitle:        "service",
+		Criteria:         []string{"build_passed"},
+		CriterionKinds:   map[string]string{"build_passed": "build"},
+		Gates:            []GateSpec{{Type: "build_passed", Command: []string{"go"}, Required: true, Kind: "review"}},
+		BudgetConfigured: true,
+	}
+	if level := levelFor(CheckReadiness(input), "proof kind"); level != LevelFail {
+		t.Fatalf("a review gate behind a build criterion must block: %+v", CheckReadiness(input))
+	}
+	input.Gates[0].Kind = "build"
+	if level := levelFor(CheckReadiness(input), "proof kind"); level != LevelOK {
+		t.Fatalf("a build gate behind a build criterion is fine: %+v", CheckReadiness(input))
+	}
+}
+
 // A project whose gates only compile can complete without anything ever having
 // been exercised. That is a warning rather than a failure: it can still finish,
 // just on weaker evidence than the user probably thinks.
