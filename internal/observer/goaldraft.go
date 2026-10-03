@@ -484,16 +484,24 @@ func askFor(ctx context.Context, author Author, req DraftRequest, text, schema s
 	if err != nil {
 		return "", err
 	}
+	// Qwen Code repeats the whole answer in its final result event, so a
+	// completed event replaces the streamed messages instead of joining them.
 	var builder strings.Builder
+	var completed string
 	for event := range events {
 		switch event.Type {
-		case provider.EventMessage, provider.EventCompleted:
+		case provider.EventMessage:
 			builder.WriteString(event.Message)
+		case provider.EventCompleted:
+			completed = event.Message
 		case provider.EventFailed:
 			return "", fmt.Errorf("초안 생성이 실패했습니다: %s", event.Message)
 		}
 	}
-	output := strings.TrimSpace(builder.String())
+	output := strings.TrimSpace(completed)
+	if output == "" {
+		output = strings.TrimSpace(builder.String())
+	}
 	if output == "" {
 		return "", ErrNoProposal
 	}

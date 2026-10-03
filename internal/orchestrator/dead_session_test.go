@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/goalforge/goalforge/internal/provider"
@@ -37,7 +38,9 @@ func (p *deadSessionProvider) Resume(_ context.Context, id string, _ provider.Ru
 	p.resumedWith = id
 	events := make(chan provider.Event, 1)
 	// Resume itself succeeds; the CLI reports the missing session afterwards.
-	events <- provider.Event{Type: provider.EventFailed,
+	// The real adapter reports both: the exit status as Err and the CLI's
+	// stderr as Message. Recovery has to see the Message.
+	events <- provider.Event{Type: provider.EventFailed, Err: errors.New("qwen exited: exit status 1"),
 		Message: "No saved session found with ID " + id, Raw: json.RawMessage(`{"t":"f"}`)}
 	close(events)
 	return events, nil
