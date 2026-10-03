@@ -23,15 +23,29 @@ concurrency:
 
 jobs:
   test:
-    # Linux is where this runs, so Linux is the gate on every change: fast
-    # feedback on the platform that matters.
+    # Every platform a binary is shipped for, on every change.
     #
-    # The other platforms are tested when a release is cut rather than on every
-    # pull request. Shipping a Windows binary is a claim about Windows, so it
-    # cannot go untested — but paying ten minutes per pull request for a
-    # platform nobody deploys to buys a slower loop and little else.
-    name: test (linux)
-    runs-on: ubuntu-latest
+    # Linux alone was the gate, with the other platforms left to the release.
+    # The reasoning was that paying for a platform nobody deploys to buys a
+    # slower loop — and it was wrong in a way that only showed up when the bill
+    # arrived. A change that classified a pipe failure by its Unix message
+    # merged green and then failed the windows verify at tag time: the tag was
+    # already pushed, the release notes already written, and the release had to
+    # be cut again under a new tag.
+    #
+    # Releases here are cut right after merge, so "caught at release" is not
+    # meaningfully earlier than "caught in production". The merge gate and the
+    # release gate now ask the same question, which is also what the heading of
+    # this file has claimed all along.
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform reports. "It broke on Windows" and "it broke everywhere"
+      # need different responses, and a cancelled sibling job hides which one
+      # this is.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
