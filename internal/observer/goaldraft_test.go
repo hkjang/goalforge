@@ -17,6 +17,15 @@ func criterion(name, expected, kind string, command ...string) DraftCriterion {
 		GateCommand: command, WhyItFailsNow: "아직 구현하지 않았기 때문입니다"}
 }
 
+// runnerCriterion is a filtered test run with the assertion that the named test
+// ran. Without it the gate passes on a package with no test file, which the
+// screen now refuses — a fixture that left it out was itself the vacuous gate.
+func runnerCriterion(name, test string, command ...string) DraftCriterion {
+	entry := criterion(name, test, "test", command...)
+	entry.ValuePattern = `--- PASS: (` + test + `)`
+	return entry
+}
+
 // goRepo is a repository the fixture's health gate passes in. A health gate
 // has to pass now, so the tests that run gates need somewhere it can.
 func goRepo(t *testing.T) string {

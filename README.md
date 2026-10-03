@@ -121,6 +121,14 @@ goalforge work scope --item ID --set "internal/server/handler.go"
                    # matches nothing — and every file the session writes is reported as out of
                    # scope. Such an item fails every run, and there was no way to correct one.
                    # A generator that was not told the format produced whole batches of them.
+goalforge merge --list | merge --all        # verified work not yet on the default branch
+                   # Each item is implemented and verified in its own worktree and nothing
+                   # merged them, so work sat there and the goal could never complete: the
+                   # completion criteria are measured on the branch that ships. Each commit
+                   # still needs its own approval — what this removes is having to discover
+                   # the items. Run `verify integration` afterwards, which measures the
+                   # criteria on the merged branch; "integration verified" means the required
+                   # gates passed, not that the goal is done.
 goalforge unblock --reason "fixed the change scope"
                    # A project stopped by a policy violation never checkpointed, so the resume
                    # had nothing to resume from and the project stayed BLOCKED after the cause

@@ -69,6 +69,15 @@ var goalDraftSchema = map[string]any{
 						"description": "이 기준을 재는 명령. 실행 파일과 인자를 각각 하나의 원소로. " +
 							`예: ["go","test","-run","TestRedirect","./..."]. 셸은 쓸 수 없다 — ` +
 							`sh -c "..." 나 && 나 파이프는 거절된다. 두 명령이 필요하면 기준을 둘로 나눠라.`},
+					"value_pattern": map[string]any{"type": "string",
+						// Required in practice for a test runner, because
+						// `go test -run ^TestX$ ./pkg` exits zero when the
+						// package has no test file — the criterion went green
+						// the moment an empty package existed.
+						"description": "출력에서 측정값을 뽑는 정규식, 캡처 그룹 하나. 테스트를 돌리는 게이트에는 " +
+							`필수다: 걸러낸 검사가 하나도 없어도 go test 는 통과하므로, 그 검사가 실제로 ` +
+							`통과했음을 확인해야 한다. 예: --- PASS: (TestRedirect) — 이때 명령에 -v 가 있어야 하고 ` +
+							`expected_value 는 TestRedirect 다.`},
 					"why_it_fails_now": map[string]any{"type": "string", "minLength": 10,
 						"description": "아직 구현되지 않았으므로 이 명령이 지금 실패하는 이유"},
 				},
@@ -115,6 +124,15 @@ const goalDraftRules = `규칙:
 - 게이트 명령은 지금 실패해야 한다. 아직 만들지 않은 것을 재는 명령이 지금 통과한다면 그 명령은
   그것을 재고 있지 않다. why_it_fails_now 에 왜 지금 실패하는지 적어라. 그 설명이 틀리면 거절된다.
 - echo, true, exit 0 처럼 항상 통과하는 명령을 쓰지 마라. 통과만 하는 게이트는 게이트가 아니다.
+- **테스트를 돌리는 게이트는 그 검사가 실제로 실행됐음을 확인해야 한다.** go test 는 테스트 파일이
+  없는 패키지에서 "[no test files]" 를 찍고 exit 0 한다. 걸러낸 실행도 맞는 검사가 없으면
+  "no tests to run" 과 함께 통과한다. 그러면 빈 패키지만 만들어도 그 기준이 충족된 것으로 집계되고,
+  아무도 구현하지 않은 기능에 "목표 완료" 가 보고된다.
+  그래서 -v 를 붙이고 value_pattern 으로 그 검사의 PASS 를 확인하라:
+    gate_command: ["go","test","-count=1","-v","-run","^TestRedirect$","./shortener"]
+    value_pattern: "--- PASS: (TestRedirect)"
+    expected_value: "TestRedirect"
+  value_pattern 은 걸러낸 이름을 담아야 한다. 다른 줄에 맞는 패턴은 검사가 없어도 통과한다.
 - 게이트 명령에 **셸을 쓸 수 없다.** sh -c "..." 와 && 와 파이프는 거절된다. 실행 파일과 인자를
   각각 하나의 원소로 적어라: ["go","test","-run","TestRedirect","./..."].
   두 명령이 필요하면 그것은 기준이 둘이라는 뜻이다. 하나의 게이트는 하나를 재야 판정을 귀속할 수 있다.

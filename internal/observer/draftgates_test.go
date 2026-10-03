@@ -26,10 +26,12 @@ import (
 func TestCompletionCriteriaAreNotRequiredGates(t *testing.T) {
 	draft := GoalDraft{Title: "t", Objective: "o",
 		Criteria: []DraftCriterion{
-			{Type: "redirect_roundtrip", ExpectedValue: "true", Kind: "test",
-				GateCommand: []string{"go", "test", "-run", "TestRedirect"}, FailsNow: true},
-			{Type: "binary_journey", ExpectedValue: "true", Kind: "journey",
-				GateCommand: []string{"go", "test", "-run", "TestJourney"}, FailsNow: true},
+			{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "test",
+				GateCommand:  []string{"go", "test", "-v", "-run", "^TestRedirect$", "./..."},
+				ValuePattern: `--- PASS: (TestRedirect)`, FailsNow: true},
+			{Type: "binary_journey", ExpectedValue: "TestJourney", Kind: "journey",
+				GateCommand:  []string{"go", "test", "-v", "-run", "^TestJourney$", "./e2e"},
+				ValuePattern: `--- PASS: (TestJourney)`, FailsNow: true},
 		},
 		Health: &DraftCriterion{Type: "build_passed", ExpectedValue: "true", Kind: "build",
 			GateCommand: []string{"go", "build", "./..."}, FailsNow: false},
@@ -80,8 +82,9 @@ func TestADraftWithNoHealthGateIsRefused(t *testing.T) {
 // filled in yet.
 func TestTheScreenDoesNotAnswerWhetherGatesPass(t *testing.T) {
 	draft := GoalDraft{Title: "t", Objective: "o",
-		Criteria: []DraftCriterion{{Type: "redirect_roundtrip", ExpectedValue: "true", Kind: "test",
-			GateCommand:   []string{"go", "test", "-run", "TestRedirect"},
+		Criteria: []DraftCriterion{{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "test",
+			GateCommand:   []string{"go", "test", "-v", "-run", "^TestRedirect$", "./..."},
+			ValuePattern:  `--- PASS: (TestRedirect)`,
 			WhyItFailsNow: "리다이렉트 핸들러가 아직 없습니다"}},
 		// Neither FailsNow is set, because nothing has run yet. That is the
 		// state the screen sees.
