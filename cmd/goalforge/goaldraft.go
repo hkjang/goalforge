@@ -102,6 +102,21 @@ func printDraft(draft observer.GoalDraft) {
 		fmt.Printf("       게이트: %s  (%s)\n", strings.Join(criterion.GateCommand, " "), state)
 		fmt.Printf("       %s\n", criterion.WhyItFailsNow)
 	}
+	// Shown because it is the one gate that will fail a run. The confirmation
+	// is the point of this command, and asking somebody to confirm a draft
+	// without showing the thing that blocks every run is asking them to
+	// confirm what they cannot see.
+	if draft.Health != nil {
+		state := "지금 통과함"
+		if draft.Health.FailsNow {
+			state = "지금 실패함 — 이대로면 모든 실행이 막힙니다"
+		}
+		fmt.Printf("\n매 실행 뒤 통과해야 하는 게이트 (이것만 실행을 막습니다):\n")
+		fmt.Printf("  %s %s  [%s]\n", draft.Health.Type, draft.Health.ExpectedValue, draft.Health.Kind)
+		fmt.Printf("       게이트: %s  (%s)\n", strings.Join(draft.Health.GateCommand, " "), state)
+		fmt.Printf("       %s\n", draft.Health.WhyItFailsNow)
+		fmt.Println("\n완료 조건 게이트는 측정만 합니다 — 부분 작업이 전부 실패하지 않게 하려면 그래야 합니다")
+	}
 }
 
 // applyDraft writes the goal and its gates.
@@ -110,10 +125,11 @@ func printDraft(draft observer.GoalDraft) {
 // refuses to work on, and writing it alone would leave the project in a state
 // that looks configured and cannot run.
 func applyDraft(ctx context.Context, s *store.Store, project model.Project, draft observer.GoalDraft) error {
-	for _, criterion := range draft.Criteria {
-		if err := s.UpsertGate(ctx, project.ID, store.GateConfig{Type: criterion.Type,
-			Command: criterion.GateCommand, Timeout: 15 * 60 * 1e9, Required: true,
-			SuccessValue: criterion.ExpectedValue, Kind: criterion.Kind}); err != nil {
+	// Only the health gate is required; the completion criteria are measured.
+	// Which is which is Gates' decision, so this cannot disagree with it.
+	gates := draft.Gates()
+	for _, gate := range gates {
+		if err := s.UpsertGate(ctx, project.ID, gate); err != nil {
 			return err
 		}
 	}
@@ -126,7 +142,9 @@ func applyDraft(ctx context.Context, s *store.Store, project model.Project, draf
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\n설정했습니다: %s v%d · 게이트 %d개\n", goal.Title, goal.Version, len(draft.Criteria))
+	fmt.Printf("\n설정했습니다: %s v%d · 게이트 %d개 (매 실행을 막는 것은 %s 하나)\n",
+		goal.Title, goal.Version, len(gates), draft.Health.Type)
+	fmt.Println("완료 조건 게이트는 측정만 합니다 — 부분 작업이 전부 실패하지 않게 하려면 그래야 합니다")
 	fmt.Println("`goalforge worker` 가 이제 이 목표를 향해 돌 수 있습니다")
 	return nil
 }
