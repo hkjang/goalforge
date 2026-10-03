@@ -602,11 +602,16 @@ func projectRuntime(ctx context.Context, s *store.Store, args []string) error {
 func mergeWork(ctx context.Context, s *store.Store, args []string) error {
 	f := flag.NewFlagSet("merge", flag.ContinueOnError)
 	workItemID := f.String("work-item", "", "work item whose verified branch to merge")
+	all := f.Bool("all", false, "검증됐지만 병합되지 않은 작업을 모두 병합한다")
+	list := f.Bool("list", false, "병합을 기다리는 작업을 보여 준다")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
+	if *all || *list {
+		return mergeAllVerified(ctx, s, *list)
+	}
 	if *workItemID == "" {
-		return errors.New("--work-item is required")
+		return errors.New("--work-item 또는 --all 이 필요합니다 (--list 로 기다리는 작업을 봅니다)")
 	}
 	project, err := currentProject(ctx, s)
 	if err != nil {
@@ -2562,8 +2567,38 @@ func verifyIntegration(ctx context.Context, s *store.Store, args []string) error
 		}
 		return fmt.Errorf("integration verification failed on %s (%s) — 출시 불가", p.DefaultBranch, strings.Join(details, "; "))
 	}
-	fmt.Printf("integration verified: %s at %s\n", p.DefaultBranch, branchSHA)
+	// What passed is named, because "verified" next to a failed completion gate
+	// reads as the goal being done. The required gates say the branch is not
+	// broken; the completion criteria say whether the goal is finished, and
+	// those are measured by the optional gates alongside them.
+	fmt.Printf("%s 통합 검증: 필수 게이트 통과 (%s)\n", p.DefaultBranch, shortSHA(branchSHA))
+	for _, line := range integrationCriteriaLines(results) {
+		fmt.Println(line)
+	}
 	return nil
+}
+
+// integrationCriteriaLines says where the completion criteria stand after an
+// integration run.
+//
+// Separated from the printing so it can be tested. "verified" next to a failed
+// completion gate reads as the goal being done: the required gates say the
+// branch is not broken, and the optional gates alongside them are the criteria
+// that say whether the goal is finished.
+func integrationCriteriaLines(results []verification.Result) []string {
+	var unmet []string
+	for _, result := range results {
+		if !result.Required && result.Status != "PASSED" {
+			unmet = append(unmet, result.Type)
+		}
+	}
+	if len(unmet) == 0 {
+		return []string{"모든 완료 조건이 이 브랜치에서 충족되었습니다"}
+	}
+	return []string{
+		fmt.Sprintf("아직 충족되지 않은 완료 조건 %d개: %s", len(unmet), strings.Join(unmet, ", ")),
+		"브랜치는 깨지지 않았지만 목표는 끝나지 않았습니다 — `goalforge status` 로 각 조건의 상태를 봅니다",
+	}
 }
 
 // modelAdvice shows how the approved models have actually performed and which
@@ -3270,12 +3305,28 @@ func runtimeService(ctx context.Context, s *store.Store, p model.Project) (*app.
 	return service, cleanup, nil
 }
 
+// activeGoal is the project's current goal.
+//
+// A project with no goal is named here rather than reported as the store's bare
+// "not found". Registering a project and setting its goal are separate
+// commands, so a project sits in that state for as long as it takes somebody to
+// run the second one — the ordinary state a new project is in, and where
+// somebody trying the tool out stands. Ten commands share this lookup, so the
+// message belongs here rather than in each of them.
 func activeGoal(ctx context.Context, s *store.Store) (model.Goal, error) {
 	p, err := currentProject(ctx, s)
 	if err != nil {
 		return model.Goal{}, err
 	}
-	return s.CurrentGoal(ctx, p.ID)
+	goal, err := s.CurrentGoal(ctx, p.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Wrapped, not replaced. Callers branch on ErrNotFound to treat "no
+		// goal yet" as an ordinary state — a listing that prints nothing rather
+		// than an error — and a message that swallowed the sentinel turned
+		// every one of those into a hard failure.
+		return goal, fmt.Errorf("%s 에 목표가 없습니다 — `goalforge goal set` 으로 정하거나 `goalforge goal draft --topic \"...\"` 로 초안을 받으세요: %w", p.Name, store.ErrNotFound)
+	}
+	return goal, err
 }
 
 func milestoneAdd(ctx context.Context, s *store.Store, args []string) error {
@@ -3721,6 +3772,24 @@ func printBlockers(ctx context.Context, s *store.Store, p model.Project, g model
 		}
 		break
 	}
+	// Verified work that has not reached the branch that ships. Reported
+	// because nothing reported it: each item is verified in its own worktree
+	// and nothing merges them, so an operator who did not already know to run
+	// `merge --work-item` per item merged by hand — and the goal could not
+	// complete, because the criteria are measured on the default branch and
+	// nothing had been put there.
+	waiting, err := s.WorkWaitingToMerge(ctx, p.ID, g.ID)
+	if err != nil {
+		return err
+	}
+	if len(waiting) > 0 {
+		ids := make([]string, 0, len(waiting))
+		for _, entry := range waiting {
+			ids = append(ids, entry.WorkItemID)
+		}
+		blockers = append(blockers, fmt.Sprintf("검증됐지만 병합되지 않은 작업 %d건: %s — 기본 브랜치에 올라가야 완료 조건이 그 위에서 측정됩니다 (goalforge merge --all 또는 merge --work-item ID, 그 뒤 goalforge verify integration)",
+			len(waiting), strings.Join(ids, ", ")))
+	}
 	items, err := s.ListWorkItems(ctx, g.ID)
 	if err != nil {
 		return err
@@ -3741,6 +3810,84 @@ func printBlockers(ctx context.Context, s *store.Store, p model.Project, g model
 	fmt.Println("Needs you:")
 	for _, blocker := range blockers {
 		fmt.Printf("  - %s\n", blocker)
+	}
+	return nil
+}
+
+// mergeAllVerified merges every verified commit that has not reached the
+// default branch, in board order.
+//
+// It exists because merging was possible one item at a time and nothing said
+// which items were waiting, so the work sat in per-item worktrees and the
+// operator merged by hand. The goal cannot complete without this: the criteria
+// are measured on the branch that ships.
+//
+// The approval boundary is unchanged. Each commit still needs its own approval,
+// because approving a merge is approving that change — what this removes is
+// having to discover the items, not having to approve them. A refusal reports
+// every item that needs one rather than stopping at the first.
+func mergeAllVerified(ctx context.Context, s *store.Store, listOnly bool) error {
+	project, err := currentProject(ctx, s)
+	if err != nil {
+		return err
+	}
+	goal, err := activeGoal(ctx, s)
+	if err != nil {
+		return err
+	}
+	waiting, err := s.WorkWaitingToMerge(ctx, project.ID, goal.ID)
+	if err != nil {
+		return err
+	}
+	if len(waiting) == 0 {
+		fmt.Println("병합을 기다리는 검증된 작업이 없습니다")
+		return nil
+	}
+	fmt.Printf("병합을 기다리는 작업 %d건:\n", len(waiting))
+	for _, entry := range waiting {
+		fmt.Printf("  %-18s %-10s %s → %s\n", entry.WorkItemID, shortSHA(entry.CommitSHA),
+			entry.Branch, project.DefaultBranch)
+		fmt.Printf("    %s\n", entry.Title)
+	}
+	if listOnly {
+		fmt.Println("\n`goalforge merge --all` 로 병합합니다 — 각 커밋은 여전히 승인이 필요합니다")
+		return nil
+	}
+	var merged, needApproval []string
+	for _, entry := range waiting {
+		mergeErr := mergeWork(ctx, s, []string{"--work-item", entry.WorkItemID})
+		switch {
+		case mergeErr == nil:
+			merged = append(merged, entry.WorkItemID)
+		case strings.Contains(mergeErr.Error(), "requires approval"):
+			// Collected rather than returned. Stopping at the first one makes
+			// the operator run the command again for every item to find out
+			// what else it wants.
+			needApproval = append(needApproval, entry.WorkItemID)
+		default:
+			// A conflict or a failed merge stops here: merging the next item on
+			// top of a half-merged branch is how a broken default branch gets
+			// more work put into it.
+			if len(merged) > 0 {
+				fmt.Printf("병합함: %s\n", strings.Join(merged, ", "))
+			}
+			return fmt.Errorf("%s 병합이 실패해 멈췄습니다: %w", entry.WorkItemID, mergeErr)
+		}
+	}
+	if len(merged) > 0 {
+		fmt.Printf("\n병합함 %d건: %s\n", len(merged), strings.Join(merged, ", "))
+		// Named here because the criteria are measured on this branch and the
+		// evidence gathered in the worktrees stopped counting the moment the
+		// merge happened. Without this the goal stays incomplete with every
+		// criterion showing no evidence.
+		fmt.Println("`goalforge verify integration` 으로 기본 브랜치에서 게이트를 돌려야 완료 조건이 측정됩니다")
+	}
+	if len(needApproval) > 0 {
+		fmt.Printf("\n승인이 필요한 작업 %d건: %s\n", len(needApproval), strings.Join(needApproval, ", "))
+		for _, id := range needApproval {
+			fmt.Printf("  goalforge approval request --action merge-branch --work-item %s --reason \"...\"\n", id)
+		}
+		return errors.New("승인되지 않은 병합이 남아 있습니다")
 	}
 	return nil
 }

@@ -17,7 +17,16 @@ const (
 	GateAuth            GateFailureKind = "auth"
 	GateTimeout         GateFailureKind = "timeout"
 	GateMisconfigured   GateFailureKind = "misconfigured"
-	GateUnknown         GateFailureKind = "unknown"
+	// GateNoTestsRan means the runner found nothing to run.
+	//
+	// Separate from a misconfigured gate because the remedy is opposite: the
+	// test has not been written yet, and the loop can write it, while a person
+	// cannot fix anything about it. It mattered because `go test -run X ./pkg`
+	// exits zero when the package has no test file — so a criterion settled by
+	// that gate went green the moment an empty package existed, and "goal
+	// complete" was reported for a feature nobody had implemented.
+	GateNoTestsRan GateFailureKind = "no_tests_ran"
+	GateUnknown    GateFailureKind = "unknown"
 )
 
 // RepairMode is what would actually address the failure. Separating a code fix
@@ -47,6 +56,17 @@ func ClassifyGateFailure(status string, output string) GateFailure {
 		return GateFailure{Kind: GateTimeout, Mode: RepairHuman, Summary: summaries[GateTimeout]}
 	}
 	switch {
+	// Checked before the pattern cases. Asserting that a named test ran is how
+	// a vacuous pass is turned into a failure, and that failure arrives with
+	// both "no test files" and "value pattern matched no measurement" in the
+	// output — classified as misconfigured it would stop the loop and ask a
+	// person to fix a regular expression that is correct.
+	//
+	// "no tests to run" is included even though Go prints it alongside PASS: a
+	// gate asserting a named test ran fails on it, and the reason is the same.
+	case containsAny(text, "no test files", "no tests to run", "no tests ran",
+		"collected 0 items", "no test files found") && !strings.Contains(text, "--- fail"):
+		return GateFailure{Kind: GateNoTestsRan, Mode: RepairCodeFix, Summary: summaries[GateNoTestsRan]}
 	case containsAny(text, "value pattern matched no measurement", "value pattern is invalid", "is not a number"):
 		return GateFailure{Kind: GateMisconfigured, Mode: RepairHuman, Summary: summaries[GateMisconfigured]}
 	case strings.Contains(text, "below the threshold"):
@@ -76,6 +96,7 @@ var summaries = map[GateFailureKind]string{
 	GateAuth:            "인증이 거부되었습니다. 자격 증명을 갱신해야 하며 코드를 고쳐도 해결되지 않습니다.",
 	GateTimeout:         "게이트가 제한 시간 안에 끝나지 않았습니다. 무한 대기인지 단순히 느린 것인지 사람이 판단해야 합니다.",
 	GateMisconfigured:   "게이트가 측정값을 뽑아내지 못했습니다. 명령이나 --value-pattern 설정을 고쳐야 합니다.",
+	GateNoTestsRan:      "검사가 하나도 실행되지 않았습니다. 이 기준을 재는 테스트를 먼저 작성해야 합니다 — 명령이 통과한 것은 실행할 것이 없었기 때문입니다.",
 	GateUnknown:         "실패 원인을 분류하지 못했습니다. 출력 전체를 확인해야 합니다.",
 }
 

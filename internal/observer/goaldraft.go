@@ -24,7 +24,16 @@ type DraftCriterion struct {
 	ExpectedValue string   `json:"expected_value"`
 	Kind          string   `json:"kind"`
 	GateCommand   []string `json:"gate_command"`
-	WhyItFailsNow string   `json:"why_it_fails_now"`
+	// ValuePattern extracts the measurement from the gate's output, and for a
+	// test runner it is what proves the test ran at all.
+	//
+	// `go test -run ^TestX$ ./pkg` exits zero when the package has no test
+	// file, so a criterion settled by that gate went green the moment an empty
+	// package existed. A pattern naming the test turns that vacuous pass into
+	// a failure, because the output of a run with nothing to run does not
+	// contain it.
+	ValuePattern  string `json:"value_pattern,omitempty"`
+	WhyItFailsNow string `json:"why_it_fails_now"`
 	// FailsNow records whether running the gate against the current tree
 	// actually failed. A gate for work not yet done that passes today is not
 	// measuring that work.
@@ -68,7 +77,10 @@ func (d GoalDraft) Gates() []store.GateConfig {
 	for _, criterion := range d.Criteria {
 		gates = append(gates, store.GateConfig{Type: criterion.Type, Command: criterion.GateCommand,
 			Timeout: goalGateTimeout, Required: false, SuccessValue: criterion.ExpectedValue,
-			Kind: criterion.Kind})
+			// Carried through, because it is what makes a test gate fail when
+			// the test does not exist. Dropping it here would reinstate the
+			// vacuous pass with the screen still reporting the gate as checked.
+			ValuePattern: criterion.ValuePattern, Kind: criterion.Kind})
 	}
 	return gates
 }
@@ -99,12 +111,126 @@ const (
 	// than refusing it, because the refusal says what is missing and the other
 	// leaves a project that looks ready.
 	RefusalNoHealthGate = "NO_HEALTH_GATE"
+	// RefusalVacuousPass means the gate can pass without the thing it measures
+	// existing.
+	//
+	// A filtered test run is the case that matters: go test -run ^TestX$ ./pkg
+	// exits zero when the package has no test file, so the criterion goes
+	// green the moment an empty package exists and the goal is reported
+	// complete for a feature nobody implemented. "Fails now" does not catch it
+	// — at draft time the package is missing, so the gate does fail, for a
+	// reason that stops applying as soon as any file is written.
+	RefusalVacuousPass = "VACUOUS_PASS"
 	// RefusalHealthGateFails means the proposed health gate already fails. One
 	// that fails today is not a health gate; it is a completion criterion
 	// under the wrong heading, and making it required would fail every run
 	// until the whole goal was done.
 	RefusalHealthGateFails = "HEALTH_GATE_FAILS"
 )
+
+// testRunners are commands that exit zero when their filter matches nothing,
+// keyed by the subcommand that has to be present for it to be a test run.
+//
+// This is language-specific knowledge and is written down as such, the same way
+// the gate templates know what a Go or Node project is built with. `go test`
+// prints "[no test files]" and exits zero; a filtered run that matched nothing
+// prints "no tests to run" and still passes. A gate built on one of these
+// without an assertion that the named test ran is satisfied by an empty
+// package.
+//
+// The subcommand matters: `go build ./...` cannot pass vacuously, and keying on
+// the executable alone demanded a pattern from every Go command.
+var testRunners = map[string]string{
+	"go": "test", "pytest": "", "vitest": "", "jest": "", "npx": "vitest",
+}
+
+// isTestRunner reports whether a command is one of the runners that passes on
+// an empty filter result.
+func isTestRunner(command []string) bool {
+	if len(command) == 0 {
+		return false
+	}
+	subcommand, known := testRunners[baseCommand(command[0])]
+	if !known {
+		return false
+	}
+	if subcommand == "" {
+		return true
+	}
+	for _, arg := range command[1:] {
+		if arg == subcommand {
+			return true
+		}
+		if !strings.HasPrefix(arg, "-") {
+			// The first non-flag argument is the subcommand. Anything else
+			// there means this is not a test run.
+			return false
+		}
+	}
+	return false
+}
+
+// filterFlags are how each runner is told to run only some tests.
+var filterFlags = map[string]bool{"-run": true, "-k": true, "-t": true, "--testNamePattern": true}
+
+// vacuousPass reports why a gate could pass without the thing it measures, or
+// "" when it could not.
+//
+// Only filtered test runs are held to this. A build command or a file check
+// cannot pass vacuously in the same way, and demanding a pattern from them
+// would make the drafter invent one.
+func vacuousPass(criterion DraftCriterion) string {
+	if !isTestRunner(criterion.GateCommand) {
+		return ""
+	}
+	filter, verbose := "", false
+	for i, arg := range criterion.GateCommand {
+		switch {
+		case filterFlags[arg] && i+1 < len(criterion.GateCommand):
+			filter = criterion.GateCommand[i+1]
+		case arg == "-v" || arg == "--verbose":
+			verbose = true
+		}
+	}
+	if filter == "" {
+		// An unfiltered run still passes on a package with no tests, so it
+		// needs the assertion just as much.
+		if strings.TrimSpace(criterion.ValuePattern) == "" {
+			return fmt.Sprintf("%s: 이 명령은 테스트가 하나도 없어도 통과합니다 (go test 는 [no test files] 로 exit 0) — 어떤 검사가 실제로 통과했는지 확인하는 value_pattern 이 필요합니다",
+				criterion.Type)
+		}
+		return ""
+	}
+	if !verbose {
+		return fmt.Sprintf("%s: 걸러낸 실행(%s %s)은 -v 없이는 어떤 검사가 통과했는지 출력하지 않습니다 — -v 와 value_pattern 을 함께 주세요",
+			criterion.Type, "-run", filter)
+	}
+	pattern := strings.TrimSpace(criterion.ValuePattern)
+	if pattern == "" {
+		return fmt.Sprintf("%s: 이 명령은 %s 에 맞는 검사가 없어도 통과합니다 — 그 검사가 실제로 통과했음을 확인하는 value_pattern 이 필요합니다 (예: --- PASS: (TestRedirect))",
+			criterion.Type, filter)
+	}
+	// The pattern has to name what the filter asked for. One that matches some
+	// other line passes on the output of a run with nothing to run, with a
+	// pattern attached to make it look checked.
+	if !patternNames(pattern, filter) {
+		return fmt.Sprintf("%s: value_pattern %q 이 걸러낸 이름(%s)을 담고 있지 않습니다 — 다른 줄에 맞으면 검사가 없어도 통과합니다",
+			criterion.Type, pattern, filter)
+	}
+	return ""
+}
+
+// patternNames reports whether a value pattern mentions the test the filter
+// selected, ignoring the anchors and escapes a filter usually carries.
+func patternNames(pattern, filter string) bool {
+	name := strings.Trim(filter, "^$'\"")
+	name = strings.TrimPrefix(name, "\\b")
+	name = strings.TrimSuffix(name, "\\b")
+	if name == "" {
+		return false
+	}
+	return strings.Contains(pattern, name)
+}
 
 // trivialCommands are shells for "always succeed". A gate built from one of
 // them is green from the moment it is written and stays green through every
@@ -179,6 +305,9 @@ func ScreenDraft(draft GoalDraft) []rrsi.Refusal {
 			refusals = append(refusals, rrsi.Refusal{Kind: rrsi.RefusalNoHypothesis,
 				Detail: fmt.Sprintf("%s: 게이트 명령이 거절되었습니다: %v", name, err)})
 			continue
+		}
+		if detail := vacuousPass(criterion); detail != "" {
+			refusals = append(refusals, rrsi.Refusal{Kind: RefusalVacuousPass, Detail: detail})
 		}
 		if len(criterion.GateCommand) > 0 && trivialCommands[baseCommand(criterion.GateCommand[0])] {
 			refusals = append(refusals, rrsi.Refusal{Kind: RefusalAlwaysPasses,

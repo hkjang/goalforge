@@ -323,8 +323,14 @@ func TestCLIEvidenceAndPreviewLifecycle(t *testing.T) {
 		t.Fatalf("status must surface the integration gap:\n%s", runCLI(t, ctx, "status"))
 	}
 	integrationOut := runCLI(t, ctx, "verify", "integration")
-	if !strings.Contains(integrationOut, "integration verified") {
+	// The required gates passing is what "integration" means; whether the goal
+	// is finished is the completion criteria, which the same run measures and
+	// reports separately.
+	if !strings.Contains(integrationOut, "필수 게이트 통과") {
 		t.Fatalf("integration verification:\n%s", integrationOut)
+	}
+	if !strings.Contains(integrationOut, "완료 조건") {
+		t.Fatalf("the run must say where the completion criteria stand:\n%s", integrationOut)
 	}
 	if verified := runCLI(t, ctx, "status"); !strings.Contains(verified, "[v]") {
 		t.Fatalf("integration evidence should satisfy the criterion:\n%s", verified)
