@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/goalforge/goalforge/internal/model"
 	"github.com/goalforge/goalforge/internal/provider"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 )
@@ -93,5 +94,47 @@ func TestAProjectWithNoGatesCarriesNoAllowedCommands(t *testing.T) {
 	}
 	if len(fake.lastRequest.AllowedCommands) != 0 {
 		t.Fatalf("allowed=%v", fake.lastRequest.AllowedCommands)
+	}
+}
+
+// A run with a work item claims it, including the resumed path that never went
+// through the selection claim.
+//
+// Pinned at this level because the invariant lives in StartRun and reaches it
+// only if the orchestrator passes the work item through. Dropping that argument
+// would leave the item on the board while a run worked on it: it would not
+// count against the WIP limit, the next selection could pick it again, and
+// every later status update guarded on IN_PROGRESS would be a no-op — which is
+// how a run that verified left its item in BACKLOG.
+func TestARunClaimsItsWorkItemWhateverPathStartedIt(t *testing.T) {
+	ctx, s, project := setup(t)
+	defer s.Close()
+	goal, err := s.SetGoal(ctx, project.ID, "ship", "o", "",
+		[]model.Criterion{{Type: "build_passed", ExpectedValue: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateWorkItem(ctx, model.WorkItem{ID: "W-RESUME", GoalID: goal.ID,
+		Type: "IMPLEMENT", Title: "resumed", Priority: 5, Weight: 1}); err != nil {
+		t.Fatal(err)
+	}
+	fake := completedProvider()
+	o, err := New(s, fake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No claim beforehand: this is the state a resumed run starts from.
+	if _, err = o.Run(ctx, Request{RunID: "RUN-1", Prompt: "p", WorkItemID: "W-RESUME",
+		Project: project, WorkspaceWrite: true}); err != nil {
+		t.Fatal(err)
+	}
+	item, err := s.WorkItemByID(ctx, goal.ID, "W-RESUME")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// VERIFYING because the run finished its turn; what matters is that it left
+	// BACKLOG at all, which only the claim in StartRun can have done.
+	if item.Status == "BACKLOG" {
+		t.Fatal("a run worked on this item and it is still on the board")
 	}
 }

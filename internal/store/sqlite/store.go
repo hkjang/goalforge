@@ -1079,6 +1079,25 @@ func (s *Store) StartRun(ctx context.Context, run RunRecord) error {
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("project is not runnable")
 	}
+	// A run with a work item means that item is in progress. Enforced here
+	// because this is the one funnel every run goes through, and the claim
+	// that used to be the only thing setting it is reached by the
+	// fresh-selection path alone: a resumed run takes its item from a
+	// checkpoint and never claimed it.
+	//
+	// It left the item on the board while a run was working on it, so the WIP
+	// limit did not count it and the next selection could pick the same item —
+	// and every later status update guarded on IN_PROGRESS or VERIFYING was a
+	// no-op, which is how a run that verified left its item in BACKLOG.
+	//
+	// Terminal states are not disturbed: work somebody finished or discarded
+	// is not put back in progress by a run that mentions it.
+	if run.WorkItemID != "" {
+		if _, err = tx.ExecContext(ctx, `UPDATE work_items SET status='IN_PROGRESS'
+WHERE id=? AND status NOT IN ('IN_PROGRESS','VERIFYING','DONE','DISCARDED')`, run.WorkItemID); err != nil {
+			return err
+		}
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO runs(id,project_id,work_item_id,provider,model,state,task_type,config_version,base_commit,started_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, run.ID, run.ProjectID, workItem, run.Provider, run.Model, run.State, run.TaskType, run.ConfigVersion, run.BaseCommit, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
