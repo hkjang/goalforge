@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 
 	"github.com/goalforge/goalforge/internal/policy"
 
@@ -127,18 +126,36 @@ func (r *ProcessRunner) Run(ctx context.Context, request RunRequest, args []stri
 	return events, nil
 }
 
+// pipeGoneMessages is how each platform says the reader is gone.
+//
+// Checked as text because a write wrapped on the way up loses its sentinel, and
+// because the platforms disagree: Linux and macOS say "broken pipe", Windows
+// says "The pipe has been ended." or "The pipe is being closed." A
+// classification built on the Unix spelling alone left the defect in place on
+// Windows, and a GOOS=windows build did not notice — that only compiles.
+var pipeGoneMessages = []string{
+	"broken pipe",
+	"file already closed",
+	"the pipe has been ended",
+	"the pipe is being closed",
+}
+
 // isBrokenPipe reports whether a write failed because the other end is gone.
 //
-// EPIPE is what the kernel gives a write to a pipe nobody is reading;
-// ErrClosedPipe is what os/exec gives once it has torn the pipe down after the
-// process exited. Both mean the same thing here, and the string is checked as
-// well because a write wrapped on the way up loses the sentinel.
+// io.ErrClosedPipe is what os/exec gives once it has torn the pipe down after
+// the process exited; the platform errno is what the kernel gives a write to a
+// pipe nobody is reading. Both mean the same thing here.
 func isBrokenPipe(err error) bool {
-	if errors.Is(err, syscall.EPIPE) || errors.Is(err, io.ErrClosedPipe) {
+	if errors.Is(err, io.ErrClosedPipe) || isPipeGoneErrno(err) {
 		return true
 	}
-	return strings.Contains(err.Error(), "broken pipe") ||
-		strings.Contains(err.Error(), "file already closed")
+	message := strings.ToLower(err.Error())
+	for _, known := range pipeGoneMessages {
+		if strings.Contains(message, known) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *ProcessRunner) Interrupt(_ context.Context, runID string) error {
