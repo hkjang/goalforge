@@ -15,13 +15,31 @@ type Worktree struct{ Path, Branch, BaseCommit string }
 
 var unsafeBranch = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-func EnsureWorktree(ctx context.Context, repository, projectID, workItemID string) (Worktree, error) {
+// EnsureWorktree creates or reuses an isolated worktree for one work item.
+//
+// base is where the work starts from, empty meaning the repository's HEAD.
+// Every worktree used to start from HEAD, so an item could not see what earlier
+// items had built: item 1 wrote store/, verified, and was marked done, and item
+// 3's worktree — cut from a default branch nothing had been merged into —
+// failed with "stat …/store: directory not found". Every item depending on
+// earlier work failed, and the chain could not build a program made of more
+// than one piece.
+func EnsureWorktree(ctx context.Context, repository, projectID, workItemID, base string) (Worktree, error) {
 	if repository == "" || projectID == "" || workItemID == "" {
 		return Worktree{}, errors.New("repository, project, and work item are required")
 	}
-	base, err := gitOutput(ctx, repository, "rev-parse", "HEAD")
-	if err != nil {
-		return Worktree{}, err
+	base = strings.TrimSpace(base)
+	if base == "" {
+		head, err := gitOutput(ctx, repository, "rev-parse", "HEAD")
+		if err != nil {
+			return Worktree{}, err
+		}
+		base = head
+	} else if _, err := gitOutput(ctx, repository, "rev-parse", "--verify", base+"^{commit}"); err != nil {
+		// A base this repository does not have is refused rather than passed
+		// to `git worktree add`, whose message for it names neither the commit
+		// nor where it came from.
+		return Worktree{}, fmt.Errorf("기준 커밋 %s 을(를) 저장소에서 찾을 수 없습니다: %w", base, err)
 	}
 	branch := "goalforge/" + safeRef(projectID) + "-" + safeRef(workItemID)
 	root := repository + ".goalforge-worktrees"
@@ -35,7 +53,7 @@ func EnsureWorktree(ctx context.Context, repository, projectID, workItemID strin
 	} else if !os.IsNotExist(statErr) {
 		return Worktree{}, statErr
 	}
-	if err = os.MkdirAll(root, 0o700); err != nil {
+	if err := os.MkdirAll(root, 0o700); err != nil {
 		return Worktree{}, err
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", repository, "worktree", "add", "-b", branch, path, base)

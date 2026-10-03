@@ -169,7 +169,7 @@ func TestCommitAndMergeKeepGoalForgeIdentityOverAmbientEnvironment(t *testing.T)
 	run(repository, "add", "README.md")
 	run(repository, "commit", "-m", "base")
 
-	worktree, err := EnsureWorktree(ctx, repository, "P1", "WORK-1")
+	worktree, err := EnsureWorktree(ctx, repository, "P1", "WORK-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestCommitVerifiedCreatesTrailedCommitOffProtectedBranch(t *testing.T) {
 		t.Fatal("expected protected branch refusal")
 	}
 
-	worktree, err := EnsureWorktree(ctx, repository, "P1", "WORK-1")
+	worktree, err := EnsureWorktree(ctx, repository, "P1", "WORK-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
