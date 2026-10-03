@@ -212,6 +212,7 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 	if err != nil {
 		return result, err
 	}
+	resumedInWorktree := false
 	if result.Checkpoint.WorkItemID != "" {
 		worktree, worktreeErr := s.store.WorktreeForWorkItem(ctx, project.ID, result.Checkpoint.WorkItemID)
 		if worktreeErr == nil {
@@ -224,6 +225,7 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 				return result, fmt.Errorf("%w — %s", intactErr, gitops.ExplainMissingWorktree(project.RepositoryPath, recorded))
 			}
 			project.RepositoryPath = worktree.Path
+			resumedInWorktree = true
 		} else if project.WorktreeEnabled || !errors.Is(worktreeErr, store.ErrNotFound) {
 			return result, fmt.Errorf("load checkpoint worktree: %w", worktreeErr)
 		}
@@ -278,7 +280,14 @@ func (s *Service) ResumePaused(ctx context.Context, project model.Project) (resu
 		}
 		result.Repair, err = s.recordVerificationLoop(ctx, project, result.Checkpoint.WorkItemID, result.Run.RunID, resumeChanges, result.Verification)
 	}
-	if err == nil && result.Verification.Passed && project.AutoCommitEnabled && result.Checkpoint.WorkItemID != "" {
+	// Committed when the resume ran in a worktree, for the reason the fresh
+	// path has: that branch is where the work is preserved, and left
+	// uncommitted it cannot be merged, cannot be inherited by the next item,
+	// and is lost when the worktree is cleaned. This is the path a run takes
+	// after a quota wait or a block, so with the default settings the work of
+	// every resumed run was being dropped.
+	if err == nil && result.Verification.Passed && result.Checkpoint.WorkItemID != "" &&
+		(resumedInWorktree || project.AutoCommitEnabled) {
 		goal, goalErr := s.store.CurrentGoal(ctx, project.ID)
 		if goalErr != nil {
 			return result, goalErr
@@ -375,7 +384,21 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 		}
 	}
 	if isolateWorkItem {
-		worktree, worktreeErr := gitops.EnsureWorktree(ctx, project.RepositoryPath, project.ID, result.WorkItem.ID)
+		// The last verified work for this goal, so what earlier items built is
+		// there. Falling back to the default branch when nothing has been built
+		// yet: a goal's first item has nothing to inherit.
+		//
+		// A failure to read it is not a reason to refuse the run — the branch
+		// is a correct base, just an emptier one — but it is worth saying,
+		// because a run that silently started from the wrong place is how the
+		// next item fails to find a package that was written.
+		base := ""
+		if previous, baseErr := s.store.LatestGoalCommit(ctx, project.ID, goal.ID); baseErr == nil {
+			base = previous.CommitSHA
+		} else if !errors.Is(baseErr, store.ErrNotFound) {
+			return result, fmt.Errorf("이전 작업의 커밋을 읽지 못했습니다: %w", baseErr)
+		}
+		worktree, worktreeErr := gitops.EnsureWorktree(ctx, project.RepositoryPath, project.ID, result.WorkItem.ID, base)
 		if worktreeErr != nil {
 			return result, fmt.Errorf("prepare worktree: %w", worktreeErr)
 		}
@@ -479,7 +502,20 @@ func (s *Service) executeNext(ctx context.Context, project model.Project, taskTy
 	if err == nil {
 		err = s.settleAutomaticAttempt(ctx, result)
 	}
-	if err == nil && result.Verification.Passed && project.AutoCommitEnabled {
+	// Verified work in an isolated worktree is committed on its own branch
+	// whatever the auto-commit setting says.
+	//
+	// That branch is where the work is preserved. Left uncommitted it is dirty
+	// files in a worktree: nothing can merge it, the next item cannot inherit
+	// it, and cleaning the worktree loses it — so with the default settings a
+	// goal made of more than one item could never be finished.
+	//
+	// The flag was not what kept this safe. CommitVerified refuses the
+	// protected branch itself, so a run that was not isolated — one sitting on
+	// the default branch — is still refused, and that is the case the flag is
+	// about. Committing on an isolated branch is not publishing; nothing
+	// reaches the default branch without an approval.
+	if err == nil && result.Verification.Passed && (isolateWorkItem || project.AutoCommitEnabled) {
 		err = s.commitVerifiedRun(ctx, project, executionProject.RepositoryPath, goal.ID, result.WorkItem.ID, result.WorkItem.Title, result.Run.RunID)
 	}
 	return result, err

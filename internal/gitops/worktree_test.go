@@ -25,7 +25,7 @@ func TestEnsureWorktreeCreatesAndReusesDedicatedBranch(t *testing.T) {
 	}
 	run("add", "README.md")
 	run("commit", "-m", "base")
-	created, err := EnsureWorktree(context.Background(), repository, "P1", "WORK-1")
+	created, err := EnsureWorktree(context.Background(), repository, "P1", "WORK-1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestEnsureWorktreeCreatesAndReusesDedicatedBranch(t *testing.T) {
 	if _, err = os.Stat(filepath.Join(created.Path, "work.go")); !os.IsNotExist(err) {
 		t.Fatalf("added file was not removed: %v", err)
 	}
-	reused, err := EnsureWorktree(context.Background(), repository, "P1", "WORK-1")
+	reused, err := EnsureWorktree(context.Background(), repository, "P1", "WORK-1", "")
 	if err != nil || reused.Path != created.Path || reused.Branch != created.Branch {
 		t.Fatalf("reused=%+v err=%v", reused, err)
 	}
