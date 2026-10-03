@@ -19,9 +19,12 @@ permissions:
 
 jobs:
   # Every platform a binary is shipped for is tested before any of them are
-  # published. Pull requests gate on Linux alone because that is where this
-  # runs; a release is the moment the other claims are made, so it is the
-  # moment they are checked.
+  # published.
+  #
+  # The same matrix runs on every pull request, so this is a second reading
+  # rather than the first one. It is kept because a tag can point at a commit
+  # no pull request ever ran — and publishing binaries is the moment the claim
+  # about each platform is actually made.
   verify:
     name: verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
