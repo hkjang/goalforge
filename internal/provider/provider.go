@@ -26,8 +26,21 @@ type RunRequest struct {
 	GoalObjective                 string
 	GoalTokenBudget               *int64
 	Environment                   []string
-	WorkspaceWrite                bool
-	Ephemeral                     bool
+	// AllowedCommands are shell commands the session may run without being
+	// asked to confirm them.
+	//
+	// A headless session has nobody to ask. An agent that gates shell commands
+	// — Qwen Code does, even with edits auto-approved — cannot run the
+	// project's own tests to check its work, so it writes code, reports done,
+	// and the gates find out afterwards.
+	//
+	// They are derived from the project's verification gates rather than
+	// configured, so allowing them grants no authority the run did not already
+	// have: those commands are going to run anyway, as the gates. Adapters that
+	// cannot express a command allowlist ignore this.
+	AllowedCommands []string
+	WorkspaceWrite  bool
+	Ephemeral       bool
 }
 
 type AccountRef struct{ ID string }

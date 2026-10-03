@@ -30,41 +30,88 @@ func (a *Adapter) Name() string { return "claude" }
 func (a *Adapter) Capabilities() provider.Capabilities {
 	return provider.Capabilities{StructuredStream: true, SessionResume: true, RealtimeTokenUsage: true}
 }
-func (a *Adapter) Start(ctx context.Context, r provider.RunRequest) (<-chan provider.Event, error) {
+
+// permissionArgs is how a run is allowed to act.
+//
+// Shared by Start and Resume because they were written out separately: a session
+// that could run the tests on its first turn and not its second would stop
+// halfway through its own checking, and two copies of a rule drift apart.
+//
+// acceptEdits approves edits and still asks before a shell command, and a
+// headless session has nobody to ask — so the commands the project declared as
+// its gates are passed as an allowlist. Without it a session cannot run the
+// project's own tests to check its work: it writes code, reports done, and the
+// gates find out afterwards.
+func permissionArgs(r provider.RunRequest) []string {
+	if !r.WorkspaceWrite {
+		// Planning looks rather than acts. Pre-approved shell commands here
+		// would make the mode a label.
+		return []string{"--permission-mode", "plan"}
+	}
+	args := []string{"--permission-mode", "acceptEdits"}
+	if rules := bashRules(r.AllowedCommands); len(rules) > 0 {
+		args = append(args, "--allowedTools", strings.Join(rules, " "))
+	}
+	return args
+}
+
+// bashRules renders commands in the form Claude matches on.
+//
+// Claude's own help documents it as "Bash(git *)", so the glob is how a prefix
+// is expressed and the bare command needs its own rule: Bash(go test *) does not
+// match `go test` with no arguments.
+//
+// A command carrying a comma or a parenthesis is dropped rather than passed. The
+// flag's value is comma or space separated and the rule is delimited by
+// parentheses, so either would be torn into rules that match nothing — an
+// allowlist that looks configured and admits nothing.
+func bashRules(commands []string) []string {
+	rules := make([]string, 0, 2*len(commands))
+	for _, command := range commands {
+		command = strings.TrimSpace(command)
+		if command == "" || strings.ContainsAny(command, "(),") {
+			continue
+		}
+		rules = append(rules, "Bash("+command+")", "Bash("+command+" *)")
+	}
+	return rules
+}
+
+func startArgs(r provider.RunRequest) []string {
 	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
 	if r.Ephemeral {
 		args = append(args, "--no-session-persistence")
 	}
-	if r.WorkspaceWrite {
-		args = append(args, "--permission-mode", "acceptEdits")
-	} else {
-		args = append(args, "--permission-mode", "plan")
-	}
+	args = append(args, permissionArgs(r)...)
 	if r.Model != "" {
 		args = append(args, "--model", r.Model)
 	}
 	if r.OutputSchema != "" {
 		args = append(args, "--json-schema", r.OutputSchema)
 	}
-	return a.runWithStopFailure(ctx, r, args)
+	return args
+}
+
+func (a *Adapter) Start(ctx context.Context, r provider.RunRequest) (<-chan provider.Event, error) {
+	return a.runWithStopFailure(ctx, r, startArgs(r))
 }
 func (a *Adapter) Resume(ctx context.Context, sessionID string, r provider.RunRequest) (<-chan provider.Event, error) {
 	if sessionID == "" {
 		return nil, errors.New("session ID is required")
 	}
+	return a.runWithStopFailure(ctx, r, resumeArgs(sessionID, r))
+}
+
+func resumeArgs(sessionID string, r provider.RunRequest) []string {
 	args := []string{"-p", "--resume", sessionID, "--output-format", "stream-json", "--verbose"}
-	if r.WorkspaceWrite {
-		args = append(args, "--permission-mode", "acceptEdits")
-	} else {
-		args = append(args, "--permission-mode", "plan")
-	}
+	args = append(args, permissionArgs(r)...)
 	if r.Model != "" {
 		args = append(args, "--model", r.Model)
 	}
 	if r.OutputSchema != "" {
 		args = append(args, "--json-schema", r.OutputSchema)
 	}
-	return a.runWithStopFailure(ctx, r, args)
+	return args
 }
 func (a *Adapter) GetQuota(_ context.Context, _ provider.AccountRef) (provider.QuotaSnapshot, error) {
 	a.mu.Lock()

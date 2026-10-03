@@ -9,6 +9,7 @@ import (
 
 	"github.com/goalforge/goalforge/internal/gitops"
 	"github.com/goalforge/goalforge/internal/model"
+	"github.com/goalforge/goalforge/internal/policy"
 	"github.com/goalforge/goalforge/internal/provider"
 	store "github.com/goalforge/goalforge/internal/store/sqlite"
 	"github.com/goalforge/goalforge/internal/usage"
@@ -129,6 +130,27 @@ func (o *Orchestrator) Run(ctx context.Context, request Request) (Result, error)
 		return result, fmt.Errorf("record prompt audit: %w", err)
 	}
 	runRequest := provider.RunRequest{RunID: request.RunID, Prompt: request.Prompt, WorkDir: request.Project.RepositoryPath, Model: request.Project.Model, OutputSchema: request.OutputSchema, WorkspaceWrite: request.WorkspaceWrite, Ephemeral: request.Isolated}
+	if request.WorkspaceWrite {
+		// The commands the project declared as its gates, so a session can run
+		// them to check its own work. An agent that gates shell commands and a
+		// headless run with nobody to ask means the session writes code,
+		// reports done, and the gates find out afterwards.
+		//
+		// Read here rather than threaded through Request: the orchestrator
+		// already has the store, and a caller that forgot to pass them would
+		// quietly produce a session that cannot check anything.
+		//
+		// A failure to read them is not a reason to refuse the run. The gates
+		// still run afterwards, so the worst case is the session asking for
+		// confirmation it cannot get — which is where this started.
+		if gates, gatesErr := o.store.ListGates(ctx, request.Project.ID); gatesErr == nil {
+			commands := make([][]string, 0, len(gates))
+			for _, gate := range gates {
+				commands = append(commands, gate.Command)
+			}
+			runRequest.AllowedCommands = policy.AllowedCommandsFromGates(commands)
+		}
+	}
 	turnCtx, cancelTurn := context.WithTimeout(ctx, runtimePolicy.TurnTimeout)
 	defer cancelTurn()
 	capabilities := p.Capabilities()
