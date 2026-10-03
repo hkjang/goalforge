@@ -7,6 +7,7 @@ package qwen
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/goalforge/goalforge/internal/provider"
 )
@@ -27,10 +28,21 @@ func (a *Adapter) Capabilities() provider.Capabilities {
 // baseArgs maps the run request onto Qwen Code headless flags. Writable work
 // uses auto-edit (edits approved, shell still gated) rather than yolo: broad
 // permission modes must never be the default (SEC guidance).
+//
+// auto-edit leaves shell gated, and a headless session has nobody to ask — so
+// the commands the project declared as its gates are passed as an allowlist.
+// Without it a session cannot run the project's own tests to check its work: it
+// writes code, reports done, and the gates find out afterwards.
 func baseArgs(r provider.RunRequest) []string {
 	args := []string{"--output-format", "stream-json"}
 	if r.WorkspaceWrite {
 		args = append(args, "--approval-mode", "auto-edit")
+		// Only on a writable run. The point of plan mode is that the session
+		// looks and does not act, and pre-approving shell commands there would
+		// make the mode a label.
+		if patterns := shellToolPatterns(r.AllowedCommands); len(patterns) > 0 {
+			args = append(args, "--allowed-tools", strings.Join(patterns, ","))
+		}
 	} else {
 		args = append(args, "--approval-mode", "plan")
 	}
@@ -38,6 +50,29 @@ func baseArgs(r provider.RunRequest) []string {
 		args = append(args, "--model", r.Model)
 	}
 	return args
+}
+
+// shellToolPatterns renders commands in the form Qwen Code matches on.
+//
+// Qwen compares the invoked command against the text between the first "(" and
+// a trailing ")": `value === pattern || value.startsWith(pattern + " ")`. So
+// run_shell_command(go test) admits `go test` and `go test ./pkg` and nothing
+// else, and a chained command is split with each part checked separately —
+// `go test ./... ; rm -rf /` still stops at the second part.
+//
+// A command carrying a parenthesis cannot be expressed in that form, so it is
+// dropped rather than passed: a malformed pattern matches nothing, which looks
+// exactly like an allowlist the tool ignored.
+func shellToolPatterns(commands []string) []string {
+	patterns := make([]string, 0, len(commands))
+	for _, command := range commands {
+		command = strings.TrimSpace(command)
+		if command == "" || strings.ContainsAny(command, "(),") {
+			continue
+		}
+		patterns = append(patterns, "run_shell_command("+command+")")
+	}
+	return patterns
 }
 
 func (a *Adapter) Start(ctx context.Context, r provider.RunRequest) (<-chan provider.Event, error) {
