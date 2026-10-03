@@ -119,12 +119,23 @@ func TestAProviderThatReadsThenFailsIsStillReported(t *testing.T) {
 // process exited, and a test cannot produce another one. What can be pinned is
 // that this does not claim errors it has not seen.
 func TestOnlyAPipeFailureCountsAsTheProviderHavingStopped(t *testing.T) {
+	// Every platform's way of saying the reader is gone. Windows says neither
+	// EPIPE nor "broken pipe" — it says "The pipe has been ended." — so a
+	// classification built on the Unix spelling left the defect in place
+	// there. The cross-platform CI caught it; a GOOS=windows build did not,
+	// because that only compiles.
 	pipe := []error{
 		syscall.EPIPE,
 		io.ErrClosedPipe,
 		fmt.Errorf("write |1: %w", syscall.EPIPE),
 		errors.New("write |1: broken pipe"),
 		errors.New("file already closed"),
+		errors.New("write |1: The pipe has been ended."),
+		errors.New("write |1: The pipe is being closed."),
+		// Wrapped with a message of its own. The sentinel is what the errno
+		// check is for: the strings are a fallback for errors that lost it on
+		// the way up, not the other way round.
+		renamedError{inner: syscall.EPIPE, text: "프롬프트 전달 실패"},
 	}
 	for _, err := range pipe {
 		if !isBrokenPipe(err) {
@@ -143,3 +154,13 @@ func TestOnlyAPipeFailureCountsAsTheProviderHavingStopped(t *testing.T) {
 		}
 	}
 }
+
+// renamedError carries a cause with a message that does not mention it, which
+// is what any wrapper with its own wording produces.
+type renamedError struct {
+	inner error
+	text  string
+}
+
+func (e renamedError) Error() string { return e.text }
+func (e renamedError) Unwrap() error { return e.inner }
