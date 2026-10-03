@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"syscall"
 
 	"github.com/goalforge/goalforge/internal/policy"
-	"os/exec"
-	"sync"
 
 	"github.com/goalforge/goalforge/internal/procctl"
 )
@@ -103,7 +105,19 @@ func (r *ProcessRunner) Run(ctx context.Context, request RunRequest, args []stri
 		if stdoutErr != nil {
 			events <- Event{Type: EventFailed, RunID: request.RunID, Err: stdoutErr}
 		}
-		if stdinErr != nil {
+		// A broken pipe means the provider stopped reading, which is a
+		// consequence rather than a cause: either it finished its work and
+		// exited — in which case nothing failed — or it died, and its exit
+		// status and stderr below are what explain that. Reported on its own
+		// it turned a successful run into `write |1: broken pipe`, and it
+		// depended on whether the write lost the race with the exit, so the
+		// same provider came back succeeded or failed.
+		//
+		// The non-pipe branch is defensive and untested: on an os/exec stdin
+		// pipe the realistic failures are EPIPE and a pipe torn down after the
+		// process exited, and a test cannot produce another one. What is
+		// tested is that isBrokenPipe does not claim errors it has not seen.
+		if stdinErr != nil && !isBrokenPipe(stdinErr) {
 			events <- Event{Type: EventFailed, RunID: request.RunID, Err: stdinErr}
 		}
 		if waitErr != nil {
@@ -111,6 +125,20 @@ func (r *ProcessRunner) Run(ctx context.Context, request RunRequest, args []stri
 		}
 	}()
 	return events, nil
+}
+
+// isBrokenPipe reports whether a write failed because the other end is gone.
+//
+// EPIPE is what the kernel gives a write to a pipe nobody is reading;
+// ErrClosedPipe is what os/exec gives once it has torn the pipe down after the
+// process exited. Both mean the same thing here, and the string is checked as
+// well because a write wrapped on the way up loses the sentinel.
+func isBrokenPipe(err error) bool {
+	if errors.Is(err, syscall.EPIPE) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
+	return strings.Contains(err.Error(), "broken pipe") ||
+		strings.Contains(err.Error(), "file already closed")
 }
 
 func (r *ProcessRunner) Interrupt(_ context.Context, runID string) error {
