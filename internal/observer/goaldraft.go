@@ -337,8 +337,12 @@ func ScreenDraft(draft GoalDraft) []rrsi.Refusal {
 		}
 	}
 	if len(draft.Criteria) > 0 && !hasJourney(draft.Criteria) {
+		why := "모든 기준이 빌드·단위 테스트입니다"
+		if mislabeledJourney(draft.Criteria) {
+			why = "journey 로 표시한 기준이 테스트 러너(go test, require_tests.sh 등)를 돌립니다 — 표시만 journey 이고 실제로는 단위 테스트입니다"
+		}
 		refusals = append(refusals, rrsi.Refusal{Kind: RefusalNoJourney,
-			Detail: "모든 기준이 빌드·단위 테스트입니다 — 같은 저자가 코드 옆에 쓴 테스트는 코드와 정의상 일치합니다. " +
+			Detail: why + " — 같은 저자가 코드 옆에 쓴 테스트는 코드와 정의상 일치합니다. " +
 				"만든 제품을 실제 입력으로 실행해 출력을 확인하는 journey 기준이 하나는 필요합니다 " +
 				`(예: kind journey, gate_command ["go","run","./cmd/tool","testdata/sample.log"], value_pattern 으로 출력의 핵심 줄 확인)`})
 	}
@@ -346,13 +350,58 @@ func ScreenDraft(draft GoalDraft) []rrsi.Refusal {
 }
 
 // hasJourney reports whether any criterion is settled by running the product.
+//
+// A kind label alone is not enough: a draft that marks a unit-test command
+// "journey" satisfies the rule on paper and runs nothing but the author's own
+// tests, which is what the rule exists to stop. The command has to be something
+// other than a test runner.
 func hasJourney(criteria []DraftCriterion) bool {
 	for _, criterion := range criteria {
-		if strings.EqualFold(strings.TrimSpace(criterion.Kind), "journey") {
+		if strings.EqualFold(strings.TrimSpace(criterion.Kind), "journey") && !runsTestRunner(criterion.GateCommand) {
 			return true
 		}
 	}
 	return false
+}
+
+// mislabeledJourney reports a journey criterion whose command is a test runner.
+func mislabeledJourney(criteria []DraftCriterion) bool {
+	for _, criterion := range criteria {
+		if strings.EqualFold(strings.TrimSpace(criterion.Kind), "journey") && runsTestRunner(criterion.GateCommand) {
+			return true
+		}
+	}
+	return false
+}
+
+// runnerPrograms are the programs whose job is to run tests.
+var runnerPrograms = map[string]bool{
+	"pytest": true, "jest": true, "vitest": true, "mocha": true, "rspec": true,
+	"phpunit": true, "ctest": true, "tox": true, "nosetests": true,
+}
+
+// runsTestRunner reports whether a gate command runs a test suite rather than
+// the product: "go test", "cargo test", "npm test", a runner binary, or a helper
+// script named for running tests (scripts/require_tests.sh, run_tests.sh).
+func runsTestRunner(command []string) bool {
+	if len(command) == 0 {
+		return false
+	}
+	name := baseCommand(command[0])
+	if runnerPrograms[name] {
+		return true
+	}
+	if len(command) > 1 {
+		switch name {
+		case "go", "cargo", "dotnet", "mvn", "gradle", "swift":
+			return strings.EqualFold(command[1], "test")
+		case "npm", "yarn", "pnpm", "bun":
+			return strings.EqualFold(command[1], "test") || strings.EqualFold(command[1], "t")
+		case "python", "python3":
+			return command[1] == "-m" && len(command) > 2 && (command[2] == "pytest" || command[2] == "unittest")
+		}
+	}
+	return strings.HasSuffix(name, ".sh") && strings.Contains(name, "test")
 }
 
 // standardsExpectation returns the normalized expectation, or "" when the

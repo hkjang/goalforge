@@ -82,10 +82,13 @@ func TestADraftWithNoHealthGateIsRefused(t *testing.T) {
 // filled in yet.
 func TestTheScreenDoesNotAnswerWhetherGatesPass(t *testing.T) {
 	draft := GoalDraft{Title: "t", Objective: "o",
-		Criteria: []DraftCriterion{{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "journey",
+		Criteria: []DraftCriterion{{Type: "redirect_roundtrip", ExpectedValue: "TestRedirect", Kind: "test",
 			GateCommand:   []string{"go", "test", "-v", "-run", "^TestRedirect$", "./..."},
 			ValuePattern:  `--- PASS: (TestRedirect)`,
-			WhyItFailsNow: "리다이렉트 핸들러가 아직 없습니다"}},
+			WhyItFailsNow: "리다이렉트 핸들러가 아직 없습니다"},
+			{Type: "server_starts", ExpectedValue: "true", Kind: "journey",
+				GateCommand: []string{"go", "run", "./cmd/shortener", "--check"}, ValuePattern: "listening",
+				WhyItFailsNow: "cmd/shortener 가 아직 없습니다"}},
 		// Neither FailsNow is set, because nothing has run yet. That is the
 		// state the screen sees.
 		Health: &DraftCriterion{Type: "build_passed", ExpectedValue: "true", Kind: "build",
@@ -210,6 +213,50 @@ func TestADraftWithoutAJourneyGateIsRefused(t *testing.T) {
 	for _, refusal := range ScreenDraft(draft) {
 		if refusal.Kind == RefusalNoJourney {
 			t.Fatalf("a journey gate is present: %+v", refusal)
+		}
+	}
+}
+
+// Labelling a unit-test command "journey" must not satisfy the rule: it is the
+// same author's tests under a different name. This was found when a real draft
+// marked scripts/require_tests.sh as journey on its first try.
+func TestAJourneyThatRunsTestsIsStillRefused(t *testing.T) {
+	health := &DraftCriterion{Type: "build_passed", ExpectedValue: "true", Kind: "build",
+		GateCommand: []string{"go", "build", "./..."}}
+	for _, command := range [][]string{
+		{"scripts/require_tests.sh", "TestTableAlignKo"},
+		{"go", "test", "-count=1", "-v", "-run", "^TestX$", "./..."},
+		{"cargo", "test"},
+		{"npm", "test"},
+		{"pytest", "-k", "x"},
+		{"python3", "-m", "pytest"},
+	} {
+		draft := GoalDraft{Title: "t", Objective: "o", Health: health,
+			Criteria: []DraftCriterion{{Type: "cli_works", ExpectedValue: "true", Kind: "journey",
+				GateCommand: command, WhyItFailsNow: "아직 없습니다"}}}
+		found := false
+		for _, refusal := range ScreenDraft(draft) {
+			if refusal.Kind == RefusalNoJourney {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%v labelled journey but runs tests: must be refused", command)
+		}
+	}
+	// Running the product is a journey.
+	for _, command := range [][]string{
+		{"scripts/run.sh", "testdata/ko.csv"},
+		{"go", "run", ".", "testdata/a.log"},
+		{"./bin/tool", "--check"},
+	} {
+		draft := GoalDraft{Title: "t", Objective: "o", Health: health,
+			Criteria: []DraftCriterion{{Type: "cli_works", ExpectedValue: "true", Kind: "journey",
+				GateCommand: command, WhyItFailsNow: "아직 없습니다"}}}
+		for _, refusal := range ScreenDraft(draft) {
+			if refusal.Kind == RefusalNoJourney {
+				t.Errorf("%v runs the product: %+v", command, refusal)
+			}
 		}
 	}
 }
