@@ -30,7 +30,7 @@ func TestRemoveWorktreeRefusesDirtyThenRemovesCleanAndForced(t *testing.T) {
 	}
 	run(repository, "add", "README.md")
 	run(repository, "commit", "-m", "base")
-	worktree, err := EnsureWorktree(ctx, repository, "P1", "WORK-GC")
+	worktree, err := EnsureWorktree(ctx, repository, "P1", "WORK-GC", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestRemoveWorktreeRefusesDirtyThenRemovesCleanAndForced(t *testing.T) {
 		t.Fatalf("branch was deleted: %q", branches)
 	}
 	// A dirty worktree is discarded when forced.
-	forced, err := EnsureWorktree(ctx, repository, "P1", "WORK-GC-2")
+	forced, err := EnsureWorktree(ctx, repository, "P1", "WORK-GC-2", "")
 	if err != nil {
 		t.Fatal(err)
 	}

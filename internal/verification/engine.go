@@ -94,11 +94,14 @@ func (e *Engine) Check(ctx context.Context, repositoryPath string, gates []Gate)
 	}
 	results := make([]Result, 0, len(gates))
 	passed := true
+	// Read once: it tells a package of this repository apart from one that has
+	// to be fetched, and Go's message for the two is identical.
+	modulePath := policy.LocalModulePath(repositoryPath)
 	for _, gate := range gates {
 		result, err := e.runGate(ctx, repositoryPath, gate)
 		result.Value = measure(gate, &result)
 		if result.Status != "PASSED" {
-			failure := policy.ClassifyGateFailure(result.Status, result.Output)
+			failure := policy.ClassifyGateFailureIn(result.Status, result.Output, modulePath)
 			result.FailureKind, result.RepairMode, result.FailureSummary = string(failure.Kind), string(failure.Mode), failure.Summary
 		}
 		results = append(results, result)
@@ -136,6 +139,7 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 	if requiredCount == 0 {
 		return report, errors.New("at least one required verification gate is required")
 	}
+	modulePath := policy.LocalModulePath(project.RepositoryPath)
 	for _, gate := range gates {
 		result, err := e.runGate(ctx, project.RepositoryPath, gate)
 		actual := measure(gate, &result)
@@ -147,7 +151,7 @@ func (e *Engine) Verify(ctx context.Context, runID string, project model.Project
 				Timeout: gate.Timeout, Required: gate.Required, SuccessValue: gate.SuccessValue,
 				ValuePattern: gate.ValuePattern, Kind: gate.Kind})}
 		if result.Status != "PASSED" {
-			failure := policy.ClassifyGateFailure(result.Status, result.Output)
+			failure := policy.ClassifyGateFailureIn(result.Status, result.Output, modulePath)
 			record.FailureKind, record.RepairMode = string(failure.Kind), string(failure.Mode)
 			result.FailureKind, result.RepairMode, result.FailureSummary = string(failure.Kind), string(failure.Mode), failure.Summary
 		}

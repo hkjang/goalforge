@@ -26,7 +26,13 @@ const (
 	// that gate went green the moment an empty package existed, and "goal
 	// complete" was reported for a feature nobody had implemented.
 	GateNoTestsRan GateFailureKind = "no_tests_ran"
-	GateUnknown    GateFailureKind = "unknown"
+	// GateMissingLocalPackage means a package of this module is not there.
+	//
+	// It reports as a build failure because that is what it is, and the
+	// summary says the two things that cause it: the package has not been
+	// written, or the work that wrote it has not reached this tree.
+	GateMissingLocalPackage GateFailureKind = "missing_local_package"
+	GateUnknown             GateFailureKind = "unknown"
 )
 
 // RepairMode is what would actually address the failure. Separating a code fix
@@ -51,7 +57,28 @@ type GateFailure struct {
 // also makes tests print failures, and treating that as a test failure sends an
 // AI session to fix code that was never wrong.
 func ClassifyGateFailure(status string, output string) GateFailure {
+	return ClassifyGateFailureIn(status, output, "")
+}
+
+// ClassifyGateFailureIn is ClassifyGateFailure told which import paths are the
+// project's own.
+//
+// Go reports a package missing from the module's own tree exactly as it reports
+// one missing from a registry:
+//
+//	main.go:11:2: no required module provides package example.com/notes/store;
+//	to add it: go get example.com/notes/store
+//
+// The two need opposite responses — one is written here, the other fetched from
+// somewhere else — and nothing in the message distinguishes them. The module
+// path does, so it is passed in. Without it the answer stays "dependency",
+// which is the conservative one: telling the loop to write a package it cannot
+// write spends a round to reach the same place.
+func ClassifyGateFailureIn(status string, output string, modulePath string) GateFailure {
 	text := strings.ToLower(output)
+	if missingLocalPackage(output, modulePath) {
+		return GateFailure{Kind: GateMissingLocalPackage, Mode: RepairCodeFix, Summary: summaries[GateMissingLocalPackage]}
+	}
 	if status == "TIMEOUT" {
 		return GateFailure{Kind: GateTimeout, Mode: RepairHuman, Summary: summaries[GateTimeout]}
 	}
@@ -88,17 +115,55 @@ func ClassifyGateFailure(status string, output string) GateFailure {
 // summaries keeps the explanation for a classification available after it has
 // been persisted as a bare kind.
 var summaries = map[GateFailureKind]string{
-	GateTestFailure:     "테스트가 실패했습니다. 테스트를 삭제하거나 완화하지 않고 원인을 고쳐야 합니다.",
-	GateBuildFailure:    "빌드가 실패했습니다. 컴파일 오류를 수정하면 해결될 가능성이 높습니다.",
-	GateThresholdNotMet: "명령은 성공했지만 측정값이 기준에 미치지 못했습니다. 기준을 낮추지 말고 값을 올려야 합니다.",
-	GateEnvironment:     "실행 환경 문제입니다. 도구·경로·네트워크를 먼저 복구해야 하며 모델 재실행은 낭비입니다.",
-	GateDependency:      "의존성을 가져오지 못했습니다. 잠금 파일이나 레지스트리 접근을 먼저 확인해야 합니다.",
-	GateAuth:            "인증이 거부되었습니다. 자격 증명을 갱신해야 하며 코드를 고쳐도 해결되지 않습니다.",
-	GateTimeout:         "게이트가 제한 시간 안에 끝나지 않았습니다. 무한 대기인지 단순히 느린 것인지 사람이 판단해야 합니다.",
-	GateMisconfigured:   "게이트가 측정값을 뽑아내지 못했습니다. 명령이나 --value-pattern 설정을 고쳐야 합니다.",
-	GateNoTestsRan:      "검사가 하나도 실행되지 않았습니다. 이 기준을 재는 테스트를 먼저 작성해야 합니다 — 명령이 통과한 것은 실행할 것이 없었기 때문입니다.",
-	GateUnknown:         "실패 원인을 분류하지 못했습니다. 출력 전체를 확인해야 합니다.",
+	GateTestFailure:         "테스트가 실패했습니다. 테스트를 삭제하거나 완화하지 않고 원인을 고쳐야 합니다.",
+	GateBuildFailure:        "빌드가 실패했습니다. 컴파일 오류를 수정하면 해결될 가능성이 높습니다.",
+	GateThresholdNotMet:     "명령은 성공했지만 측정값이 기준에 미치지 못했습니다. 기준을 낮추지 말고 값을 올려야 합니다.",
+	GateEnvironment:         "실행 환경 문제입니다. 도구·경로·네트워크를 먼저 복구해야 하며 모델 재실행은 낭비입니다.",
+	GateDependency:          "의존성을 가져오지 못했습니다. 잠금 파일이나 레지스트리 접근을 먼저 확인해야 합니다.",
+	GateAuth:                "인증이 거부되었습니다. 자격 증명을 갱신해야 하며 코드를 고쳐도 해결되지 않습니다.",
+	GateTimeout:             "게이트가 제한 시간 안에 끝나지 않았습니다. 무한 대기인지 단순히 느린 것인지 사람이 판단해야 합니다.",
+	GateMisconfigured:       "게이트가 측정값을 뽑아내지 못했습니다. 명령이나 --value-pattern 설정을 고쳐야 합니다.",
+	GateMissingLocalPackage: "이 모듈의 패키지가 없습니다. 아직 작성되지 않았거나, 그것을 만든 작업이 이 트리에 반영되지 않았습니다 — 레지스트리나 잠금 파일과는 무관합니다.",
+	GateNoTestsRan:          "검사가 하나도 실행되지 않았습니다. 이 기준을 재는 테스트를 먼저 작성해야 합니다 — 명령이 통과한 것은 실행할 것이 없었기 때문입니다.",
+	GateUnknown:             "실패 원인을 분류하지 못했습니다. 출력 전체를 확인해야 합니다.",
 }
+
+// missingLocalPackage reports whether the output says a package of this module
+// is absent.
+//
+// The prefix match is on a path boundary: example.com/notesmith is somebody
+// else's module however much of its name it shares with example.com/notes.
+func missingLocalPackage(output, modulePath string) bool {
+	modulePath = strings.TrimSpace(modulePath)
+	if modulePath == "" {
+		// Nothing says what is local, so nothing is. Kept as an early return
+		// rather than left to the comparison below: that it also answers false
+		// is an accident of import paths never being rooted at "/".
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		index := strings.Index(line, missingPackagePhrase)
+		if index < 0 {
+			continue
+		}
+		// Gate output is whatever a tool printed, including a line cut off by
+		// an output limit. Taking the first field of an empty remainder
+		// panicked, and this runs on every failed gate — so a truncated line
+		// turned a failed gate into a crashed run.
+		fields := strings.Fields(line[index+len(missingPackagePhrase):])
+		if len(fields) == 0 {
+			continue
+		}
+		path := strings.TrimRight(fields[0], ";")
+		if path == modulePath || strings.HasPrefix(path, modulePath+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// missingPackagePhrase is how Go says it cannot find a package at all.
+const missingPackagePhrase = "no required module provides package "
 
 // ClassifyGateFailureSummary explains a stored classification.
 func ClassifyGateFailureSummary(kind string) string {

@@ -35,7 +35,7 @@ func worktreeRepo(t *testing.T) (string, Worktree) {
 	}
 	run(repo, "add", "-A")
 	run(repo, "commit", "-q", "-m", "base")
-	worktree, err := EnsureWorktree(context.Background(), repo, "PRJ-1", "W1")
+	worktree, err := EnsureWorktree(context.Background(), repo, "PRJ-1", "W1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
