@@ -41,11 +41,13 @@ func TestATestGateMustAssertTheTestRan(t *testing.T) {
 // With the assertion it is accepted: -v so the runner names what it ran, and a
 // pattern that only matches when the named test passed.
 func TestATestGateThatAssertsTheTestRanIsAccepted(t *testing.T) {
-	criterion := DraftCriterion{Type: "redirect_behavior", ExpectedValue: "TestRedirect", Kind: "journey",
+	criterion := DraftCriterion{Type: "redirect_behavior", ExpectedValue: "TestRedirect", Kind: "test",
 		GateCommand:   []string{"go", "test", "-count=1", "-v", "-run", "^TestRedirect$", "./shortener"},
 		ValuePattern:  `--- PASS: (TestRedirect)`,
 		WhyItFailsNow: "shortener 패키지가 아직 없습니다"}
-	refusals := ScreenDraft(draftOf(criterion))
+	refusals := ScreenDraft(draftOf(criterion, DraftCriterion{Type: "server_starts", ExpectedValue: "true", Kind: "journey",
+		GateCommand: []string{"go", "run", "./cmd/shortener", "--check"}, ValuePattern: "listening",
+		WhyItFailsNow: "cmd/shortener 가 아직 없습니다"}))
 	for _, refusal := range refusals {
 		if refusal.Kind == RefusalVacuousPass {
 			t.Fatalf("this gate cannot pass without the test: %+v", refusal)

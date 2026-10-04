@@ -132,7 +132,7 @@ kind: journey
 value_pattern: "total requests: 4"
 ```
 
-샘플 입력은 저장소에 두고(`testdata/`), 출력의 핵심 줄을 `value_pattern` 으로 확인하세요. 서버라면 요청을 보내는 단위 테스트가 아니라 실제 바이너리를 실행하는 명령을 쓰세요.
+샘플 입력은 저장소에 두고(`testdata/`), 출력의 핵심 줄을 `value_pattern` 으로 확인하세요. **`journey` 라고 표시만 하고 `go test`·`cargo test`·`npm test`·`pytest`·`require_tests.sh` 같은 테스트 러너를 돌리는 기준은 인정되지 않습니다** — 이름만 바꾼 같은 저자의 단위 테스트이기 때문입니다. 실제로 로컬 모델이 첫 초안에서 `kind: journey` 로 `scripts/require_tests.sh` 를 적었습니다. 서버라면 요청을 보내는 단위 테스트가 아니라 실제 바이너리를 실행하는 명령을 쓰세요.
 
 #### 완료 조건과 건강 게이트는 다른 것입니다
 
