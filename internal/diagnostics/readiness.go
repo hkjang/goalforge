@@ -117,19 +117,20 @@ func kindChecks(input ReadinessInput) []Check {
 		gateKinds[gate.Type] = gate.Kind
 	}
 	var mismatched []string
-	demanded := 0
+	measured := 0
 	for _, criterion := range input.Criteria {
 		required := input.CriterionKinds[criterion]
 		if required == "" {
 			continue
 		}
-		demanded++
 		gateKind, covered := gateKinds[criterion]
 		if !covered {
-			// Already reported by the coverage check; saying it twice buries
-			// the finding that is only visible here.
+			// Measured by nothing, so it is not counted among the criteria a
+			// gate answers. Already reported by the coverage check; saying it
+			// twice buries the finding that is only visible here.
 			continue
 		}
+		measured++
 		if !policy.EvidenceSatisfies(required, gateKind) {
 			label := gateKind
 			if label == "" {
@@ -143,12 +144,14 @@ func kindChecks(input ReadinessInput) []Check {
 		return []Check{{Level: LevelFail, Name: "proof kind",
 			Detail: "완료 조건이 요구하는 검증 종류와 게이트가 다릅니다: " + strings.Join(mismatched, ", ") + " (verify gate add --kind 로 게이트 종류를 바로잡거나 알맞은 게이트로 바꾸세요)"}}
 	}
-	if demanded > 0 {
+	if measured > 0 {
 		return []Check{{Level: LevelOK, Name: "proof kind",
-			Detail: fmt.Sprintf("검증 종류를 요구하는 완료 조건 %d개가 알맞은 게이트로 측정됩니다", demanded)}}
+			Detail: fmt.Sprintf("검증 종류를 요구하는 완료 조건 %d개가 알맞은 게이트로 측정됩니다", measured)}}
 	}
-	// Nothing demanded a kind. If no gate claims to do more than compile, the
-	// project can complete with a feature that was never exercised.
+	// No gate answers a criterion's demanded kind — either nothing demanded one
+	// or the ones that did are measured by nothing. Either way, if no gate
+	// claims to do more than compile, the project can complete with a feature
+	// that was never exercised.
 	behavioural := false
 	for _, gate := range input.Gates {
 		if gate.Kind != "" && gate.Kind != policy.KindBuild && gate.Kind != policy.KindReview {

@@ -14,6 +14,15 @@ func levelFor(checks []Check, name string) string {
 	return ""
 }
 
+func detailFor(checks []Check, name string) string {
+	for _, check := range checks {
+		if check.Name == name {
+			return check.Detail
+		}
+	}
+	return ""
+}
+
 // The configuration that looks healthy and never completes: a criterion with
 // no gate of the same name can never accumulate evidence.
 func TestReadinessCatchesUnmeasurableCriteria(t *testing.T) {
@@ -131,6 +140,68 @@ func TestReadinessRejectsAJudgementBehindAnObjectiveCriterion(t *testing.T) {
 	input.Gates[0].Kind = "build"
 	if level := levelFor(CheckReadiness(input), "proof kind"); level != LevelOK {
 		t.Fatalf("a build gate behind a build criterion is fine: %+v", CheckReadiness(input))
+	}
+}
+
+// A criterion that demands a kind but has no gate of its own name is measured
+// by nothing at all, so counting it as "measured by a suitable gate" describes
+// the configuration backwards. When every kind-demanding criterion is in that
+// state the OK must not appear at all, and the behavioural judgement below it
+// has to be reached instead of skipped.
+func TestReadinessDoesNotCountUnmeasuredCriteriaAsProven(t *testing.T) {
+	input := ReadinessInput{
+		HasProject:       true,
+		GoalTitle:        "notes",
+		Criteria:         []string{"note_saves"},
+		CriterionKinds:   map[string]string{"note_saves": "journey"},
+		Gates:            []GateSpec{{Type: "build_passed", Command: []string{"go"}, Required: true, Kind: "build"}},
+		BudgetConfigured: true,
+	}
+	checks := CheckReadiness(input)
+	if level := levelFor(checks, "criteria coverage"); level != LevelFail {
+		t.Fatalf("an unmeasured criterion must still block: %+v", checks)
+	}
+	if level := levelFor(checks, "proof kind"); level == LevelOK {
+		t.Fatalf("a criterion with no gate is measured by nothing: %q / %+v", detailFor(checks, "proof kind"), checks)
+	}
+	// Nothing demanded a kind that a gate answers, so the build-only warning is
+	// the finding that belongs here.
+	if level := levelFor(checks, "proof kind"); level != LevelWarn {
+		t.Fatalf("build-only verification must still be called out: %+v", checks)
+	}
+}
+
+// With one kind-demanding criterion measured and one not, the OK counts only
+// the one a gate actually answers.
+func TestReadinessCountsOnlyMeasuredCriteriaInProofKind(t *testing.T) {
+	input := ReadinessInput{
+		HasProject:     true,
+		GoalTitle:      "notes",
+		Criteria:       []string{"note_saves", "latency_p95"},
+		CriterionKinds: map[string]string{"note_saves": "journey", "latency_p95": "performance"},
+		Gates: []GateSpec{
+			{Type: "note_saves", Command: []string{"go"}, Required: true, Kind: "journey"},
+		},
+		BudgetConfigured: true,
+	}
+	checks := CheckReadiness(input)
+	if level := levelFor(checks, "criteria coverage"); level != LevelFail {
+		t.Fatalf("the uncovered criterion must still block: %+v", checks)
+	}
+	if level := levelFor(checks, "proof kind"); level != LevelOK {
+		t.Fatalf("the measured criterion is measured by the right kind: %+v", checks)
+	}
+	if detail := detailFor(checks, "proof kind"); !strings.Contains(detail, "1개") {
+		t.Fatalf("only the measured criterion may be counted, got %q", detail)
+	}
+	// Covering the second criterion is what takes the count to two.
+	input.Gates = append(input.Gates, GateSpec{Type: "latency_p95", Command: []string{"go"}, Required: true, Kind: "performance"})
+	checks = CheckReadiness(input)
+	if level := levelFor(checks, "criteria coverage"); level != LevelOK {
+		t.Fatalf("both criteria are covered now: %+v", checks)
+	}
+	if detail := detailFor(checks, "proof kind"); !strings.Contains(detail, "2개") {
+		t.Fatalf("both measured criteria must be counted, got %q", detail)
 	}
 }
 
