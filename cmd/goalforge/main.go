@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -4379,6 +4380,16 @@ func dayDuration(value string) (time.Duration, error) {
 		if number, found := strings.CutSuffix(trimmed, suffix); found {
 			count, err := strconv.ParseFloat(number, 64)
 			if err != nil {
+				return 0, fmt.Errorf("기간 %q 를 읽을 수 없습니다", value)
+			}
+			// ParseFloat also accepts "Inf", "NaN" and numbers far larger
+			// than a time.Duration holds, and converting those to int64 is
+			// undefined rather than clamped — the same "1e300w" lands on
+			// MinInt64 on amd64 and on MaxInt64 on arm64. The positive one
+			// gets past the caller's `window <= 0` check and prunes against
+			// a boundary in the 1700s, so refuse here while it is still a
+			// float and the question is still answerable.
+			if math.IsInf(count, 0) || math.IsNaN(count) || math.Abs(count)*float64(unit) > math.MaxInt64 {
 				return 0, fmt.Errorf("기간 %q 를 읽을 수 없습니다", value)
 			}
 			return time.Duration(count * float64(unit)), nil

@@ -641,3 +641,35 @@ func TestRestoreVerifiesRecordsAndSettlesOutsideWork(t *testing.T) {
 		t.Fatalf("nothing should remain unresolved: %+v err=%v", remaining, err)
 	}
 }
+
+// A retention window the program cannot represent must stop the command, not
+// silently become some other window. On arm64 an overflowing float becomes
+// MaxInt64, which is positive, so `storage prune` would pass its own
+// `--older-than must be positive` check and report against a boundary three
+// centuries in the past — with --apply, that deletes everything.
+//
+// No t.Parallel(): runCLIWithError swaps the process-wide os.Stdout.
+func TestPruneRefusesAnUnrepresentableWindow(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("GOALFORGE_DB", filepath.Join(t.TempDir(), "state.db"))
+
+	output, err := runCLIWithError(t, ctx, "storage", "prune", "--older-than", "1e300w")
+	if err == nil {
+		t.Fatalf("--older-than 1e300w pruned instead of stopping:\n%s", output)
+	}
+	if !strings.Contains(err.Error(), "읽을 수 없습니다") {
+		t.Fatalf("--older-than 1e300w: %v, want the unreadable-duration refusal", err)
+	}
+	if strings.Contains(output, "이전에 끝난 실행") {
+		t.Fatalf("a refused window must not report a pruning plan:\n%s", output)
+	}
+
+	// The caller keeps its own job: zero and negative windows are still the
+	// positivity check's to refuse, with its own wording.
+	for _, value := range []string{"0d", "-5d"} {
+		_, err := runCLIWithError(t, ctx, "storage", "prune", "--older-than", value)
+		if err == nil || !strings.Contains(err.Error(), "--older-than must be positive") {
+			t.Fatalf("--older-than %s: %v, want the positivity refusal", value, err)
+		}
+	}
+}
