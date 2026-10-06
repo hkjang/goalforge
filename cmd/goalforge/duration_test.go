@@ -36,3 +36,16 @@ func TestUnreadableDurationSaysWhatItAccepts(t *testing.T) {
 		}
 	}
 }
+
+// strconv.ParseFloat reads "Inf" and "NaN" as successes, and converting a
+// float out of int64's range is implementation-defined in Go. The only caller
+// of this function decides the cutoff for a command that *deletes* audit
+// records, so an input nobody can read must not arrive there as some number.
+func TestDurationRefusesNonFiniteWindows(t *testing.T) {
+	for _, value := range []string{"Infd", "+Infd", "-Infd", "NaNd", "NaNw", "1e10d", "1e300w"} {
+		got, err := dayDuration(value)
+		if err == nil {
+			t.Errorf("%q must be refused, got %v (positive=%t)", value, got, got > 0)
+		}
+	}
+}

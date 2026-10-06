@@ -641,3 +641,27 @@ func TestRestoreVerifiesRecordsAndSettlesOutsideWork(t *testing.T) {
 		t.Fatalf("nothing should remain unresolved: %+v err=%v", remaining, err)
 	}
 }
+
+// storage prune deletes audit records, so an unreadable --older-than has to
+// stop at the parser rather than arrive at s.Prune as whatever number the
+// float-to-int64 conversion happened to produce on this architecture. The
+// test goes through the real dispatch because that is the only path that
+// opens a store for storagePrune. No t.Parallel: runCLIWithError swaps the
+// process-wide stdout.
+func TestStoragePruneRefusesAnUnreadableWindow(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv("GOALFORGE_DB", filepath.Join(t.TempDir(), "state.db"))
+
+	for _, window := range []string{"Infd", "1e10d", "1e300w"} {
+		output, err := runCLIWithError(t, ctx, "storage", "prune", "--older-than", window, "--apply")
+		if err == nil {
+			t.Errorf("--older-than %s pruned instead of stopping:\n%s", window, output)
+			continue
+		}
+		// Refused for being unreadable, not for landing on a non-positive
+		// window by accident of the conversion.
+		if !strings.Contains(err.Error(), "읽을 수 없습니다") {
+			t.Errorf("--older-than %s: %v, want the unreadable-duration refusal", window, err)
+		}
+	}
+}

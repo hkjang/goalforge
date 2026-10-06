@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -4378,7 +4379,14 @@ func dayDuration(value string) (time.Duration, error) {
 	for suffix, unit := range map[string]time.Duration{"d": 24 * time.Hour, "w": 7 * 24 * time.Hour} {
 		if number, found := strings.CutSuffix(trimmed, suffix); found {
 			count, err := strconv.ParseFloat(number, 64)
-			if err != nil {
+			// ParseFloat reads "Inf" and "NaN" as successes, and Go leaves the
+			// result of an out-of-range float-to-int64 conversion up to the
+			// implementation: the same "Infd" becomes the most negative
+			// duration on amd64 and the most positive one on arm64. The caller
+			// uses this to pick the cutoff for deleting audit records, so a
+			// window nobody can read must not become a window at all.
+			if err != nil || math.IsInf(count, 0) || math.IsNaN(count) ||
+				math.Abs(count)*float64(unit) > math.MaxInt64 {
 				return 0, fmt.Errorf("기간 %q 를 읽을 수 없습니다", value)
 			}
 			return time.Duration(count * float64(unit)), nil
