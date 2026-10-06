@@ -4386,9 +4386,11 @@ func dayDuration(value string) (time.Duration, error) {
 			// than a time.Duration holds, and converting those to int64 is
 			// undefined rather than clamped — the same "1e300w" lands on
 			// MinInt64 on amd64 and on MaxInt64 on arm64. The positive one
-			// gets past the caller's `window <= 0` check and prunes against
-			// a boundary in the 1700s, so refuse here while it is still a
-			// float and the question is still answerable.
+			// gets past the caller's `window <= 0` check, so instead of
+			// saying the duration is unreadable the command quietly answers
+			// about a different window: a boundary three centuries back,
+			// which matches nothing. Refuse here while it is still a float
+			// and the question is still answerable.
 			if math.IsInf(count, 0) || math.IsNaN(count) || math.Abs(count)*float64(unit) > math.MaxInt64 {
 				return 0, fmt.Errorf("기간 %q 를 읽을 수 없습니다", value)
 			}

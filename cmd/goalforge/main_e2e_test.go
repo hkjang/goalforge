@@ -644,9 +644,11 @@ func TestRestoreVerifiesRecordsAndSettlesOutsideWork(t *testing.T) {
 
 // A retention window the program cannot represent must stop the command, not
 // silently become some other window. On arm64 an overflowing float becomes
-// MaxInt64, which is positive, so `storage prune` would pass its own
-// `--older-than must be positive` check and report against a boundary three
-// centuries in the past — with --apply, that deletes everything.
+// MaxInt64, which is positive, so `storage prune` passes its own
+// `--older-than must be positive` check and reports against a boundary three
+// centuries in the past. That boundary removes nothing — Store.Prune only
+// matches `ended_at<=cutoff` — so the operator gets a confident answer about a
+// window they never asked for instead of being told their input is unreadable.
 //
 // No t.Parallel(): runCLIWithError swaps the process-wide os.Stdout.
 func TestPruneRefusesAnUnrepresentableWindow(t *testing.T) {

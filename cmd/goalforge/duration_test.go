@@ -40,9 +40,10 @@ func TestUnreadableDurationSaysWhatItAccepts(t *testing.T) {
 // ParseFloat accepts "Inf", "NaN" and numbers far past what a time.Duration
 // can hold, and multiplying those into an int64 is undefined rather than
 // clamped: the same "1e300w" lands on MinInt64 on amd64 and on MaxInt64 on
-// arm64. A positive result passes the caller's `window <= 0` check and prunes
-// against a boundary in the 1700s, so this has to be refused here, where the
-// number is still a float. The assertion is deliberately only `err != nil` —
+// arm64. A positive result passes the caller's `window <= 0` check, so the
+// caller stops refusing and starts reporting against a boundary in the 1700s
+// that nobody asked for; the refusal belongs here, where the number is still a
+// float. The assertion is deliberately only `err != nil` —
 // asserting the converted value would pin an answer that differs per
 // architecture, and CI runs these tests on macOS too.
 func TestDurationRefusesUnrepresentableNumbers(t *testing.T) {
