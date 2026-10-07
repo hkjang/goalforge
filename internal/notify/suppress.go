@@ -17,34 +17,53 @@ const defaultRepeatWindow = 30 * time.Minute
 
 type suppressor struct {
 	mu   sync.Mutex
-	seen map[string]time.Time
+	seen map[string]*reservation
 	now  func() time.Time
 }
 
-var defaultSuppressor = &suppressor{seen: map[string]time.Time{}, now: time.Now}
+// Each reservation has its own identity, even when the clock has not moved.
+type reservation struct {
+	at time.Time
+}
 
-// allow reports whether an event should be sent, recording it when it is.
+var defaultSuppressor = &suppressor{seen: map[string]*reservation{}, now: time.Now}
+
+// allow reserves an event before sending it. Failed sends release their own
+// reservation; successful sends retain the original send-start timestamp.
 // Repeats of the same project, state, and reason inside the window are
 // dropped; a changed reason is always news and goes through.
-func (s *suppressor) allow(key string, window time.Duration) bool {
+func (s *suppressor) allow(key string, window time.Duration) (*reservation, bool) {
 	if window <= 0 {
-		return true
+		return nil, true
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	if last, ok := s.seen[key]; ok && now.Sub(last) < window {
-		return false
+	if last, ok := s.seen[key]; ok && now.Sub(last.at) < window {
+		return nil, false
 	}
 	// Entries older than the window can never suppress anything again, so
 	// they are dropped rather than growing the map for the process lifetime.
-	for existing, at := range s.seen {
-		if now.Sub(at) >= window {
+	for existing, entry := range s.seen {
+		if now.Sub(entry.at) >= window {
 			delete(s.seen, existing)
 		}
 	}
-	s.seen[key] = now
-	return true
+	entry := &reservation{at: now}
+	s.seen[key] = entry
+	return entry, true
+}
+
+// release must not remove a newer reservation when an old send fails late.
+func (s *suppressor) release(key string, entry *reservation) {
+	if entry == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen[key] == entry {
+		delete(s.seen, key)
+	}
 }
 
 func repeatWindow() time.Duration {

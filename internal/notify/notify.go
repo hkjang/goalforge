@@ -52,9 +52,18 @@ func Post(ctx context.Context, event Event) error {
 	// The same block repeated on every worker tick trains people to ignore the
 	// channel, so an identical event stays quiet for a window. A changed
 	// reason is news and always goes through.
-	if !defaultSuppressor.allow(event.Project+"\x00"+event.State+"\x00"+event.Reason, repeatWindow()) {
+	s := defaultSuppressor
+	key := event.Project + "\x00" + event.State + "\x00" + event.Reason
+	entry, allowed := s.allow(key, repeatWindow())
+	if !allowed {
 		return nil
 	}
+	sent := false
+	defer func() {
+		if !sent {
+			s.release(key, entry)
+		}
+	}()
 	if event.Text == "" {
 		event.Text = fmt.Sprintf("GoalForge %s: project %s", event.State, event.label())
 		if event.Reason != "" {
@@ -83,5 +92,6 @@ func Post(ctx context.Context, event Event) error {
 	if response.StatusCode >= 300 {
 		return fmt.Errorf("webhook returned status %d", response.StatusCode)
 	}
+	sent = true
 	return nil
 }
