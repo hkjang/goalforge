@@ -10,20 +10,20 @@ import (
 // no webhook at all.
 func TestSuppressorDropsRepeatsWithinTheWindow(t *testing.T) {
 	now := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
-	s := &suppressor{seen: map[string]time.Time{}, now: func() time.Time { return now }}
+	s := &suppressor{seen: map[string]*reservation{}, now: func() time.Time { return now }}
 	window := 30 * time.Minute
-	if !s.allow("p|BLOCKED|loop", window) {
+	if _, allowed := s.allow("p|BLOCKED|loop", window); !allowed {
 		t.Fatal("the first notification must go through")
 	}
-	if s.allow("p|BLOCKED|loop", window) {
+	if _, allowed := s.allow("p|BLOCKED|loop", window); allowed {
 		t.Fatal("an identical repeat must be suppressed")
 	}
 	// A different reason is news even for the same project and state.
-	if !s.allow("p|BLOCKED|quota", window) {
+	if _, allowed := s.allow("p|BLOCKED|quota", window); !allowed {
 		t.Fatal("a changed reason must go through")
 	}
 	now = now.Add(window + time.Second)
-	if !s.allow("p|BLOCKED|loop", window) {
+	if _, allowed := s.allow("p|BLOCKED|loop", window); !allowed {
 		t.Fatal("the same event must be reportable again after the window")
 	}
 	// Expired entries are dropped rather than growing for the process lifetime.
@@ -35,11 +35,43 @@ func TestSuppressorDropsRepeatsWithinTheWindow(t *testing.T) {
 // A zero window disables suppression entirely, which is what an operator
 // setting the window to 0 is asking for.
 func TestSuppressorWindowZeroAllowsEverything(t *testing.T) {
-	s := &suppressor{seen: map[string]time.Time{}, now: time.Now}
+	s := &suppressor{seen: map[string]*reservation{}, now: time.Now}
 	for i := 0; i < 3; i++ {
-		if !s.allow("p|BLOCKED|loop", 0) {
+		if _, allowed := s.allow("p|BLOCKED|loop", 0); !allowed {
 			t.Fatal("a zero window must not suppress")
 		}
+	}
+}
+
+func TestSuppressorOldReleasePreservesNewReservation(t *testing.T) {
+	for _, replacement := range []string{"expired", "released at same time"} {
+		t.Run(replacement, func(t *testing.T) {
+			now := time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC)
+			s := &suppressor{seen: map[string]*reservation{}, now: func() time.Time { return now }}
+			const key = "p|BLOCKED|loop"
+			const window = 30 * time.Minute
+			old, allowed := s.allow(key, window)
+			if !allowed {
+				t.Fatal("first reservation must be allowed")
+			}
+			if replacement == "expired" {
+				now = now.Add(window)
+			} else {
+				s.release(key, old)
+			}
+			current, allowed := s.allow(key, window)
+			if !allowed {
+				t.Fatal("replacement reservation must be allowed")
+			}
+			s.release(key, old)
+			if _, allowed := s.allow(key, window); allowed {
+				t.Fatal("an old release removed the current reservation")
+			}
+			s.release(key, current)
+			if _, allowed := s.allow(key, window); !allowed {
+				t.Fatal("releasing the current reservation must allow another attempt")
+			}
+		})
 	}
 }
 
