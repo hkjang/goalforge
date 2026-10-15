@@ -59,6 +59,7 @@ func TestParseRetryAfter(t *testing.T) {
 		{"overloaded, try again in 2 minutes", 2 * time.Minute},
 		{"rate limit reached, retry after 1 hour", time.Hour},
 		{"wait 15 secs before retrying", 15 * time.Second},
+		{"rate limited, retry-after=3600", time.Hour},
 	}
 	for _, c := range cases {
 		got := ParseRetryAfter(c.message)
@@ -69,6 +70,47 @@ func TestParseRetryAfter(t *testing.T) {
 	for _, message := range []string{"generic failure", "retry later", "wait for the reset"} {
 		if got := ParseRetryAfter(message); got != nil {
 			t.Fatalf("%q: expected nil, got %s", message, *got)
+		}
+	}
+}
+
+// TestParseRetryAfterRefusesHintsPastTheShortWaitCap pins the upper bound the
+// doc comment promises: a hint an unattended worker would sleep through is no
+// longer a hint, so the caller must fall back to the backoff ladder.
+func TestParseRetryAfterRefusesHintsPastTheShortWaitCap(t *testing.T) {
+	for _, message := range []string{
+		"429 Too Many Requests. Retry-After: 86400",
+		"rate limited, retry-after=3601",
+		"rate limit reached, retry after 2 hours",
+		"please wait 90 minutes",
+		"retry in 99999999999 hours",
+		"try again in 7200 seconds",
+	} {
+		if got := ParseRetryAfter(message); got != nil {
+			t.Fatalf("%q: expected nil past the short-wait cap, got %s", message, *got)
+		}
+	}
+}
+
+// TestLongRateLimitHintCannotParkTheUnattendedWorker composes the parse and the
+// decision exactly as cmd/goalforge/main.go does for run --loop, because the
+// defect only matters through that wiring: a provider line is all it takes for
+// the worker to sleep past any plausible supervision window.
+func TestLongRateLimitHintCannotParkTheUnattendedWorker(t *testing.T) {
+	for _, message := range []string{
+		"429 Too Many Requests. Retry-After: 86400",
+		"429 rate limit; retry in 99999999999 hours",
+	} {
+		kind := ClassifyFailure(errors.New(message), "")
+		if kind != FailureRateLimit {
+			t.Fatalf("%q classified as %s, want %s", message, kind, FailureRateLimit)
+		}
+		decision := DecideRetry(kind, 1, 3, ParseRetryAfter(message), nil)
+		if decision.Action != RetryAfterDelay {
+			t.Fatalf("%q: action=%s want %s", message, decision.Action, RetryAfterDelay)
+		}
+		if decision.Delay <= 0 || decision.Delay > 10*time.Minute {
+			t.Fatalf("%q: delay=%s want a backoff ladder step within 10m", message, decision.Delay)
 		}
 	}
 }
