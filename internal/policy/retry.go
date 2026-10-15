@@ -150,13 +150,27 @@ var (
 	retryAfterDuration = regexp.MustCompile(`(?i)(?:retry|try again|wait)\s+(?:in|after)?\s*(\d+(?:\.\d+)?)\s*(seconds?|secs?|s\b|minutes?|mins?|m\b|hours?|hrs?|h\b)`)
 )
 
+// maxRetryAfter is the longest hint ParseRetryAfter will hand back. Hints are
+// honored verbatim as sleep time by the unattended `run --loop` worker, so a
+// provider line like "Retry-After: 86400" would park it for a day with nothing
+// but one printf to show for it - indistinguishable from a hang. One hour is
+// the cap because a genuine exhausted allowance is classified separately as
+// FailureAccountQuota (WaitQuotaReset, no polling); what stays in
+// FailureRateLimit is better served by the backoff ladder, which is cheap and
+// reports every attempt. Inclusive: exactly one hour is still a short wait.
+const maxRetryAfter = time.Hour
+
 // ParseRetryAfter extracts a short-wait hint from a provider error message:
 // an HTTP Retry-After value (seconds) or phrases like "retry in 30 seconds"
-// and "try again in 2 minutes". It returns nil when no hint is present so the
-// caller falls back to the backoff ladder.
+// and "try again in 2 minutes". It returns nil when no hint is present, or
+// when the hint exceeds maxRetryAfter, so the caller falls back to the backoff
+// ladder.
 func ParseRetryAfter(message string) *time.Duration {
 	if match := retryAfterHeader.FindStringSubmatch(message); match != nil {
-		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 {
+		// Judge the seconds before scaling them: int64 wraps around on the
+		// multiplication, which would turn an oversized hint negative and make
+		// it indistinguishable from a malformed one.
+		if seconds, err := strconv.Atoi(match[1]); err == nil && seconds > 0 && seconds <= int(maxRetryAfter/time.Second) {
 			value := time.Duration(seconds) * time.Second
 			return &value
 		}
@@ -175,6 +189,12 @@ func ParseRetryAfter(message string) *time.Duration {
 		unit = time.Minute
 	case 'h':
 		unit = time.Hour
+	}
+	// Still float64 here, so the comparison answers for amounts that time.Duration
+	// cannot represent at all - that conversion is undefined and lands on
+	// MinInt64 on amd64 but MaxInt64 (a positive ~292 years) on arm64.
+	if amount*float64(unit) > float64(maxRetryAfter) {
+		return nil
 	}
 	value := time.Duration(amount * float64(unit))
 	return &value
