@@ -163,7 +163,7 @@
       <div class="nav-actions">
         <!-- Language Switcher -->
         <div class="lang-switch" role="group" aria-label="Language selection">
-          <button class="lang-btn active" data-lang="ko">Enterprise Telemetry &amp; System Platform</button>
+          <button class="lang-btn active" data-lang="ko">한</button>
           <button class="lang-btn" data-lang="en">EN</button>
         </div>
 
@@ -550,10 +550,10 @@
               <span class="cli-step-badge">STEP 1</span>
               <h3 data-i18n="cli_1_title">1. Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</h3>
             </div>
-            <pre class="cli-code"><code><span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform (Git, CLI, Enterprise Telemetry &amp; System Platform)</span>
+            <pre class="cli-code"><code><span class="term-comment"># Verify the environment (Git, CLI, permissions)</span>
 goalforge doctor
 
-<span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform (Enterprise Telemetry &amp; System Platform, Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform)</span>
+<span class="term-comment"># Initialize the project (worktree, auto-commit)</span>
 goalforge project init --name demo \
   --provider claude --model haiku \
   --worktrees --auto-commit \
@@ -565,12 +565,12 @@ goalforge project init --name demo \
               <span class="cli-step-badge">STEP 2</span>
               <h3 data-i18n="cli_2_title">2. Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</h3>
             </div>
-            <pre class="cli-code"><code><span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</span>
+            <pre class="cli-code"><code><span class="term-comment"># Create a goal for the version</span>
 goalforge goal set --title "Ship API" \
   --objective "Implement REST endpoint" \
   --criterion build_passed=true
 
-<span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</span>
+<span class="term-comment"># Add a deterministic verification gate</span>
 goalforge verify gate add \
   --type build_passed \
   --command-json '["go","test","./..."]'</code></pre>
@@ -581,11 +581,11 @@ goalforge verify gate add \
               <span class="cli-step-badge">STEP 3</span>
               <h3 data-i18n="cli_3_title">3. Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Discovery & Enterprise Telemetry &amp; System Platform</h3>
             </div>
-            <pre class="cli-code"><code><span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform & Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</span>
+            <pre class="cli-code"><code><span class="term-comment"># Discover tasks &amp; score their value</span>
 goalforge audit
 goalforge ideas
 
-<span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform (QuotaEnterprise Telemetry &amp; System Platform)</span>
+<span class="term-comment"># Continuous autonomous run (until quota)</span>
 goalforge run --until-quota --max-runs 50
 goalforge worker --once</code></pre>
           </div>
@@ -595,11 +595,11 @@ goalforge worker --once</code></pre>
               <span class="cli-step-badge">STEP 4</span>
               <h3 data-i18n="cli_4_title">4. Enterprise Telemetry &amp; System Platform, Enterprise Telemetry &amp; System Platform & Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</h3>
             </div>
-            <pre class="cli-code"><code><span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</span>
+            <pre class="cli-code"><code><span class="term-comment"># Request merge approval</span>
 goalforge approval request \
   --action merge-branch --reason "Gate passed"
 
-<span class="term-comment"># Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform Enterprise Telemetry &amp; System Platform</span>
+<span class="term-comment"># Merge to the main branch, or roll back</span>
 goalforge merge --work-item WORK-101
 goalforge rollback --work-item WORK-101</code></pre>
           </div>
